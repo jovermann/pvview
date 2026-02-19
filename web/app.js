@@ -1,7 +1,7 @@
 (() => {
   const grid = GridStack.init({
     cellHeight: 110,
-    margin: 8,
+    margin: 4,
     minRow: 1,
     float: true,
   }, document.getElementById('dashboard'));
