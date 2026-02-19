@@ -293,6 +293,8 @@
       },
       xAxis: {
         type: 'time',
+        min: start,
+        max: end,
         axisLine: { lineStyle: { color: '#4d5b70' } },
         splitLine: { lineStyle: { color: '#2b3544' } },
       },
