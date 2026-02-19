@@ -61,6 +61,42 @@
     });
   }
 
+  function clearPresetSelection() {
+    document.querySelectorAll('.preset').forEach((btn) => {
+      btn.classList.remove('active');
+    });
+  }
+
+  function shiftRangeWindow(direction) {
+    const { start, end } = getRange();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return;
+    }
+    const shift = Math.floor((end - start) / 2);
+    const delta = direction < 0 ? -shift : shift;
+    startInput.value = toDatetimeLocalValue(start + delta);
+    endInput.value = toDatetimeLocalValue(end + delta);
+    activePreset = null;
+    clearPresetSelection();
+    refreshAllCharts();
+  }
+
+  function zoomRangeWindow(zoomFactor) {
+    const { start, end } = getRange();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return;
+    }
+    const center = (start + end) / 2;
+    const half = ((end - start) / 2) * zoomFactor;
+    const minHalf = 1000; // clamp to 1s minimum window
+    const clampedHalf = Math.max(minHalf, half);
+    startInput.value = toDatetimeLocalValue(center - clampedHalf);
+    endInput.value = toDatetimeLocalValue(center + clampedHalf);
+    activePreset = null;
+    clearPresetSelection();
+    refreshAllCharts();
+  }
+
   function refreshAllCharts() {
     charts.forEach((_, id) => refreshChart(id).catch((err) => console.error(err)));
   }
@@ -113,7 +149,7 @@
         <div class="panel-actions">
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="icon-btn" data-action="refresh" data-id="${id}">Refresh</button>
-          <button class="icon-btn danger" data-action="remove" data-id="${id}">Remove</button>
+          <button class="icon-btn danger" data-action="remove" data-id="${id}" title="Close">×</button>
         </div>
       </div>
       <div class="chart" id="chart-${id}"></div>
@@ -176,8 +212,10 @@
       series: seriesResponses.map((s) => ({
         name: s.name,
         type: 'line',
-        showSymbol: false,
-        smooth: false,
+        showSymbol: true,
+        symbolSize: 3,
+        smooth: 0,
+        lineStyle: { width: 1 },
         emphasis: { focus: 'series' },
         data: s.points,
       })),
@@ -270,6 +308,26 @@
       activePreset = target.dataset.range || null;
       setRangeByPreset(target.dataset.range);
       refreshAllCharts();
+      return;
+    }
+
+    if (target.id === 'pageBack') {
+      shiftRangeWindow(-1);
+      return;
+    }
+
+    if (target.id === 'zoomIn') {
+      zoomRangeWindow(0.5);
+      return;
+    }
+
+    if (target.id === 'zoomOut') {
+      zoomRangeWindow(2);
+      return;
+    }
+
+    if (target.id === 'pageForward') {
+      shiftRangeWindow(1);
       return;
     }
 
