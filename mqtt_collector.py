@@ -201,8 +201,8 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             entry_bytes = raw[entry_start:offset]
             if stream is not None and verbose:
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
-                    f"(value8 ch={channel_id} format=0x{format_id:02x})\n"
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"(value ch={channel_id} format=0x{format_id:02x})\n"
                 )
             result._append(series_name, current_ts, value)
             if stream is not None:
@@ -230,8 +230,8 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             entry_bytes = raw[entry_start:offset]
             if stream is not None and verbose:
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
-                    f"(value16 ch={channel_id} format=0x{format_id:02x})\n"
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"(value ch16={channel_id} format=0x{format_id:02x})\n"
                 )
             result._append(series_name, current_ts, value)
             if stream is not None:
@@ -253,7 +253,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
                     f"(ts_abs={current_ts})\n"
                 )
             continue
@@ -267,7 +267,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
                     f"(ts_rel8=+{rel} -> {current_ts})\n"
                 )
             continue
@@ -281,7 +281,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
                     f"(ts_rel16=+{rel} -> {current_ts})\n"
                 )
             continue
@@ -293,7 +293,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
                     f"(ts_rel24=+{rel} -> {current_ts})\n"
                 )
             continue
@@ -307,7 +307,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
                     f"(ts_rel32=+{rel} -> {current_ts})\n"
                 )
             continue
@@ -326,8 +326,8 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
-                    f"(def8 ch={channel_id} format=0x{format_id:02x} name={series_name!r})\n"
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"(def ch8={channel_id} format=0x{format_id:02x} name={series_name!r})\n"
                 )
             continue
 
@@ -345,15 +345,15 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
                 stream.write(
-                    f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
-                    f"(def16 ch={channel_id} format=0x{format_id:02x} name={series_name!r})\n"
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"(def ch16={channel_id} format=0x{format_id:02x} name={series_name!r})\n"
                 )
             continue
 
         if entry_type == ENTRY_TYPE_EOF:
             if stream is not None and verbose:
                 entry_bytes = raw[entry_start:offset]
-                stream.write(f"  bytes @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} (eof)\n")
+                stream.write(f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} (eof)\n")
             break
 
         raise ValueError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
