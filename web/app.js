@@ -109,6 +109,43 @@
     charts.forEach((_, id) => refreshChart(id).catch((err) => console.error(err)));
   }
 
+  function commonSeriesPrefix(seriesNames) {
+    if (!Array.isArray(seriesNames) || seriesNames.length === 0) return '';
+    const split = seriesNames.map((s) => String(s).split('/'));
+    let i = 0;
+    while (true) {
+      const token = split[0][i];
+      if (token === undefined) break;
+      for (let j = 1; j < split.length; j += 1) {
+        if (split[j][i] !== token) {
+          return split[0].slice(0, i).join('/') + (i > 0 ? '/' : '');
+        }
+      }
+      i += 1;
+    }
+    return split[0].join('/') + '/';
+  }
+
+  function compactSeriesLabel(name, prefix) {
+    if (!prefix) return name;
+    if (!name.startsWith(prefix)) return name;
+    const trimmed = name.slice(prefix.length);
+    return trimmed.length ? trimmed : name;
+  }
+
+  function displayPrefixForSeries(seriesNames) {
+    if (!Array.isArray(seriesNames) || seriesNames.length === 0) return '';
+    if (seriesNames.length === 1) {
+      const name = String(seriesNames[0]);
+      const slash = name.indexOf('/');
+      if (slash > 0) {
+        return name.slice(0, slash + 1);
+      }
+      return '';
+    }
+    return commonSeriesPrefix(seriesNames);
+  }
+
   function breakLongGaps(points, gapMs) {
     if (!Array.isArray(points) || points.length <= 1) {
       return points;
@@ -190,7 +227,10 @@
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
     if (!titleEl || !c) return;
-    titleEl.textContent = c.series.length ? c.series.join(', ') : `Chart ${id}`;
+    const prefix = displayPrefixForSeries(c.series);
+    titleEl.textContent = c.series.length
+      ? c.series.map((s) => compactSeriesLabel(s, prefix)).join(', ')
+      : `Chart ${id}`;
   }
 
   async function refreshChart(id) {
@@ -207,6 +247,7 @@
     }
 
     const maxEvents = 1200;
+    const prefix = displayPrefixForSeries(cfg.series);
     const seriesResponses = await Promise.all(cfg.series.map(async (name) => {
       const q = new URLSearchParams({
         series: name,
@@ -219,12 +260,17 @@
         if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, p.value];
         return [p.timestamp, p.avg];
       });
-      return { name, points: breakLongGaps(points, 3600000), downsampled: !!data.downsampled };
+      return {
+        name,
+        displayName: compactSeriesLabel(name, prefix),
+        points: breakLongGaps(points, 3600000),
+        downsampled: !!data.downsampled,
+      };
     }));
 
     const yAxes = seriesResponses.map((s, i) => ({
       type: 'value',
-      name: s.name,
+      name: s.displayName,
       position: (i % 2 === 0) ? 'left' : 'right',
       offset: Math.floor(i / 2) * 52,
       alignTicks: true,
@@ -252,7 +298,7 @@
       },
       yAxis: yAxes,
       series: seriesResponses.map((s, i) => ({
-        name: s.name,
+        name: s.displayName,
         type: 'line',
         yAxisIndex: i,
         showSymbol: !!cfg.showSymbols,
