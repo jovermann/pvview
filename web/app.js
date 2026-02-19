@@ -155,7 +155,10 @@
         <div class="panel-title" id="title-${id}">Chart ${id}</div>
         <div class="panel-actions">
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
-          <button class="icon-btn" data-action="refresh" data-id="${id}">Refresh</button>
+          <label class="icon-toggle" title="Show/hide dots">
+            <input type="checkbox" data-action="symbols" data-id="${id}" />
+            <span>Dots</span>
+          </label>
           <button class="icon-btn danger" data-action="remove" data-id="${id}" title="Close">×</button>
         </div>
       </div>
@@ -219,8 +222,8 @@
       series: seriesResponses.map((s) => ({
         name: s.name,
         type: 'line',
-        showSymbol: true,
-        symbolSize: 3,
+        showSymbol: !!cfg.showSymbols,
+        symbolSize: 1,
         smooth: 0,
         lineStyle: { width: 1 },
         emphasis: { focus: 'series' },
@@ -247,6 +250,7 @@
       node,
       instance,
       series: [...initialSeries],
+      showSymbols: false,
     });
 
     updateTitle(id);
@@ -353,15 +357,21 @@
       return;
     }
 
-    if (target.dataset.action === 'refresh') {
-      refreshChart(target.dataset.id).catch((err) => console.error(err));
-      return;
-    }
-
     if (target.dataset.action === 'series') {
       openSeriesDialog(target.dataset.id).catch((err) => console.error(err));
       return;
     }
+  });
+
+  document.addEventListener('change', (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.dataset.action !== 'symbols') return;
+    const id = target.dataset.id;
+    const c = charts.get(id);
+    if (!c) return;
+    c.showSymbols = target.checked;
+    refreshChart(id).catch((err) => console.error(err));
   });
 
   grid.on('resizestop', () => {

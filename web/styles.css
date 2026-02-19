@@ -120,6 +120,23 @@ main { padding: 4px; }
 
 .icon-btn.danger { color: #ffb4b4; }
 
+.icon-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #222a36;
+  color: var(--text);
+  font-size: 12px;
+  user-select: none;
+}
+
+.icon-toggle input {
+  margin: 0;
+}
+
 .chart {
   flex: 1;
   min-height: 180px;
