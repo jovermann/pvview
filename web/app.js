@@ -19,6 +19,7 @@
   const seriesSearch = document.getElementById('seriesSearch');
   let activePreset = '1d';
   let autoRefreshTimer = null;
+  let activeSeriesSelection = null;
 
   function nowMs() {
     return Date.now();
@@ -271,13 +272,13 @@
     const c = charts.get(id);
     if (!c) return;
     const catalog = await fetchSeriesCatalog();
+    activeSeriesSelection = new Set(c.series);
 
     function renderList(filter = '') {
-      const selected = new Set(c.series);
       const filtered = catalog.filter((s) => s.toLowerCase().includes(filter.toLowerCase()));
       seriesList.innerHTML = filtered.map((name) => `
         <label class="series-item">
-          <input type="checkbox" value="${name}" ${selected.has(name) ? 'checked' : ''} />
+          <input type="checkbox" value="${name}" ${activeSeriesSelection.has(name) ? 'checked' : ''} />
           <span>${name}</span>
         </label>
       `).join('');
@@ -300,15 +301,32 @@
       dialog.close();
       return;
     }
-    const selected = Array.from(seriesList.querySelectorAll('input[type="checkbox"]:checked')).map((el) => el.value);
-    c.series = selected;
+    c.series = Array.from(activeSeriesSelection || []);
     updateTitle(activeChartId);
     refreshChart(activeChartId).catch((err) => console.error(err));
+    activeSeriesSelection = null;
     dialog.close();
   });
 
   document.getElementById('cancelSeries').addEventListener('click', () => {
+    activeSeriesSelection = null;
     dialog.close();
+  });
+
+  dialog.addEventListener('close', () => {
+    activeSeriesSelection = null;
+  });
+
+  seriesList.addEventListener('change', (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.type !== 'checkbox') return;
+    if (!activeSeriesSelection) return;
+    if (target.checked) {
+      activeSeriesSelection.add(target.value);
+    } else {
+      activeSeriesSelection.delete(target.value);
+    }
   });
 
   document.addEventListener('click', (ev) => {
