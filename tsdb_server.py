@@ -32,13 +32,14 @@ When downsampled, points are:
 import argparse
 import datetime
 import json
+import mimetypes
 import os
 import struct
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
@@ -263,12 +264,19 @@ def list_series_in_file(path: str) -> List[str]:
     with open(path, "rb") as f:
         raw = f.read()
 
-    if len(raw) < 12 or raw[:8] != TSDB_TAG_BYTES:
+    if len(raw) < 12:
+        return []
+    if raw[:8] != TSDB_TAG_BYTES:
+        return []
+    version = int.from_bytes(raw[8:12], "little")
+    if version != TSDB_VERSION:
         return []
 
     offset = 12
     names: List[str] = []
     seen = set()
+    channel_defs: Dict[int, Tuple[int, str]] = {}
+    current_ts: Optional[int] = None
 
     while offset < len(raw):
         entry_type = raw[offset]
@@ -276,12 +284,14 @@ def list_series_in_file(path: str) -> List[str]:
 
         if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
             _ensure_available(raw, offset, 3, "8-bit channel definition")
-            offset += 2
-            name_len = raw[offset]
-            offset += 1
+            channel_id = raw[offset]
+            format_id = raw[offset + 1]
+            name_len = raw[offset + 2]
+            offset += 3
             _ensure_available(raw, offset, name_len, "channel name")
             name = raw[offset:offset + name_len].decode("utf-8")
             offset += name_len
+            channel_defs[channel_id] = (format_id, name)
             if name not in seen:
                 seen.add(name)
                 names.append(name)
@@ -289,42 +299,67 @@ def list_series_in_file(path: str) -> List[str]:
 
         if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
             _ensure_available(raw, offset, 4, "16-bit channel definition")
-            offset += 3
-            name_len = raw[offset]
-            offset += 1
+            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+            format_id = raw[offset + 2]
+            name_len = raw[offset + 3]
+            offset += 4
             _ensure_available(raw, offset, name_len, "channel name")
             name = raw[offset:offset + name_len].decode("utf-8")
             offset += name_len
+            channel_defs[channel_id] = (format_id, name)
             if name not in seen:
                 seen.add(name)
                 names.append(name)
             continue
 
         if entry_type <= 0xEF:
-            # Need channel format to know value size, so stop scanning after definitions.
-            break
+            channel_id = entry_type
+            if channel_id not in channel_defs:
+                raise TsdbParseError(f"Undefined channel id {channel_id}")
+            format_id, _series_name = channel_defs[channel_id]
+            _value, offset = _read_format_value(raw, offset, format_id)
+            continue
 
         if entry_type == ENTRY_TYPE_EOF:
             break
 
-        # For timestamps and value16 we can continue with best effort by skipping fixed size entries.
         if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
+            _ensure_available(raw, offset, 8, "absolute timestamp")
+            current_ts = int.from_bytes(raw[offset:offset + 8], "little")
             offset += 8
         elif entry_type == ENTRY_TYPE_TIME_REL_8:
+            _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += raw[offset]
             offset += 1
         elif entry_type == ENTRY_TYPE_TIME_REL_16:
+            _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += int.from_bytes(raw[offset:offset + 2], "little")
             offset += 2
         elif entry_type == ENTRY_TYPE_TIME_REL_24:
-            offset += 3
+            rel, offset = _read_u24(raw, offset)
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += rel
         elif entry_type == ENTRY_TYPE_TIME_REL_32:
+            _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += int.from_bytes(raw[offset:offset + 4], "little")
             offset += 4
         elif entry_type == ENTRY_TYPE_VALUE_16:
-            break
+            _ensure_available(raw, offset, 2, "16-bit channel id")
+            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+            offset += 2
+            if channel_id not in channel_defs:
+                raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
+            format_id, _series_name = channel_defs[channel_id]
+            _value, offset = _read_format_value(raw, offset, format_id)
         else:
-            break
-
-        if offset > len(raw):
-            break
+            raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
 
     return names
 
@@ -444,6 +479,45 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             return None
         return values[0]
 
+    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_static(self, path: str) -> bool:
+        ui_dir = self.server.ui_dir  # type: ignore[attr-defined]
+        if not ui_dir:
+            return False
+
+        rel = ""
+        if path in ("/", "/index.html"):
+            rel = "index.html"
+        elif path.startswith("/static/"):
+            rel = path[len("/static/"):]
+        else:
+            return False
+
+        rel = unquote(rel).lstrip("/")
+        full_path = os.path.abspath(os.path.join(ui_dir, rel))
+        ui_dir_abs = os.path.abspath(ui_dir)
+        if not (full_path == ui_dir_abs or full_path.startswith(ui_dir_abs + os.sep)):
+            status, payload = build_error(400, "bad_request", "Invalid static path")
+            self._send_json(status, payload)
+            return True
+        if not os.path.isfile(full_path):
+            status, payload = build_error(404, "not_found", f"Static file not found: {rel}")
+            self._send_json(status, payload)
+            return True
+
+        with open(full_path, "rb") as f:
+            body = f.read()
+        mime, _ = mimetypes.guess_type(full_path)
+        self._send_bytes(200, body, mime or "application/octet-stream")
+        return True
+
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -458,6 +532,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query, keep_blank_values=False)
 
         try:
+            if self._handle_static(path):
+                return
             if path == "/health":
                 self._send_json(200, {"ok": True})
                 return
@@ -565,9 +641,10 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
 
 class TsdbHttpServer(ThreadingHTTPServer):
-    def __init__(self, server_address: Tuple[str, int], data_dir: str):
+    def __init__(self, server_address: Tuple[str, int], data_dir: str, ui_dir: Optional[str]):
         super().__init__(server_address, TsdbRequestHandler)
         self.data_dir = data_dir
+        self.ui_dir = ui_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -579,20 +656,31 @@ def parse_args() -> argparse.Namespace:
         default=".",
         help="Directory containing TSDB files like data_YYYY-MM-DD.tsdb (default: current dir)",
     )
+    parser.add_argument(
+        "--ui-dir",
+        default=os.path.join(os.path.dirname(__file__), "web"),
+        help="Directory containing frontend assets (default: ./web next to tsdb_server.py)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     data_dir = os.path.abspath(args.data_dir)
+    ui_dir = os.path.abspath(args.ui_dir) if args.ui_dir else None
 
     if not os.path.isdir(data_dir):
         raise SystemExit(f"Data directory not found: {data_dir}")
+    if ui_dir is not None and not os.path.isdir(ui_dir):
+        raise SystemExit(f"UI directory not found: {ui_dir}")
     if not (1 <= args.port <= 65535):
         raise SystemExit("--port must be in range 1..65535")
 
-    httpd = TsdbHttpServer((args.host, args.port), data_dir)
-    print(f"Serving TSDB REST API on http://{args.host}:{args.port} (data_dir={data_dir})")
+    httpd = TsdbHttpServer((args.host, args.port), data_dir, ui_dir)
+    print(
+        f"Serving TSDB REST API on http://{args.host}:{args.port} "
+        f"(data_dir={data_dir}, ui_dir={ui_dir})"
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

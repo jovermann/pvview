@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PV TSDB Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@10.2.0/dist/gridstack.min.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">PV Dashboard</div>
+      <div class="range-controls">
+        <button class="preset" data-range="6h">6h</button>
+        <button class="preset" data-range="12h">12h</button>
+        <button class="preset active" data-range="1d">1d</button>
+        <button class="preset" data-range="2d">2d</button>
+        <button class="preset" data-range="7d">7d</button>
+      </div>
+      <label class="date-field">Start <input id="startTime" type="datetime-local" /></label>
+      <label class="date-field">End <input id="endTime" type="datetime-local" /></label>
+      <button id="applyRange" class="btn">Apply</button>
+      <button id="addChart" class="btn accent">Add Chart</button>
+      <button id="refreshAll" class="btn">Refresh</button>
+    </header>
+
+    <main>
+      <div class="grid-stack" id="dashboard"></div>
+    </main>
+  </div>
+
+  <dialog id="seriesDialog" class="modal">
+    <form method="dialog" class="modal-content" id="seriesForm">
+      <h2>Select Series</h2>
+      <input id="seriesSearch" type="search" placeholder="Filter series..." />
+      <div id="seriesList" class="series-list"></div>
+      <menu>
+        <button id="cancelSeries" type="button" class="btn">Cancel</button>
+        <button id="saveSeries" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="https://cdn.jsdelivr.net/npm/gridstack@10.2.0/dist/gridstack-all.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
