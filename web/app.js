@@ -109,6 +109,24 @@
     charts.forEach((_, id) => refreshChart(id).catch((err) => console.error(err)));
   }
 
+  function breakLongGaps(points, gapMs) {
+    if (!Array.isArray(points) || points.length <= 1) {
+      return points;
+    }
+    const out = [points[0]];
+    for (let i = 1; i < points.length; i += 1) {
+      const prev = points[i - 1];
+      const curr = points[i];
+      const prevTs = Number(prev[0]);
+      const currTs = Number(curr[0]);
+      if (Number.isFinite(prevTs) && Number.isFinite(currTs) && (currTs - prevTs) >= gapMs) {
+        out.push([prevTs + 1, null]);
+      }
+      out.push(curr);
+    }
+    return out;
+  }
+
   function configureAutoRefresh() {
     if (autoRefreshTimer !== null) {
       clearInterval(autoRefreshTimer);
@@ -201,7 +219,7 @@
         if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, p.value];
         return [p.timestamp, p.avg];
       });
-      return { name, points, downsampled: !!data.downsampled };
+      return { name, points: breakLongGaps(points, 3600000), downsampled: !!data.downsampled };
     }));
 
     const yAxes = seriesResponses.map((s, i) => ({
