@@ -227,7 +227,7 @@
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
     if (!titleEl || !c) return;
-    titleEl.textContent = `Chart ${id}`;
+    titleEl.textContent = c.label || `Chart ${id}`;
   }
 
   async function refreshChart(id) {
@@ -310,13 +310,13 @@
     }, true);
   }
 
-  function addChart(initialSeries = []) {
+  function addChart(initialSeries = [], options = {}) {
     chartCounter += 1;
     const id = String(chartCounter);
 
     const widgetEl = document.createElement('div');
     widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
-    const node = grid.addWidget(widgetEl, { w: 6, h: 3 });
+    const node = grid.addWidget(widgetEl, { w: options.w || 6, h: options.h || 3 });
 
     const panel = createPanelDom(id);
     node.querySelector('.grid-stack-item-content').appendChild(panel);
@@ -329,6 +329,7 @@
       instance,
       series: [...initialSeries],
       showSymbols: false,
+      label: options.label || null,
     });
 
     updateTitle(id);
@@ -342,6 +343,53 @@
     c.instance.dispose();
     grid.removeWidget(c.node);
     charts.delete(id);
+  }
+
+  function clearAllCharts() {
+    for (const id of Array.from(charts.keys())) {
+      removeChart(id);
+    }
+  }
+
+  function sortInverterIds(ids) {
+    return ids.sort((a, b) => {
+      if (a.length !== b.length) return a.length - b.length;
+      return a.localeCompare(b);
+    });
+  }
+
+  async function buildDefaultCharts() {
+    const catalog = await fetchSeriesCatalog();
+    const available = new Set(catalog);
+    clearAllCharts();
+
+    let created = 0;
+    const acSeries = 'solar/ac/power';
+    if (available.has(acSeries)) {
+      addChart([acSeries], { label: 'AC Power', w: 6, h: 3 });
+      created += 1;
+    }
+
+    const inverterIds = new Set();
+    for (const s of catalog) {
+      const m = /^solar\/(\d+)\/0\/(?:power|temperature)$/.exec(s);
+      if (m) inverterIds.add(m[1]);
+    }
+
+    for (const inverterId of sortInverterIds(Array.from(inverterIds))) {
+      const selected = [];
+      const power = `solar/${inverterId}/0/power`;
+      const temp = `solar/${inverterId}/0/temperature`;
+      if (available.has(power)) selected.push(power);
+      if (available.has(temp)) selected.push(temp);
+      if (selected.length === 0) continue;
+      addChart(selected, { label: `INV ${inverterId}`, w: 6, h: 3 });
+      created += 1;
+    }
+
+    if (created === 0) {
+      addChart(['solar/ac/power'], { label: 'AC Power' });
+    }
   }
 
   async function openSeriesDialog(id) {
@@ -505,5 +553,10 @@
 
   setRangeByPreset('2d');
   configureAutoRefresh();
-  addChart(['solar/ac/power']);
+  buildDefaultCharts().catch((err) => {
+    console.error(err);
+    if (charts.size === 0) {
+      addChart(['solar/ac/power'], { label: 'AC Power' });
+    }
+  });
 })();
