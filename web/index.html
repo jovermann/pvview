@@ -18,21 +18,29 @@
         <button id="pageForward" class="btn" title="Shift window right by half range">&gt;</button>
       </div>
       <div class="range-controls">
-        <button class="preset" data-range="15m">15m</button>
-        <button class="preset" data-range="30m">30m</button>
-        <button class="preset" data-range="1h">1h</button>
-        <button class="preset" data-range="2h">2h</button>
-        <button class="preset" data-range="3h">3h</button>
-        <button class="preset" data-range="6h">6h</button>
+        <label class="date-field">Range
+          <select id="rangePreset">
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="2h">2h</option>
+            <option value="3h">3h</option>
+            <option value="6h">6h</option>
+            <option value="12h">12h</option>
+            <option value="1d" selected>1d</option>
+            <option value="2d">2d</option>
+            <option value="3d">3d</option>
+            <option value="4d">4d</option>
+            <option value="7d">7d</option>
+            <option value="14d">14d</option>
+            <option value="21d">21d</option>
+            <option value="28d">28d</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
         <button class="preset" data-range="12h">12h</button>
         <button class="preset active" data-range="1d">1d</button>
         <button class="preset" data-range="2d">2d</button>
-        <button class="preset" data-range="3d">3d</button>
-        <button class="preset" data-range="4d">4d</button>
-        <button class="preset" data-range="7d">7d</button>
-        <button class="preset" data-range="14d">14d</button>
-        <button class="preset" data-range="21d">21d</button>
-        <button class="preset" data-range="28d">28d</button>
       </div>
       <label class="date-field">Start <input id="startTime" type="datetime-local" /></label>
       <label class="date-field">End <input id="endTime" type="datetime-local" /></label>

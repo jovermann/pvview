@@ -12,6 +12,7 @@
 
   const startInput = document.getElementById('startTime');
   const endInput = document.getElementById('endTime');
+  const rangePresetSelect = document.getElementById('rangePreset');
   const autoRefreshSelect = document.getElementById('autoRefresh');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -59,12 +60,18 @@
     document.querySelectorAll('.preset').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.range === rangeKey);
     });
+    if (rangePresetSelect) {
+      rangePresetSelect.value = rangeKey;
+    }
   }
 
   function clearPresetSelection() {
     document.querySelectorAll('.preset').forEach((btn) => {
       btn.classList.remove('active');
     });
+    if (rangePresetSelect) {
+      rangePresetSelect.value = 'custom';
+    }
   }
 
   function shiftRangeWindow(direction) {
@@ -367,10 +374,24 @@
 
   startInput.addEventListener('change', () => {
     activePreset = null;
+    clearPresetSelection();
   });
 
   endInput.addEventListener('change', () => {
     activePreset = null;
+    clearPresetSelection();
+  });
+
+  rangePresetSelect.addEventListener('change', () => {
+    const value = rangePresetSelect.value;
+    if (value === 'custom') {
+      activePreset = null;
+      clearPresetSelection();
+      return;
+    }
+    activePreset = value;
+    setRangeByPreset(value);
+    refreshAllCharts();
   });
 
   autoRefreshSelect.addEventListener('change', () => {
