@@ -204,25 +204,39 @@
       return { name, points, downsampled: !!data.downsampled };
     }));
 
+    const yAxes = seriesResponses.map((s, i) => ({
+      type: 'value',
+      name: s.name,
+      position: (i % 2 === 0) ? 'left' : 'right',
+      offset: Math.floor(i / 2) * 52,
+      alignTicks: true,
+      axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
+      axisLabel: { color: '#aebbc9' },
+      splitLine: { show: i === 0, lineStyle: { color: '#2b3544' } },
+      nameTextStyle: { color: '#aebbc9', fontSize: 10 },
+    }));
+
     cfg.instance.setOption({
       backgroundColor: 'transparent',
       animation: false,
       legend: { top: 4, textStyle: { color: '#c6d2e0' } },
       tooltip: { trigger: 'axis' },
-      grid: { left: 48, right: 18, top: 32, bottom: 30 },
+      grid: {
+        left: 52 + Math.floor((seriesResponses.length + 1) / 2) * 52,
+        right: 18 + Math.floor(seriesResponses.length / 2) * 52,
+        top: 32,
+        bottom: 30,
+      },
       xAxis: {
         type: 'time',
         axisLine: { lineStyle: { color: '#4d5b70' } },
         splitLine: { lineStyle: { color: '#2b3544' } },
       },
-      yAxis: {
-        type: 'value',
-        axisLine: { lineStyle: { color: '#4d5b70' } },
-        splitLine: { lineStyle: { color: '#2b3544' } },
-      },
-      series: seriesResponses.map((s) => ({
+      yAxis: yAxes,
+      series: seriesResponses.map((s, i) => ({
         name: s.name,
         type: 'line',
+        yAxisIndex: i,
         showSymbol: !!cfg.showSymbols,
         symbolSize: 1,
         smooth: 0,
