@@ -47,6 +47,11 @@ body {
   cursor: pointer;
 }
 
+.topbar .btn,
+.topbar .preset {
+  padding: 4px 7px;
+}
+
 .preset.active,
 .btn.accent {
   background: #1a3c61;
