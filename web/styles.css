@@ -120,6 +120,17 @@ main { padding: 4px; }
 
 .icon-btn.danger { color: #ffb4b4; }
 
+.close-gadget {
+  border: none;
+  background: transparent;
+  color: #ffb4b4;
+  padding: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .icon-toggle {
   display: inline-flex;
   align-items: center;

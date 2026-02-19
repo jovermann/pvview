@@ -17,7 +17,7 @@
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
-  let activePreset = '1d';
+  let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
 
@@ -215,7 +215,7 @@
             <input type="checkbox" data-action="symbols" data-id="${id}" />
             <span>Dots</span>
           </label>
-          <button class="icon-btn danger" data-action="remove" data-id="${id}" title="Close">×</button>
+          <button class="close-gadget" data-action="remove" data-id="${id}" title="Close">❎</button>
         </div>
       </div>
       <div class="chart" id="chart-${id}"></div>
@@ -227,10 +227,7 @@
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
     if (!titleEl || !c) return;
-    const prefix = displayPrefixForSeries(c.series);
-    titleEl.textContent = c.series.length
-      ? c.series.map((s) => compactSeriesLabel(s, prefix)).join(', ')
-      : `Chart ${id}`;
+    titleEl.textContent = `Chart ${id}`;
   }
 
   async function refreshChart(id) {
@@ -270,7 +267,7 @@
 
     const yAxes = seriesResponses.map((s, i) => ({
       type: 'value',
-      name: s.displayName,
+      name: '',
       position: (i % 2 === 0) ? 'left' : 'right',
       offset: Math.floor(i / 2) * 52,
       alignTicks: true,
@@ -506,7 +503,7 @@
     configureAutoRefresh();
   });
 
-  setRangeByPreset('1d');
+  setRangeByPreset('2d');
   configureAutoRefresh();
   addChart(['solar/ac/power']);
 })();
