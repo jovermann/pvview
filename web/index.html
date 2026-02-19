@@ -12,15 +12,44 @@
     <header class="topbar">
       <div class="brand">PV Dashboard</div>
       <div class="range-controls">
+        <button class="preset" data-range="15m">15m</button>
+        <button class="preset" data-range="30m">30m</button>
+        <button class="preset" data-range="1h">1h</button>
+        <button class="preset" data-range="2h">2h</button>
+        <button class="preset" data-range="3h">3h</button>
         <button class="preset" data-range="6h">6h</button>
         <button class="preset" data-range="12h">12h</button>
         <button class="preset active" data-range="1d">1d</button>
         <button class="preset" data-range="2d">2d</button>
+        <button class="preset" data-range="3d">3d</button>
+        <button class="preset" data-range="4d">4d</button>
         <button class="preset" data-range="7d">7d</button>
+        <button class="preset" data-range="14d">14d</button>
+        <button class="preset" data-range="21d">21d</button>
+        <button class="preset" data-range="28d">28d</button>
       </div>
       <label class="date-field">Start <input id="startTime" type="datetime-local" /></label>
       <label class="date-field">End <input id="endTime" type="datetime-local" /></label>
-      <button id="applyRange" class="btn">Apply</button>
+      <label class="date-field">Auto
+        <select id="autoRefresh">
+          <option value="0" selected>Off</option>
+          <option value="5000">5s</option>
+          <option value="10000">10s</option>
+          <option value="15000">15s</option>
+          <option value="30000">30s</option>
+          <option value="60000">1m</option>
+          <option value="120000">2m</option>
+          <option value="300000">5m</option>
+          <option value="600000">10m</option>
+          <option value="900000">15m</option>
+          <option value="1800000">30m</option>
+          <option value="3600000">1h</option>
+          <option value="7200000">2h</option>
+          <option value="10800000">3h</option>
+          <option value="21600000">6h</option>
+          <option value="86400000">1d</option>
+        </select>
+      </label>
       <button id="addChart" class="btn accent">Add Chart</button>
       <button id="refreshAll" class="btn">Refresh</button>
     </header>

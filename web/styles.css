@@ -61,7 +61,7 @@ body {
   gap: 6px;
 }
 
-input[type="datetime-local"], input[type="search"] {
+input[type="datetime-local"], input[type="search"], select {
   background: #10151d;
   color: var(--text);
   border: 1px solid var(--border);

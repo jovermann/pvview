@@ -12,9 +12,12 @@
 
   const startInput = document.getElementById('startTime');
   const endInput = document.getElementById('endTime');
+  const autoRefreshSelect = document.getElementById('autoRefresh');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
+  let activePreset = '1d';
+  let autoRefreshTimer = null;
 
   function nowMs() {
     return Date.now();
@@ -32,7 +35,23 @@
   }
 
   function setRangeByPreset(rangeKey) {
-    const hours = { '6h': 6, '12h': 12, '1d': 24, '2d': 48, '7d': 168 }[rangeKey] || 24;
+    const hours = {
+      '15m': 0.25,
+      '30m': 0.5,
+      '1h': 1,
+      '2h': 2,
+      '3h': 3,
+      '6h': 6,
+      '12h': 12,
+      '1d': 24,
+      '2d': 48,
+      '3d': 72,
+      '4d': 96,
+      '7d': 168,
+      '14d': 336,
+      '21d': 504,
+      '28d': 672,
+    }[rangeKey] || 24;
     const end = nowMs();
     const start = end - hours * 3600 * 1000;
     startInput.value = toDatetimeLocalValue(start);
@@ -40,6 +59,27 @@
     document.querySelectorAll('.preset').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.range === rangeKey);
     });
+  }
+
+  function refreshAllCharts() {
+    charts.forEach((_, id) => refreshChart(id).catch((err) => console.error(err)));
+  }
+
+  function configureAutoRefresh() {
+    if (autoRefreshTimer !== null) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+    const intervalMs = Number(autoRefreshSelect.value || 0);
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return;
+    }
+    autoRefreshTimer = setInterval(() => {
+      if (activePreset) {
+        setRangeByPreset(activePreset);
+      }
+      refreshAllCharts();
+    }, intervalMs);
   }
 
   function getRange() {
@@ -227,12 +267,14 @@
     if (!(target instanceof HTMLElement)) return;
 
     if (target.matches('.preset')) {
+      activePreset = target.dataset.range || null;
       setRangeByPreset(target.dataset.range);
+      refreshAllCharts();
       return;
     }
 
-    if (target.id === 'applyRange' || target.id === 'refreshAll') {
-      charts.forEach((_, id) => refreshChart(id).catch((err) => console.error(err)));
+    if (target.id === 'refreshAll') {
+      refreshAllCharts();
       return;
     }
 
@@ -265,6 +307,19 @@
     charts.forEach((c) => c.instance.resize());
   });
 
+  startInput.addEventListener('change', () => {
+    activePreset = null;
+  });
+
+  endInput.addEventListener('change', () => {
+    activePreset = null;
+  });
+
+  autoRefreshSelect.addEventListener('change', () => {
+    configureAutoRefresh();
+  });
+
   setRangeByPreset('1d');
+  configureAutoRefresh();
   addChart(['solar/ac/power']);
 })();
