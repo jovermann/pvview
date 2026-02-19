@@ -1,0 +1,606 @@
+#!/usr/bin/env python3
+"""Simple TSDB REST server using built-in Python modules only.
+
+API:
+- GET /health
+- GET /series?start=<ts>&end=<ts>
+- GET /events?series=<name>&start=<ts>&end=<ts>&maxEvents=<n>
+
+Time parameters support either:
+- Unix milliseconds (e.g. 1707000000000)
+- ISO-8601 datetime (e.g. 2026-02-15T11:00:00Z)
+  Naive timestamps are treated as UTC.
+
+Response for /events:
+{
+  "series": "...",
+  "start": <ms>,
+  "end": <ms>,
+  "requestedMaxEvents": <n>,
+  "returnedPoints": <n>,
+  "downsampled": <bool>,
+  "points": [...]
+}
+
+When not downsampled, points are:
+  {"timestamp": <ms>, "value": <number|string>}
+When downsampled, points are:
+  {"timestamp": <bucket-center-ms>, "start": <bucket-start-ms>, "end": <bucket-end-ms>,
+   "count": <n>, "min": <x>, "avg": <x>, "max": <x>}
+"""
+
+import argparse
+import datetime
+import json
+import os
+import struct
+from dataclasses import dataclass
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
+
+TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
+TSDB_VERSION = 1
+
+ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
+ENTRY_TYPE_TIME_REL_8 = 0xF1
+ENTRY_TYPE_TIME_REL_16 = 0xF2
+ENTRY_TYPE_TIME_REL_24 = 0xF3
+ENTRY_TYPE_TIME_REL_32 = 0xF4
+ENTRY_TYPE_CHANNEL_DEF_8 = 0xF5
+ENTRY_TYPE_CHANNEL_DEF_16 = 0xF6
+ENTRY_TYPE_EOF = 0xFE
+ENTRY_TYPE_VALUE_16 = 0xFF
+
+FORMAT_FLOAT = 0x00
+FORMAT_DOUBLE = 0x01
+FORMAT_STRING_U8 = 0x08
+FORMAT_STRING_U16 = 0x09
+FORMAT_STRING_U32 = 0x0A
+FORMAT_STRING_U64 = 0x0B
+
+
+@dataclass
+class Event:
+    timestamp_ms: int
+    value: Any
+
+
+class TsdbParseError(ValueError):
+    pass
+
+
+def _ensure_available(data: bytes, offset: int, size: int, what: str) -> None:
+    if offset + size > len(data):
+        raise TsdbParseError(f"Unexpected EOF while reading {what} at offset {offset}")
+
+
+def _read_u24(data: bytes, offset: int) -> Tuple[int, int]:
+    _ensure_available(data, offset, 3, "uint24")
+    b0 = data[offset]
+    b1 = data[offset + 1]
+    b2 = data[offset + 2]
+    return b0 | (b1 << 8) | (b2 << 16), offset + 3
+
+
+def _read_i24(data: bytes, offset: int) -> Tuple[int, int]:
+    value, offset = _read_u24(data, offset)
+    if value & 0x800000:
+        value -= 1 << 24
+    return value, offset
+
+
+def _read_scalar(data: bytes, offset: int, byte_count: int, signed: bool) -> Tuple[int, int]:
+    if byte_count in (1, 2, 4, 8):
+        _ensure_available(data, offset, byte_count, f"{byte_count * 8}-bit integer")
+        raw = int.from_bytes(data[offset:offset + byte_count], "little", signed=signed)
+        return raw, offset + byte_count
+    if byte_count == 3:
+        return _read_i24(data, offset) if signed else _read_u24(data, offset)
+    raise TsdbParseError(f"Unsupported scalar byte_count={byte_count}")
+
+
+def _read_format_value(data: bytes, offset: int, format_id: int) -> Tuple[Any, int]:
+    if format_id == FORMAT_FLOAT:
+        _ensure_available(data, offset, 4, "float")
+        return struct.unpack_from("<f", data, offset)[0], offset + 4
+    if format_id == FORMAT_DOUBLE:
+        _ensure_available(data, offset, 8, "double")
+        return struct.unpack_from("<d", data, offset)[0], offset + 8
+
+    if format_id in (FORMAT_STRING_U8, FORMAT_STRING_U16, FORMAT_STRING_U32, FORMAT_STRING_U64):
+        len_size = {
+            FORMAT_STRING_U8: 1,
+            FORMAT_STRING_U16: 2,
+            FORMAT_STRING_U32: 4,
+            FORMAT_STRING_U64: 8,
+        }[format_id]
+        _ensure_available(data, offset, len_size, "string length")
+        text_len = int.from_bytes(data[offset:offset + len_size], "little")
+        offset += len_size
+        _ensure_available(data, offset, text_len, "string bytes")
+        return data[offset:offset + text_len].decode("utf-8"), offset + text_len
+
+    hi = (format_id >> 4) & 0xF
+    lo = format_id & 0xF
+    byte_count = {
+        0x1: 1,
+        0x2: 2,
+        0x3: 3,
+        0x4: 4,
+        0x5: 8,
+        0x9: 1,
+        0xA: 2,
+        0xB: 3,
+        0xC: 4,
+        0xD: 8,
+    }.get(hi)
+    if byte_count is None or lo > 3:
+        raise TsdbParseError(f"Unsupported formatId 0x{format_id:02x}")
+
+    signed = hi <= 0x5
+    raw_value, offset = _read_scalar(data, offset, byte_count, signed)
+    scale = {0: 1.0, 1: 10.0, 2: 100.0, 3: 1000.0}[lo]
+    if scale == 1.0:
+        return raw_value, offset
+    return raw_value / scale, offset
+
+
+def read_tsdb_events_for_series(path: str, target_series: str, start_ms: int, end_ms: int) -> List[Event]:
+    with open(path, "rb") as f:
+        raw = f.read()
+
+    if len(raw) < 12:
+        raise TsdbParseError(f"File too small: {path}")
+    if raw[:8] != TSDB_TAG_BYTES:
+        raise TsdbParseError(f"Invalid TSDB tag in {path}")
+    version = int.from_bytes(raw[8:12], "little")
+    if version != TSDB_VERSION:
+        raise TsdbParseError(f"Unsupported TSDB version {version} in {path}")
+
+    channel_defs: Dict[int, Tuple[int, str]] = {}
+    current_ts: Optional[int] = None
+    result: List[Event] = []
+
+    offset = 12
+    while offset < len(raw):
+        entry_type = raw[offset]
+        offset += 1
+
+        if entry_type <= 0xEF:
+            channel_id = entry_type
+            if current_ts is None:
+                raise TsdbParseError("Value entry encountered before timestamp")
+            if channel_id not in channel_defs:
+                raise TsdbParseError(f"Undefined channel id {channel_id}")
+            format_id, series_name = channel_defs[channel_id]
+            value, offset = _read_format_value(raw, offset, format_id)
+            if series_name == target_series and start_ms <= current_ts <= end_ms:
+                result.append(Event(current_ts, value))
+            continue
+
+        if entry_type == ENTRY_TYPE_VALUE_16:
+            _ensure_available(raw, offset, 2, "16-bit channel id")
+            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+            offset += 2
+            if current_ts is None:
+                raise TsdbParseError("16-bit value entry encountered before timestamp")
+            if channel_id not in channel_defs:
+                raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
+            format_id, series_name = channel_defs[channel_id]
+            value, offset = _read_format_value(raw, offset, format_id)
+            if series_name == target_series and start_ms <= current_ts <= end_ms:
+                result.append(Event(current_ts, value))
+            continue
+
+        if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
+            _ensure_available(raw, offset, 8, "absolute timestamp")
+            current_ts = int.from_bytes(raw[offset:offset + 8], "little")
+            offset += 8
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_8:
+            _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += raw[offset]
+            offset += 1
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_16:
+            _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += int.from_bytes(raw[offset:offset + 2], "little")
+            offset += 2
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_24:
+            rel, offset = _read_u24(raw, offset)
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += rel
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_32:
+            _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
+            if current_ts is None:
+                raise TsdbParseError("Relative timestamp before absolute timestamp")
+            current_ts += int.from_bytes(raw[offset:offset + 4], "little")
+            offset += 4
+            continue
+
+        if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
+            _ensure_available(raw, offset, 3, "8-bit channel definition")
+            channel_id = raw[offset]
+            format_id = raw[offset + 1]
+            name_len = raw[offset + 2]
+            offset += 3
+            _ensure_available(raw, offset, name_len, "channel name")
+            series_name = raw[offset:offset + name_len].decode("utf-8")
+            offset += name_len
+            channel_defs[channel_id] = (format_id, series_name)
+            continue
+
+        if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
+            _ensure_available(raw, offset, 4, "16-bit channel definition")
+            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+            format_id = raw[offset + 2]
+            name_len = raw[offset + 3]
+            offset += 4
+            _ensure_available(raw, offset, name_len, "channel name")
+            series_name = raw[offset:offset + name_len].decode("utf-8")
+            offset += name_len
+            channel_defs[channel_id] = (format_id, series_name)
+            continue
+
+        if entry_type == ENTRY_TYPE_EOF:
+            break
+
+        raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
+
+    return result
+
+
+def list_series_in_file(path: str) -> List[str]:
+    with open(path, "rb") as f:
+        raw = f.read()
+
+    if len(raw) < 12 or raw[:8] != TSDB_TAG_BYTES:
+        return []
+
+    offset = 12
+    names: List[str] = []
+    seen = set()
+
+    while offset < len(raw):
+        entry_type = raw[offset]
+        offset += 1
+
+        if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
+            _ensure_available(raw, offset, 3, "8-bit channel definition")
+            offset += 2
+            name_len = raw[offset]
+            offset += 1
+            _ensure_available(raw, offset, name_len, "channel name")
+            name = raw[offset:offset + name_len].decode("utf-8")
+            offset += name_len
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+            continue
+
+        if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
+            _ensure_available(raw, offset, 4, "16-bit channel definition")
+            offset += 3
+            name_len = raw[offset]
+            offset += 1
+            _ensure_available(raw, offset, name_len, "channel name")
+            name = raw[offset:offset + name_len].decode("utf-8")
+            offset += name_len
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+            continue
+
+        if entry_type <= 0xEF:
+            # Need channel format to know value size, so stop scanning after definitions.
+            break
+
+        if entry_type == ENTRY_TYPE_EOF:
+            break
+
+        # For timestamps and value16 we can continue with best effort by skipping fixed size entries.
+        if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
+            offset += 8
+        elif entry_type == ENTRY_TYPE_TIME_REL_8:
+            offset += 1
+        elif entry_type == ENTRY_TYPE_TIME_REL_16:
+            offset += 2
+        elif entry_type == ENTRY_TYPE_TIME_REL_24:
+            offset += 3
+        elif entry_type == ENTRY_TYPE_TIME_REL_32:
+            offset += 4
+        elif entry_type == ENTRY_TYPE_VALUE_16:
+            break
+        else:
+            break
+
+        if offset > len(raw):
+            break
+
+    return names
+
+
+def parse_timestamp(value: str) -> int:
+    value = value.strip()
+    if not value:
+        raise ValueError("timestamp value is empty")
+
+    # Epoch seconds or milliseconds as integer.
+    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+        n = int(value)
+        if abs(n) < 10_000_000_000:
+            return n * 1000
+        return n
+
+    iso = value
+    if iso.endswith("Z"):
+        iso = iso[:-1] + "+00:00"
+    dt = datetime.datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def day_range_utc(start_ms: int, end_ms: int) -> Iterable[datetime.date]:
+    start_day = datetime.datetime.fromtimestamp(start_ms / 1000.0, tz=datetime.timezone.utc).date()
+    end_day = datetime.datetime.fromtimestamp(end_ms / 1000.0, tz=datetime.timezone.utc).date()
+    day = start_day
+    while day <= end_day:
+        yield day
+        day += datetime.timedelta(days=1)
+
+
+def find_candidate_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]:
+    files: List[str] = []
+    for day in day_range_utc(start_ms, end_ms):
+        p = os.path.join(data_dir, f"data_{day.isoformat()}.tsdb")
+        if os.path.isfile(p):
+            files.append(p)
+
+    fallback = os.path.join(data_dir, "data.tsdb")
+    if not files and os.path.isfile(fallback):
+        files.append(fallback)
+
+    return files
+
+
+def downsample_numeric_events(events: List[Event], max_events: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    if max_events <= 0:
+        raise ValueError("maxEvents must be > 0")
+    if len(events) <= max_events:
+        points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
+        return False, points
+
+    if not events:
+        return False, []
+
+    start_ts = events[0].timestamp_ms
+    end_ts = events[-1].timestamp_ms
+    span = max(1, end_ts - start_ts + 1)
+    bucket_width = max(1, (span + max_events - 1) // max_events)
+
+    buckets: List[List[Event]] = [[] for _ in range(max_events)]
+    for e in events:
+        idx = (e.timestamp_ms - start_ts) // bucket_width
+        if idx >= max_events:
+            idx = max_events - 1
+        buckets[idx].append(e)
+
+    points: List[Dict[str, Any]] = []
+    for i, bucket in enumerate(buckets):
+        if not bucket:
+            continue
+        values = [float(ev.value) for ev in bucket]
+        b_start = start_ts + i * bucket_width
+        b_end = min(end_ts, b_start + bucket_width - 1)
+        points.append(
+            {
+                "timestamp": (b_start + b_end) // 2,
+                "start": b_start,
+                "end": b_end,
+                "count": len(bucket),
+                "min": min(values),
+                "avg": sum(values) / len(values),
+                "max": max(values),
+            }
+        )
+
+    return True, points
+
+
+def build_error(status: int, code: str, message: str) -> Tuple[int, Dict[str, Any]]:
+    return status, {"error": {"code": code, "message": message}}
+
+
+class TsdbRequestHandler(BaseHTTPRequestHandler):
+    server_version = "TSDBServer/1.0"
+
+    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _query_param(self, params: Dict[str, List[str]], name: str, required: bool = False) -> Optional[str]:
+        values = params.get(name)
+        if not values:
+            if required:
+                raise ValueError(f"Missing required query parameter: {name}")
+            return None
+        return values[0]
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query, keep_blank_values=False)
+
+        try:
+            if path == "/health":
+                self._send_json(200, {"ok": True})
+                return
+            if path == "/series":
+                self._handle_series(params)
+                return
+            if path == "/events":
+                self._handle_events(params)
+                return
+
+            status, payload = build_error(404, "not_found", f"Unknown endpoint: {path}")
+            self._send_json(status, payload)
+        except ValueError as exc:
+            status, payload = build_error(400, "bad_request", str(exc))
+            self._send_json(status, payload)
+        except TsdbParseError as exc:
+            status, payload = build_error(500, "tsdb_parse_error", str(exc))
+            self._send_json(status, payload)
+        except OSError as exc:
+            status, payload = build_error(500, "io_error", str(exc))
+            self._send_json(status, payload)
+        except Exception as exc:  # safety net
+            status, payload = build_error(500, "internal_error", str(exc))
+            self._send_json(status, payload)
+
+    def _handle_series(self, params: Dict[str, List[str]]) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+
+        start_raw = self._query_param(params, "start")
+        end_raw = self._query_param(params, "end")
+        start_ms = parse_timestamp(start_raw) if start_raw else 0
+        end_ms = parse_timestamp(end_raw) if end_raw else int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+        if end_ms < start_ms:
+            raise ValueError("end must be >= start")
+
+        files = find_candidate_files(data_dir, start_ms, end_ms)
+        names = set()
+        for path in files:
+            for name in list_series_in_file(path):
+                names.add(name)
+
+        self._send_json(
+            200,
+            {
+                "start": start_ms,
+                "end": end_ms,
+                "files": [os.path.basename(p) for p in files],
+                "series": sorted(names),
+            },
+        )
+
+    def _handle_events(self, params: Dict[str, List[str]]) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+
+        series = self._query_param(params, "series", required=True)
+        start_raw = self._query_param(params, "start", required=True)
+        end_raw = self._query_param(params, "end", required=True)
+        max_events_raw = self._query_param(params, "maxEvents", required=True)
+
+        assert series is not None and start_raw is not None and end_raw is not None and max_events_raw is not None
+
+        start_ms = parse_timestamp(start_raw)
+        end_ms = parse_timestamp(end_raw)
+        max_events = int(max_events_raw)
+
+        if end_ms < start_ms:
+            raise ValueError("end must be >= start")
+        if max_events <= 0:
+            raise ValueError("maxEvents must be > 0")
+
+        files = find_candidate_files(data_dir, start_ms, end_ms)
+        events: List[Event] = []
+        for path in files:
+            events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
+
+        events.sort(key=lambda e: e.timestamp_ms)
+
+        all_numeric = all(isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool) for ev in events)
+        if all_numeric:
+            downsampled, points = downsample_numeric_events(events, max_events)
+        else:
+            # Non-numeric series cannot be aggregated with min/avg/max.
+            downsampled = False
+            points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events[:max_events]]
+
+        response = {
+            "series": series,
+            "start": start_ms,
+            "end": end_ms,
+            "requestedMaxEvents": max_events,
+            "returnedPoints": len(points),
+            "downsampled": downsampled,
+            "files": [os.path.basename(p) for p in files],
+            "points": points,
+        }
+
+        if not all_numeric and len(events) > max_events:
+            response["note"] = "Series is non-numeric; returned first maxEvents without min/avg/max aggregation."
+
+        self._send_json(200, response)
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        # Keep plain stderr logging with timestamp from BaseHTTPRequestHandler.
+        super().log_message(fmt, *args)
+
+
+class TsdbHttpServer(ThreadingHTTPServer):
+    def __init__(self, server_address: Tuple[str, int], data_dir: str):
+        super().__init__(server_address, TsdbRequestHandler)
+        self.data_dir = data_dir
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="TSDB REST server")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
+    parser.add_argument(
+        "--data-dir",
+        default=".",
+        help="Directory containing TSDB files like data_YYYY-MM-DD.tsdb (default: current dir)",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    data_dir = os.path.abspath(args.data_dir)
+
+    if not os.path.isdir(data_dir):
+        raise SystemExit(f"Data directory not found: {data_dir}")
+    if not (1 <= args.port <= 65535):
+        raise SystemExit("--port must be in range 1..65535")
+
+    httpd = TsdbHttpServer((args.host, args.port), data_dir)
+    print(f"Serving TSDB REST API on http://{args.host}:{args.port} (data_dir={data_dir})")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
