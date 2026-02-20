@@ -654,6 +654,21 @@
         if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, roundNumeric(p.value)];
         return [p.timestamp, roundNumeric(p.avg)];
       });
+      let legendMax;
+      for (const p of (data.points || [])) {
+        let candidate;
+        if (Object.prototype.hasOwnProperty.call(p, 'max')) {
+          candidate = p.max;
+        } else if (Object.prototype.hasOwnProperty.call(p, 'value')) {
+          candidate = p.value;
+        } else if (Object.prototype.hasOwnProperty.call(p, 'avg')) {
+          candidate = p.avg;
+        }
+        if (typeof candidate !== 'number' || !Number.isFinite(candidate)) continue;
+        if (legendMax === undefined || candidate > legendMax) {
+          legendMax = candidate;
+        }
+      }
       appendConsoleLine(
         `chart ${id} request done series=${name} points=${points.length} downsampled=${!!data.downsampled} `
         + `files=${Array.isArray(data.files) ? data.files.length : 0} elapsed=${Math.round(performance.now() - reqT0)}ms`
@@ -663,6 +678,7 @@
         displayName: compactSeriesLabel(displaySeriesName(name), prefix),
         axisKey: String(name).split('/').pop() || String(name),
         points: breakLongGaps(points, 3600000),
+        legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
         downsampled: !!data.downsampled,
       };
     }));
@@ -676,18 +692,29 @@
       }
     }
     const maxByLegendName = new Map();
+    const curByLegendName = new Map();
+    const curTsByLegendName = new Map();
     for (const s of seriesResponses) {
-      let maxValue;
+      let maxValue = s.legendMax;
+      let curValue;
+      let curTs;
       for (const p of s.points) {
         if (!Array.isArray(p) || p.length < 2) continue;
+        const ts = Number(p[0]);
         const v = p[1];
         if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-        if (maxValue === undefined || v > maxValue) {
-          maxValue = v;
-        }
+        if (maxValue === undefined || v > maxValue) maxValue = v;
+        curValue = v;
+        curTs = ts;
       }
       if (maxValue !== undefined) {
         maxByLegendName.set(s.displayName, maxValue);
+      }
+      if (curValue !== undefined) {
+        curByLegendName.set(s.displayName, curValue);
+      }
+      if (curTs !== undefined && Number.isFinite(curTs)) {
+        curTsByLegendName.set(s.displayName, curTs);
       }
     }
 
@@ -723,8 +750,12 @@
         textStyle: { color: '#c6d2e0' },
         formatter: (name) => {
           const maxValue = maxByLegendName.get(name);
+          const curValue = curByLegendName.get(name);
+          const curTs = curTsByLegendName.get(name);
+          const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
           if (maxValue === undefined) return name;
-          return `${name} (max ${formatTooltipValue(maxValue)})`;
+          if (curValue === undefined || !curFresh) return `${name} (max ${formatTooltipValue(maxValue)})`;
+          return `${name} (cur ${formatTooltipValue(curValue)}, max ${formatTooltipValue(maxValue)})`;
         },
       },
       tooltip: { trigger: 'axis' },
