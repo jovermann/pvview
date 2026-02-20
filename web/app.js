@@ -326,6 +326,20 @@
     return Math.round(n * 10) / 10;
   }
 
+  function roundNumeric(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return value;
+    return Math.round(value * 1_000_000) / 1_000_000;
+  }
+
+  function formatTooltipValue(value) {
+    if (value === null || value === undefined) return '-';
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const rounded = roundNumeric(value);
+      return Number(rounded).toString();
+    }
+    return String(value);
+  }
+
   function rgbaFromHex(hex, alpha) {
     const s = String(hex || '').trim();
     const m = /^#([0-9a-fA-F]{6})$/.exec(s);
@@ -637,8 +651,8 @@
       appendConsoleLine(`chart ${id} request start series=${name}`);
       const data = await apiJson(`/events?${q}`);
       const points = (data.points || []).map((p) => {
-        if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, p.value];
-        return [p.timestamp, p.avg];
+        if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, roundNumeric(p.value)];
+        return [p.timestamp, roundNumeric(p.avg)];
       });
       appendConsoleLine(
         `chart ${id} request done series=${name} points=${points.length} downsampled=${!!data.downsampled} `
@@ -689,6 +703,7 @@
       animation: false,
       legend: { orient: 'vertical', left: gridLeft, top: gridTop, textStyle: { color: '#c6d2e0' } },
       tooltip: { trigger: 'axis' },
+      axisPointer: { type: 'cross', snap: false },
       grid: {
         left: gridLeft,
         right: gridRight,
@@ -723,6 +738,7 @@
           itemStyle: { color: lineColor },
           lineStyle: { width: 1, color: lineColor },
           areaStyle: seriesAreaStyle,
+          tooltip: { valueFormatter: formatTooltipValue },
           emphasis: { focus: 'series' },
           data: s.points,
         };

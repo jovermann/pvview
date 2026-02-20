@@ -85,6 +85,7 @@ class CachedTsdbFile:
     parsed_offset: int
     current_ts: Optional[int]
     channel_defs: Dict[int, Tuple[int, str]]
+    series_format_ids: Dict[str, int]
     series_events: Dict[str, List[Event]]
     ended_with_eof: bool
 
@@ -253,6 +254,7 @@ def _parse_tsdb_chunk_into_cache(
                 series_name = raw[offset:offset + name_len].decode("utf-8")
                 offset += name_len
                 cache.channel_defs[channel_id] = (format_id, series_name)
+                cache.series_format_ids.setdefault(series_name, format_id)
                 continue
 
             if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
@@ -265,6 +267,7 @@ def _parse_tsdb_chunk_into_cache(
                 series_name = raw[offset:offset + name_len].decode("utf-8")
                 offset += name_len
                 cache.channel_defs[channel_id] = (format_id, series_name)
+                cache.series_format_ids.setdefault(series_name, format_id)
                 continue
 
             if entry_type == ENTRY_TYPE_EOF:
@@ -299,6 +302,7 @@ def _build_cache_from_scratch(path: str, st: os.stat_result) -> CachedTsdbFile:
         parsed_offset=12,
         current_ts=None,
         channel_defs={},
+        series_format_ids={},
         series_events={},
         ended_with_eof=False,
     )
@@ -350,6 +354,23 @@ def _get_cached_tsdb_file(path: str) -> CachedTsdbFile:
         cache = _refresh_cache_incremental(path, st, cache)
         _TSDB_FILE_CACHE[path] = cache
         return cache
+
+
+def get_series_format_id_in_file(path: str, series_name: str) -> Optional[int]:
+    cache = _get_cached_tsdb_file(path)
+    return cache.series_format_ids.get(series_name)
+
+
+def decimal_places_from_format_id(format_id: Optional[int]) -> int:
+    if format_id is None:
+        return 3
+    if format_id in (FORMAT_FLOAT, FORMAT_DOUBLE):
+        return 3
+    lo = format_id & 0xF
+    hi = (format_id >> 4) & 0xF
+    if hi in {0x1, 0x2, 0x3, 0x4, 0x5, 0x9, 0xA, 0xB, 0xC, 0xD} and 0 <= lo <= 3:
+        return lo
+    return 3
 
 
 def read_tsdb_events_for_series(path: str, target_series: str, start_ms: int, end_ms: int) -> List[Event]:
@@ -416,7 +437,13 @@ def find_candidate_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]
     return files
 
 
-def downsample_numeric_events(events: List[Event], max_events: int) -> Tuple[bool, List[Dict[str, Any]]]:
+def downsample_numeric_events(
+    events: List[Event],
+    max_events: int,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    decimal_places: Optional[int] = None,
+) -> Tuple[bool, List[Dict[str, Any]]]:
     if max_events <= 0:
         raise ValueError("maxEvents must be > 0")
     if len(events) <= max_events:
@@ -426,14 +453,18 @@ def downsample_numeric_events(events: List[Event], max_events: int) -> Tuple[boo
     if not events:
         return False, []
 
-    start_ts = events[0].timestamp_ms
-    end_ts = events[-1].timestamp_ms
+    start_ts = events[0].timestamp_ms if start_ms is None else start_ms
+    end_ts = events[-1].timestamp_ms if end_ms is None else end_ms
+    if end_ts < start_ts:
+        end_ts = start_ts
     span = max(1, end_ts - start_ts + 1)
     bucket_width = max(1, (span + max_events - 1) // max_events)
 
     buckets: List[List[Event]] = [[] for _ in range(max_events)]
     for e in events:
         idx = (e.timestamp_ms - start_ts) // bucket_width
+        if idx < 0:
+            idx = 0
         if idx >= max_events:
             idx = max_events - 1
         buckets[idx].append(e)
@@ -451,9 +482,9 @@ def downsample_numeric_events(events: List[Event], max_events: int) -> Tuple[boo
                 "start": b_start,
                 "end": b_end,
                 "count": len(bucket),
-                "min": min(values),
-                "avg": sum(values) / len(values),
-                "max": max(values),
+                "min": round(min(values), decimal_places) if decimal_places is not None else min(values),
+                "avg": round(sum(values) / len(values), decimal_places) if decimal_places is not None else (sum(values) / len(values)),
+                "max": round(max(values), decimal_places) if decimal_places is not None else max(values),
             }
         )
 
@@ -705,14 +736,23 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
+        max_decimal_places = 0
         for path in files:
             events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
+            fmt = get_series_format_id_in_file(path, series)
+            max_decimal_places = max(max_decimal_places, decimal_places_from_format_id(fmt))
 
         events.sort(key=lambda e: e.timestamp_ms)
 
         all_numeric = all(isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool) for ev in events)
         if all_numeric:
-            downsampled, points = downsample_numeric_events(events, max_events)
+            downsampled, points = downsample_numeric_events(
+                events,
+                max_events,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                decimal_places=max_decimal_places,
+            )
         else:
             # Non-numeric series cannot be aggregated with min/avg/max.
             downsampled = False
