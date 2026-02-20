@@ -14,12 +14,16 @@
   const endInput = document.getElementById('endTime');
   const rangePresetSelect = document.getElementById('rangePreset');
   const autoRefreshSelect = document.getElementById('autoRefresh');
+  const dashboardSelect = document.getElementById('dashboardSelect');
+  const dashboardNameInput = document.getElementById('dashboardName');
+  const saveDashboardBtn = document.getElementById('saveDashboard');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
+  const savedDashboardNames = new Set();
   const inverterNames = new Map();
   const inverterNameRequests = new Map();
 
@@ -189,8 +193,8 @@
     return { start, end };
   }
 
-  async function apiJson(path) {
-    const res = await fetch(path);
+  async function apiJson(path, options = {}) {
+    const res = await fetch(path, options);
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`${res.status}: ${body}`);
@@ -203,6 +207,33 @@
     const q = new URLSearchParams({ start: String(start), end: String(end) });
     const data = await apiJson(`/series?${q}`);
     return data.series || [];
+  }
+
+  function updateDashboardDatalist() {
+    const options = ['Default', ...Array.from(savedDashboardNames).sort()];
+    const current = dashboardSelect.value || 'Default';
+    dashboardSelect.innerHTML = options.map((name) => `<option value="${name}">${name}</option>`).join('');
+    if (options.includes(current)) {
+      dashboardSelect.value = current;
+    } else {
+      dashboardSelect.value = 'Default';
+    }
+  }
+
+  async function refreshDashboardNames() {
+    try {
+      const data = await apiJson('/dashboards');
+      savedDashboardNames.clear();
+      for (const name of (data.dashboards || [])) {
+        if (typeof name === 'string' && name && name !== 'Default') {
+          savedDashboardNames.add(name);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      savedDashboardNames.clear();
+    }
+    updateDashboardDatalist();
   }
 
   function inverterIdFromSeries(seriesName) {
@@ -383,7 +414,12 @@
 
     const widgetEl = document.createElement('div');
     widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
-    const node = grid.addWidget(widgetEl, { w: options.w || 6, h: options.h || 3 });
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 6,
+      h: options.h || 3,
+    });
 
     const panel = createPanelDom(id);
     node.querySelector('.grid-stack-item-content').appendChild(panel);
@@ -395,12 +431,18 @@
       node,
       instance,
       series: [...initialSeries],
-      showSymbols: false,
+      showSymbols: !!options.showSymbols,
       label: options.label || null,
     });
+    const dotsInput = node.querySelector('input[data-action="symbols"]');
+    if (dotsInput instanceof HTMLInputElement) {
+      dotsInput.checked = !!options.showSymbols;
+    }
 
     updateTitle(id);
-    refreshChart(id).catch((err) => console.error(err));
+    if (!options.deferRefresh) {
+      refreshChart(id).catch((err) => console.error(err));
+    }
     return id;
   }
 
@@ -458,6 +500,100 @@
     if (created === 0) {
       addChart(['solar/ac/power'], { label: 'AC Power' });
     }
+    dashboardSelect.value = 'Default';
+    dashboardNameInput.value = 'Default';
+    refreshAllCharts();
+  }
+
+  function serializeDashboard() {
+    const chartList = [];
+    for (const c of charts.values()) {
+      const nodeInfo = c.node && c.node.gridstackNode ? c.node.gridstackNode : {};
+      chartList.push({
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 6),
+        h: Number(nodeInfo.h || 3),
+        series: Array.isArray(c.series) ? [...c.series] : [],
+        showSymbols: !!c.showSymbols,
+        label: c.label || null,
+      });
+    }
+    chartList.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    return {
+      version: 1,
+      range: {
+        preset: activePreset || 'custom',
+        start: startInput.value,
+        end: endInput.value,
+      },
+      charts: chartList,
+    };
+  }
+
+  function applyDashboard(dashboard) {
+    if (!dashboard || typeof dashboard !== 'object') {
+      throw new Error('Invalid dashboard payload');
+    }
+
+    const range = dashboard.range || {};
+    const preset = typeof range.preset === 'string' ? range.preset : 'custom';
+    if (preset !== 'custom') {
+      activePreset = preset;
+      setRangeByPreset(preset);
+    } else {
+      activePreset = null;
+      if (typeof range.start === 'string' && range.start) startInput.value = range.start;
+      if (typeof range.end === 'string' && range.end) endInput.value = range.end;
+      clearPresetSelection();
+    }
+
+    clearAllCharts();
+    const chartDefs = Array.isArray(dashboard.charts) ? dashboard.charts : [];
+    for (const ch of chartDefs) {
+      if (!ch || typeof ch !== 'object') continue;
+      const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+      addChart(series, {
+        x: Number(ch.x),
+        y: Number(ch.y),
+        w: Number(ch.w) || 6,
+        h: Number(ch.h) || 3,
+        showSymbols: !!ch.showSymbols,
+        label: typeof ch.label === 'string' ? ch.label : null,
+        deferRefresh: true,
+      });
+    }
+    refreshAllCharts();
+  }
+
+  async function loadDashboardByName(name) {
+    if (name === 'Default') {
+      await buildDefaultCharts();
+      return;
+    }
+    const data = await apiJson(`/dashboards/${encodeURIComponent(name)}`);
+    applyDashboard(data.dashboard);
+  }
+
+  async function saveCurrentDashboard() {
+    const name = String(dashboardNameInput.value || '').trim();
+    if (!name) {
+      alert('Please enter a dashboard name.');
+      return;
+    }
+    if (name === 'Default') {
+      alert("The name 'Default' is reserved. Please choose another name.");
+      return;
+    }
+    const payload = { dashboard: serializeDashboard() };
+    await apiJson(`/dashboards/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    await refreshDashboardNames();
+    dashboardSelect.value = name;
+    dashboardNameInput.value = name;
   }
 
   async function openSeriesDialog(id) {
@@ -624,12 +760,34 @@
     configureAutoRefresh();
   });
 
+  dashboardSelect.addEventListener('change', () => {
+    const name = String(dashboardSelect.value || '').trim();
+    if (!name) return;
+    dashboardNameInput.value = name;
+    if (name === 'Default') {
+      buildDefaultCharts().catch((err) => console.error(err));
+      return;
+    }
+    loadDashboardByName(name).catch((err) => console.error(err));
+  });
+
+  saveDashboardBtn.addEventListener('click', () => {
+    saveCurrentDashboard().catch((err) => {
+      console.error(err);
+      alert(`Failed to save dashboard: ${err.message || err}`);
+    });
+  });
+
   setRangeByPreset('2d');
   configureAutoRefresh();
-  buildDefaultCharts().catch((err) => {
-    console.error(err);
-    if (charts.size === 0) {
-      addChart(['solar/ac/power'], { label: 'AC Power' });
-    }
+  refreshDashboardNames().finally(() => {
+    dashboardSelect.value = 'Default';
+    dashboardNameInput.value = 'Default';
+    buildDefaultCharts().catch((err) => {
+      console.error(err);
+      if (charts.size === 0) {
+        addChart(['solar/ac/power'], { label: 'AC Power' });
+      }
+    });
   });
 })();

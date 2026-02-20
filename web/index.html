@@ -11,6 +11,13 @@
   <div class="app">
     <header class="topbar">
       <div class="brand">PV Dashboard</div>
+      <label class="date-field">Dashboard
+        <select id="dashboardSelect">
+          <option value="Default">Default</option>
+        </select>
+        <input id="dashboardName" placeholder="Name for Save" />
+      </label>
+      <button id="saveDashboard" class="btn">Save</button>
       <div class="range-controls">
         <button id="pageBack" class="btn" title="Shift window left by half range">&lt;</button>
         <button id="zoomIn" class="btn" title="Zoom in (2x)">+</button>
