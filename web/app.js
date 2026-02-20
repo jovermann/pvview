@@ -203,6 +203,23 @@
     return unit ? `${raw} / ${unit}` : raw;
   }
 
+  function normalizeDotStyle(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    if (n <= 0) return 0;
+    if (n >= 3) return 3;
+    if (n >= 2) return 2;
+    return 1;
+  }
+
+  function dotVisual(style) {
+    const mode = normalizeDotStyle(style);
+    if (mode === 1) return { showSymbol: true, symbol: 'circle', symbolSize: 1 };
+    if (mode === 2) return { showSymbol: true, symbol: 'circle', symbolSize: 2 };
+    if (mode === 3) return { showSymbol: true, symbol: 'circle', symbolSize: 3 };
+    return { showSymbol: false, symbol: 'circle', symbolSize: 1 };
+  }
+
   function displayPrefixForSeries(seriesNames) {
     if (!Array.isArray(seriesNames) || seriesNames.length === 0) return '';
     if (seriesNames.length === 1) {
@@ -372,7 +389,6 @@
         <div class="panel-actions">
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="settings-gadget" data-action="settings" data-id="${id}" title="Settings">⚙️</button>
-          <button class="close-gadget" data-action="remove" data-id="${id}" title="Close">❎</button>
         </div>
       </div>
       <div class="chart" id="chart-${id}"></div>
@@ -450,6 +466,7 @@
     }));
 
     const axisCount = yAxes.length;
+    const dots = dotVisual(cfg.dotStyle);
 
     cfg.instance.setOption({
       backgroundColor: 'transparent',
@@ -474,8 +491,9 @@
         name: s.displayName,
         type: 'line',
         yAxisIndex: axisIndexByKey.get(s.axisKey) || 0,
-        showSymbol: !!cfg.showSymbols,
-        symbolSize: 1,
+        showSymbol: dots.showSymbol,
+        symbol: dots.symbol,
+        symbolSize: dots.symbolSize,
         smooth: 0,
         lineStyle: { width: 1 },
         emphasis: { focus: 'series' },
@@ -502,12 +520,15 @@
 
     const chartEl = document.getElementById(`chart-${id}`);
     const instance = echarts.init(chartEl, null, { renderer: 'canvas' });
+    const initialDotStyle = normalizeDotStyle(
+      options.dotStyle !== undefined ? options.dotStyle : (options.showSymbols ? 1 : 0)
+    );
     charts.set(id, {
       id,
       node,
       instance,
       series: [...initialSeries],
-      showSymbols: !!options.showSymbols,
+      dotStyle: initialDotStyle,
       label: options.label || null,
     });
 
@@ -587,7 +608,7 @@
         w: Number(nodeInfo.w || 6),
         h: Number(nodeInfo.h || 3),
         series: Array.isArray(c.series) ? [...c.series] : [],
-        showSymbols: !!c.showSymbols,
+        dotStyle: normalizeDotStyle(c.dotStyle),
         label: c.label || null,
       });
     }
@@ -613,7 +634,7 @@
         y: Number(ch.y),
         w: Number(ch.w) || 6,
         h: Number(ch.h) || 3,
-        showSymbols: !!ch.showSymbols,
+        dotStyle: ch.dotStyle !== undefined ? normalizeDotStyle(ch.dotStyle) : (ch.showSymbols ? 1 : 0),
         label: typeof ch.label === 'string' ? ch.label : null,
         deferRefresh: true,
       });
@@ -685,7 +706,7 @@
     if (!c) return;
     activeSettingsChartId = id;
     chartSettingsName.value = c.label || '';
-    chartSettingsDots.checked = !!c.showSymbols;
+    chartSettingsDots.value = String(normalizeDotStyle(c.dotStyle));
     chartSettingsDialog.showModal();
   }
 
@@ -770,11 +791,6 @@
       return;
     }
 
-    if (target.dataset.action === 'remove') {
-      removeChart(target.dataset.id);
-      return;
-    }
-
     if (target.dataset.action === 'series') {
       openSeriesDialog(target.dataset.id).catch((err) => console.error(err));
       return;
@@ -798,7 +814,7 @@
       return;
     }
     c.label = String(chartSettingsName.value || '').trim() || null;
-    c.showSymbols = !!chartSettingsDots.checked;
+    c.dotStyle = normalizeDotStyle(chartSettingsDots.value);
     updateTitle(activeSettingsChartId);
     refreshChart(activeSettingsChartId).catch((err) => console.error(err));
     activeSettingsChartId = null;
@@ -808,6 +824,17 @@
   document.getElementById('cancelChartSettings').addEventListener('click', () => {
     activeSettingsChartId = null;
     chartSettingsDialog.close();
+  });
+
+  document.getElementById('removeChartSettings').addEventListener('click', () => {
+    if (!activeSettingsChartId) {
+      chartSettingsDialog.close();
+      return;
+    }
+    const removeId = activeSettingsChartId;
+    activeSettingsChartId = null;
+    chartSettingsDialog.close();
+    removeChart(removeId);
   });
 
   chartSettingsDialog.addEventListener('close', () => {

@@ -60,6 +60,10 @@ body {
   color: #dfefff;
 }
 
+.btn.danger {
+  color: #ffb4b4;
+}
+
 .date-field {
   color: var(--muted);
   display: flex;
@@ -124,17 +128,6 @@ main { padding: 4px; }
 
 .icon-btn.danger { color: #ffb4b4; }
 
-.close-gadget {
-  border: none;
-  background: transparent;
-  color: #ffb4b4;
-  padding: 0;
-  margin: 0;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-}
-
 .settings-gadget {
   border: none;
   background: transparent;
@@ -190,6 +183,10 @@ menu {
   gap: 8px;
   margin: 0;
   padding: 0;
+}
+
+.menu-left {
+  margin-right: auto;
 }
 
 .settings-field {
