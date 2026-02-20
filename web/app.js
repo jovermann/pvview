@@ -782,6 +782,9 @@
     }
 
     if (target.id === 'refreshAll') {
+      if (activePreset) {
+        setRangeByPreset(activePreset);
+      }
       refreshAllCharts();
       return;
     }
