@@ -40,6 +40,7 @@ import json
 import mimetypes
 import os
 import struct
+import threading
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,6 +76,21 @@ class Event:
 
 class TsdbParseError(ValueError):
     pass
+
+
+@dataclass
+class CachedTsdbFile:
+    mtime_ns: int
+    size: int
+    parsed_offset: int
+    current_ts: Optional[int]
+    channel_defs: Dict[int, Tuple[int, str]]
+    series_events: Dict[str, List[Event]]
+    ended_with_eof: bool
+
+
+_TSDB_CACHE_LOCK = threading.Lock()
+_TSDB_FILE_CACHE: Dict[str, CachedTsdbFile] = {}
 
 
 def _ensure_available(data: bytes, offset: int, size: int, what: str) -> None:
@@ -153,7 +169,119 @@ def _read_format_value(data: bytes, offset: int, format_id: int) -> Tuple[Any, i
     return raw_value / scale, offset
 
 
-def read_tsdb_events_for_series(path: str, target_series: str, start_ms: int, end_ms: int) -> List[Event]:
+def _is_incomplete_parse_error(exc: TsdbParseError) -> bool:
+    return str(exc).startswith("Unexpected EOF while reading")
+
+
+def _parse_tsdb_chunk_into_cache(
+    raw: bytes,
+    base_offset: int,
+    cache: CachedTsdbFile,
+) -> Tuple[int, bool]:
+    offset = 0
+    ended_with_eof = False
+    while offset < len(raw):
+        entry_start = offset
+        entry_type = raw[offset]
+        offset += 1
+
+        try:
+            if entry_type <= 0xEF:
+                channel_id = entry_type
+                if cache.current_ts is None:
+                    raise TsdbParseError("Value entry encountered before timestamp")
+                if channel_id not in cache.channel_defs:
+                    raise TsdbParseError(f"Undefined channel id {channel_id}")
+                format_id, series_name = cache.channel_defs[channel_id]
+                value, offset = _read_format_value(raw, offset, format_id)
+                cache.series_events.setdefault(series_name, []).append(Event(cache.current_ts, value))
+                continue
+
+            if entry_type == ENTRY_TYPE_VALUE_16:
+                _ensure_available(raw, offset, 2, "16-bit channel id")
+                channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+                offset += 2
+                if cache.current_ts is None:
+                    raise TsdbParseError("16-bit value entry encountered before timestamp")
+                if channel_id not in cache.channel_defs:
+                    raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
+                format_id, series_name = cache.channel_defs[channel_id]
+                value, offset = _read_format_value(raw, offset, format_id)
+                cache.series_events.setdefault(series_name, []).append(Event(cache.current_ts, value))
+                continue
+
+            if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
+                _ensure_available(raw, offset, 8, "absolute timestamp")
+                cache.current_ts = int.from_bytes(raw[offset:offset + 8], "little")
+                offset += 8
+                continue
+            if entry_type == ENTRY_TYPE_TIME_REL_8:
+                _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
+                if cache.current_ts is None:
+                    raise TsdbParseError("Relative timestamp before absolute timestamp")
+                cache.current_ts += raw[offset]
+                offset += 1
+                continue
+            if entry_type == ENTRY_TYPE_TIME_REL_16:
+                _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
+                if cache.current_ts is None:
+                    raise TsdbParseError("Relative timestamp before absolute timestamp")
+                cache.current_ts += int.from_bytes(raw[offset:offset + 2], "little")
+                offset += 2
+                continue
+            if entry_type == ENTRY_TYPE_TIME_REL_24:
+                rel, offset = _read_u24(raw, offset)
+                if cache.current_ts is None:
+                    raise TsdbParseError("Relative timestamp before absolute timestamp")
+                cache.current_ts += rel
+                continue
+            if entry_type == ENTRY_TYPE_TIME_REL_32:
+                _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
+                if cache.current_ts is None:
+                    raise TsdbParseError("Relative timestamp before absolute timestamp")
+                cache.current_ts += int.from_bytes(raw[offset:offset + 4], "little")
+                offset += 4
+                continue
+
+            if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
+                _ensure_available(raw, offset, 3, "8-bit channel definition")
+                channel_id = raw[offset]
+                format_id = raw[offset + 1]
+                name_len = raw[offset + 2]
+                offset += 3
+                _ensure_available(raw, offset, name_len, "channel name")
+                series_name = raw[offset:offset + name_len].decode("utf-8")
+                offset += name_len
+                cache.channel_defs[channel_id] = (format_id, series_name)
+                continue
+
+            if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
+                _ensure_available(raw, offset, 4, "16-bit channel definition")
+                channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+                format_id = raw[offset + 2]
+                name_len = raw[offset + 3]
+                offset += 4
+                _ensure_available(raw, offset, name_len, "channel name")
+                series_name = raw[offset:offset + name_len].decode("utf-8")
+                offset += name_len
+                cache.channel_defs[channel_id] = (format_id, series_name)
+                continue
+
+            if entry_type == ENTRY_TYPE_EOF:
+                ended_with_eof = True
+                break
+
+            raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {base_offset + offset - 1}")
+        except TsdbParseError as exc:
+            if _is_incomplete_parse_error(exc):
+                offset = entry_start
+                break
+            raise
+
+    return offset, ended_with_eof
+
+
+def _build_cache_from_scratch(path: str, st: os.stat_result) -> CachedTsdbFile:
     with open(path, "rb") as f:
         raw = f.read()
 
@@ -165,208 +293,83 @@ def read_tsdb_events_for_series(path: str, target_series: str, start_ms: int, en
     if version != TSDB_VERSION:
         raise TsdbParseError(f"Unsupported TSDB version {version} in {path}")
 
-    channel_defs: Dict[int, Tuple[int, str]] = {}
-    current_ts: Optional[int] = None
-    result: List[Event] = []
+    cache = CachedTsdbFile(
+        mtime_ns=st.st_mtime_ns,
+        size=st.st_size,
+        parsed_offset=12,
+        current_ts=None,
+        channel_defs={},
+        series_events={},
+        ended_with_eof=False,
+    )
+    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw[12:], 12, cache)
+    cache.parsed_offset = 12 + consumed
+    cache.ended_with_eof = ended_with_eof
+    return cache
 
-    offset = 12
-    while offset < len(raw):
-        entry_type = raw[offset]
-        offset += 1
 
-        if entry_type <= 0xEF:
-            channel_id = entry_type
-            if current_ts is None:
-                raise TsdbParseError("Value entry encountered before timestamp")
-            if channel_id not in channel_defs:
-                raise TsdbParseError(f"Undefined channel id {channel_id}")
-            format_id, series_name = channel_defs[channel_id]
-            value, offset = _read_format_value(raw, offset, format_id)
-            if series_name == target_series and start_ms <= current_ts <= end_ms:
-                result.append(Event(current_ts, value))
-            continue
+def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbFile) -> CachedTsdbFile:
+    parse_from = cache.parsed_offset
+    if cache.ended_with_eof and parse_from > 12:
+        parse_from -= 1
 
-        if entry_type == ENTRY_TYPE_VALUE_16:
-            _ensure_available(raw, offset, 2, "16-bit channel id")
-            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
-            offset += 2
-            if current_ts is None:
-                raise TsdbParseError("16-bit value entry encountered before timestamp")
-            if channel_id not in channel_defs:
-                raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
-            format_id, series_name = channel_defs[channel_id]
-            value, offset = _read_format_value(raw, offset, format_id)
-            if series_name == target_series and start_ms <= current_ts <= end_ms:
-                result.append(Event(current_ts, value))
-            continue
+    if parse_from >= st.st_size:
+        cache.mtime_ns = st.st_mtime_ns
+        cache.size = st.st_size
+        return cache
 
-        if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
-            _ensure_available(raw, offset, 8, "absolute timestamp")
-            current_ts = int.from_bytes(raw[offset:offset + 8], "little")
-            offset += 8
-            continue
-        if entry_type == ENTRY_TYPE_TIME_REL_8:
-            _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += raw[offset]
-            offset += 1
-            continue
-        if entry_type == ENTRY_TYPE_TIME_REL_16:
-            _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += int.from_bytes(raw[offset:offset + 2], "little")
-            offset += 2
-            continue
-        if entry_type == ENTRY_TYPE_TIME_REL_24:
-            rel, offset = _read_u24(raw, offset)
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += rel
-            continue
-        if entry_type == ENTRY_TYPE_TIME_REL_32:
-            _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += int.from_bytes(raw[offset:offset + 4], "little")
-            offset += 4
-            continue
+    with open(path, "rb") as f:
+        f.seek(parse_from)
+        raw = f.read(st.st_size - parse_from)
 
-        if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
-            _ensure_available(raw, offset, 3, "8-bit channel definition")
-            channel_id = raw[offset]
-            format_id = raw[offset + 1]
-            name_len = raw[offset + 2]
-            offset += 3
-            _ensure_available(raw, offset, name_len, "channel name")
-            series_name = raw[offset:offset + name_len].decode("utf-8")
-            offset += name_len
-            channel_defs[channel_id] = (format_id, series_name)
-            continue
+    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw, parse_from, cache)
+    cache.parsed_offset = parse_from + consumed
+    cache.ended_with_eof = ended_with_eof
+    cache.mtime_ns = st.st_mtime_ns
+    cache.size = st.st_size
+    return cache
 
-        if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
-            _ensure_available(raw, offset, 4, "16-bit channel definition")
-            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
-            format_id = raw[offset + 2]
-            name_len = raw[offset + 3]
-            offset += 4
-            _ensure_available(raw, offset, name_len, "channel name")
-            series_name = raw[offset:offset + name_len].decode("utf-8")
-            offset += name_len
-            channel_defs[channel_id] = (format_id, series_name)
-            continue
 
-        if entry_type == ENTRY_TYPE_EOF:
-            break
+def _get_cached_tsdb_file(path: str) -> CachedTsdbFile:
+    st = os.stat(path)
+    with _TSDB_CACHE_LOCK:
+        cache = _TSDB_FILE_CACHE.get(path)
+        if cache is None:
+            cache = _build_cache_from_scratch(path, st)
+            _TSDB_FILE_CACHE[path] = cache
+            return cache
 
-        raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
+        if st.st_mtime_ns == cache.mtime_ns and st.st_size == cache.size:
+            return cache
 
-    return result
+        if st.st_size < cache.parsed_offset:
+            cache = _build_cache_from_scratch(path, st)
+            _TSDB_FILE_CACHE[path] = cache
+            return cache
+
+        cache = _refresh_cache_incremental(path, st, cache)
+        _TSDB_FILE_CACHE[path] = cache
+        return cache
+
+
+def read_tsdb_events_for_series(path: str, target_series: str, start_ms: int, end_ms: int) -> List[Event]:
+    cache = _get_cached_tsdb_file(path)
+    events = cache.series_events.get(target_series, [])
+    if not events:
+        return []
+    if start_ms <= events[0].timestamp_ms and events[-1].timestamp_ms <= end_ms:
+        return list(events)
+    return [e for e in events if start_ms <= e.timestamp_ms <= end_ms]
 
 
 def list_series_in_file(path: str) -> List[str]:
-    with open(path, "rb") as f:
-        raw = f.read()
-
-    if len(raw) < 12:
+    try:
+        cache = _get_cached_tsdb_file(path)
+    except TsdbParseError:
         return []
-    if raw[:8] != TSDB_TAG_BYTES:
+    except OSError:
         return []
-    version = int.from_bytes(raw[8:12], "little")
-    if version != TSDB_VERSION:
-        return []
-
-    offset = 12
-    names: List[str] = []
-    seen = set()
-    channel_defs: Dict[int, Tuple[int, str]] = {}
-    current_ts: Optional[int] = None
-
-    while offset < len(raw):
-        entry_type = raw[offset]
-        offset += 1
-
-        if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
-            _ensure_available(raw, offset, 3, "8-bit channel definition")
-            channel_id = raw[offset]
-            format_id = raw[offset + 1]
-            name_len = raw[offset + 2]
-            offset += 3
-            _ensure_available(raw, offset, name_len, "channel name")
-            name = raw[offset:offset + name_len].decode("utf-8")
-            offset += name_len
-            channel_defs[channel_id] = (format_id, name)
-            if name not in seen:
-                seen.add(name)
-                names.append(name)
-            continue
-
-        if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
-            _ensure_available(raw, offset, 4, "16-bit channel definition")
-            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
-            format_id = raw[offset + 2]
-            name_len = raw[offset + 3]
-            offset += 4
-            _ensure_available(raw, offset, name_len, "channel name")
-            name = raw[offset:offset + name_len].decode("utf-8")
-            offset += name_len
-            channel_defs[channel_id] = (format_id, name)
-            if name not in seen:
-                seen.add(name)
-                names.append(name)
-            continue
-
-        if entry_type <= 0xEF:
-            channel_id = entry_type
-            if channel_id not in channel_defs:
-                raise TsdbParseError(f"Undefined channel id {channel_id}")
-            format_id, _series_name = channel_defs[channel_id]
-            _value, offset = _read_format_value(raw, offset, format_id)
-            continue
-
-        if entry_type == ENTRY_TYPE_EOF:
-            break
-
-        if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
-            _ensure_available(raw, offset, 8, "absolute timestamp")
-            current_ts = int.from_bytes(raw[offset:offset + 8], "little")
-            offset += 8
-        elif entry_type == ENTRY_TYPE_TIME_REL_8:
-            _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += raw[offset]
-            offset += 1
-        elif entry_type == ENTRY_TYPE_TIME_REL_16:
-            _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += int.from_bytes(raw[offset:offset + 2], "little")
-            offset += 2
-        elif entry_type == ENTRY_TYPE_TIME_REL_24:
-            rel, offset = _read_u24(raw, offset)
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += rel
-        elif entry_type == ENTRY_TYPE_TIME_REL_32:
-            _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
-            if current_ts is None:
-                raise TsdbParseError("Relative timestamp before absolute timestamp")
-            current_ts += int.from_bytes(raw[offset:offset + 4], "little")
-            offset += 4
-        elif entry_type == ENTRY_TYPE_VALUE_16:
-            _ensure_available(raw, offset, 2, "16-bit channel id")
-            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
-            offset += 2
-            if channel_id not in channel_defs:
-                raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
-            format_id, _series_name = channel_defs[channel_id]
-            _value, offset = _read_format_value(raw, offset, format_id)
-        else:
-            raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
-
-    return names
+    return sorted(cache.series_events.keys())
 
 
 def parse_timestamp(value: str) -> int:
