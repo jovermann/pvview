@@ -114,6 +114,10 @@
 
   function setRangeByPreset(rangeKey) {
     const hours = {
+      '1m': 1 / 60,
+      '2m': 2 / 60,
+      '5m': 5 / 60,
+      '10m': 10 / 60,
       '15m': 0.25,
       '30m': 0.5,
       '1h': 1,
@@ -129,6 +133,10 @@
       '14d': 336,
       '21d': 504,
       '28d': 672,
+      '60d': 1440,
+      '90d': 2160,
+      '180d': 4320,
+      '365d': 8760,
     }[rangeKey] || 24;
     const end = nowMs();
     const start = end - hours * 3600 * 1000;
