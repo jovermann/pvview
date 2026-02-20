@@ -994,7 +994,13 @@ def _quantize_timestamp_ms(timestamp_ms: int, quantize_timestamps_ms: int) -> in
     return (timestamp_ms // quantize_timestamps_ms) * quantize_timestamps_ms
 
 
-def collect_to_tsdb(server: str, subscriptions: list[str], verbose: int, quantize_timestamps_ms: int = 0) -> int:
+def collect_to_tsdb(
+    server: str,
+    subscriptions: list[str],
+    verbose: int,
+    quantize_timestamps_ms: int = 0,
+    data_dir: str = ".",
+) -> int:
     try:
         import paho.mqtt.client as mqtt
     except Exception:
@@ -1011,6 +1017,7 @@ def collect_to_tsdb(server: str, subscriptions: list[str], verbose: int, quantiz
     queue: list[tuple[int, str, Any]] = []
     lock = threading.Lock()
     appenders: dict[datetime.date, TimeSeriesDbAppender] = {}
+    os.makedirs(data_dir, exist_ok=True)
 
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 
@@ -1053,7 +1060,7 @@ def collect_to_tsdb(server: str, subscriptions: list[str], verbose: int, quantiz
             by_day.setdefault(day, []).append((ts_ms, topic, value))
         for day, day_events in by_day.items():
             if day not in appenders:
-                path = _tsdb_filename_for_utc_day(day)
+                path = os.path.join(data_dir, _tsdb_filename_for_utc_day(day))
                 if verbose:
                     action = "opening existing" if os.path.exists(path) else "creating new"
                     print(f"{action} TSDB file: {path}")
@@ -1374,6 +1381,39 @@ def read_default_quantize_timestamps(rc_path: str) -> int:
             if key in mqtt_block:
                 return normalize_quantize(mqtt_block[key])
     return 0
+
+
+def read_default_data_dir(rc_path: str) -> str:
+    if not os.path.exists(rc_path):
+        return "."
+    try:
+        try:
+            import tomllib  # Python 3.11+
+        except Exception:  # pragma: no cover - fallback if tomllib missing
+            import toml as tomllib  # type: ignore
+    except Exception:
+        return "."
+    try:
+        with open(rc_path, "rb") as f:
+            data = tomllib.load(f)
+    except OSError:
+        return "."
+    except Exception:
+        return "."
+
+    def normalize_dir(value: Any) -> str:
+        text = str(value).strip()
+        return text if text else "."
+
+    for key in ("data_dir", "data-dir"):
+        if key in data:
+            return normalize_dir(data[key])
+    mqtt_block = data.get("mqtt")
+    if isinstance(mqtt_block, dict):
+        for key in ("data_dir", "data-dir"):
+            if key in mqtt_block:
+                return normalize_dir(mqtt_block[key])
+    return "."
 
 
 def parse_host_port(server: str) -> tuple[str, int]:
@@ -1737,12 +1777,23 @@ def _resolve_config_path_for_read() -> str:
 
 
 def main() -> int:
+    default_config_path = _resolve_config_path_for_read()
     parser = argparse.ArgumentParser(
         description="MQTT collector utilities.",
     )
     parser.add_argument(
+        "--config",
+        default=default_config_path,
+        help=f"Path to config file (default: {default_config_path})",
+    )
+    parser.add_argument(
         "--mqtt-server",
-        help="MQTT server host[:port]. If omitted, read from ~/.mqtt_collector.toml",
+        help="MQTT server host[:port]. If omitted, read from config file",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="Directory for TSDB files. If omitted, read data_dir from config file (default: current directory).",
     )
     parser.add_argument("--list-topics", action="store_true", help="List available topics as a flat list with hierarchical names")
     parser.add_argument("--monitor", action="store_true", help="Monitor topics and print messages as they arrive")
@@ -1758,27 +1809,40 @@ def main() -> int:
         type=int,
         default=None,
         metavar="MS",
-        help="Quantize collect timestamps to MS milliseconds (0 disables). If omitted, read quantize_timestamps from ~/.mqtt_collector.toml.",
+        help="Quantize collect timestamps to MS milliseconds (0 disables). If omitted, read quantize_timestamps from config file.",
     )
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (can be repeated)")
     parser.add_argument("--filter", help="fnmatch pattern to filter topics (e.g. sensors/*)")
     parser.add_argument("--flatten", action="store_true", help="Flatten JSON payloads when listing topics")
     args = parser.parse_args()
 
+    rc_path = os.path.expanduser(args.config)
+    default_data_dir = read_default_data_dir(rc_path)
+    selected_data_dir = args.data_dir if args.data_dir else default_data_dir
+    data_dir = os.path.abspath(os.path.expanduser(selected_data_dir))
+
+    def resolve_tsdb_path(path: str) -> str:
+        expanded = os.path.expanduser(path)
+        if os.path.isabs(expanded):
+            return expanded
+        return os.path.join(data_dir, expanded)
+
     if args.dump_tsdb:
+        dump_path = resolve_tsdb_path(args.dump_tsdb)
         try:
             if args.verbose:
-                read_timeseries_db(args.dump_tsdb, dump_out=sys.stdout, verbose=args.verbose)
+                read_timeseries_db(dump_path, dump_out=sys.stdout, verbose=args.verbose)
                 return 0
-            db = read_timeseries_db(args.dump_tsdb)
+            db = read_timeseries_db(dump_path)
         except Exception as exc:
-            print(f"Failed to read DB file {args.dump_tsdb!r}: {exc}")
+            print(f"Failed to read DB file {dump_path!r}: {exc}")
             return 2
         db.dump()
         return 0
     if args.generate_demo_db is not None:
         try:
-            paths = generateDemoData(args.generate_demo_db)
+            os.makedirs(data_dir, exist_ok=True)
+            paths = generateDemoData(args.generate_demo_db, output_dir=data_dir)
         except Exception as exc:
             print(f"Failed to generate demo DB files: {exc}")
             return 2
@@ -1786,7 +1850,7 @@ def main() -> int:
             print(path)
         return 0
     if args.compress:
-        source = args.compress
+        source = resolve_tsdb_path(args.compress)
         if not os.path.exists(source):
             print(f"DB file not found: {source}")
             return 2
@@ -1812,7 +1876,6 @@ def main() -> int:
             print(f"Failed to compress DB file {source!r}: {exc}")
             return 2
 
-    rc_path = _resolve_config_path_for_read()
     if args.mqtt_server:
         persist_server(rc_path, args.mqtt_server)
     default_server = read_default_server(rc_path)
@@ -1823,7 +1886,7 @@ def main() -> int:
     quantize_timestamps_ms = max(0, quantize_timestamps_ms)
 
     if not server:
-        print("MQTT server not specified. Use --mqtt-server or set config in ~/.mqtt_collector.toml")
+        print(f"MQTT server not specified. Use --mqtt-server or set mqtt_server in {rc_path}")
         return 2
 
     no_cli_options = len(sys.argv) == 1
@@ -1837,7 +1900,13 @@ def main() -> int:
         return open_dtu_summary(server, args.timeout, args.filter, args.verbose)
     if args.collect or default_to_collect:
         topics = args.topics if args.topics else default_topics
-        return collect_to_tsdb(server, topics, args.verbose, quantize_timestamps_ms=quantize_timestamps_ms)
+        return collect_to_tsdb(
+            server,
+            topics,
+            args.verbose,
+            quantize_timestamps_ms=quantize_timestamps_ms,
+            data_dir=data_dir,
+        )
 
     print("No action specified. Use --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --generate-demo-db, or --compress.")
     return 2
