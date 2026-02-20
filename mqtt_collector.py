@@ -30,6 +30,12 @@ ENTRY_TYPE_EOF = 0xFE
 
 FORMAT_FLOAT = 0x00
 FORMAT_DOUBLE = 0x01
+FORMAT_DOUBLE_DEC1 = 0x02
+FORMAT_DOUBLE_DEC2 = 0x03
+FORMAT_DOUBLE_DEC3 = 0x04
+FORMAT_DOUBLE_DEC4 = 0x05
+FORMAT_DOUBLE_DEC5 = 0x06
+FORMAT_DOUBLE_DEC6PLUS = 0x07
 FORMAT_STRING_U8 = 0x08
 FORMAT_STRING_U16 = 0x09
 FORMAT_STRING_U32 = 0x0A
@@ -80,7 +86,15 @@ def _read_format_value(data: bytes, offset: int, format_id: int) -> tuple[Any, i
     if format_id == FORMAT_FLOAT:
         _ensure_available(data, offset, 4, "float")
         return struct.unpack_from("<f", data, offset)[0], offset + 4
-    if format_id == FORMAT_DOUBLE:
+    if format_id in (
+        FORMAT_DOUBLE,
+        FORMAT_DOUBLE_DEC1,
+        FORMAT_DOUBLE_DEC2,
+        FORMAT_DOUBLE_DEC3,
+        FORMAT_DOUBLE_DEC4,
+        FORMAT_DOUBLE_DEC5,
+        FORMAT_DOUBLE_DEC6PLUS,
+    ):
         _ensure_available(data, offset, 8, "double")
         return struct.unpack_from("<d", data, offset)[0], offset + 8
     if format_id in (FORMAT_STRING_U8, FORMAT_STRING_U16, FORMAT_STRING_U32, FORMAT_STRING_U64):
@@ -140,6 +154,12 @@ class TimeSeriesDbData:
 
     def get_series_format_id(self, series_name: str) -> Optional[int]:
         return self._series_format_ids.get(series_name)
+
+
+@dataclasses.dataclass(frozen=True)
+class NumericWithDecimals:
+    value: float
+    decimals: int
 
     def dump(self, out: Optional[TextIO] = None) -> None:
         stream = out if out is not None else sys.stdout
@@ -543,7 +563,19 @@ def _format_id_description(format_id: int) -> str:
     if format_id == FORMAT_FLOAT:
         return "float"
     if format_id == FORMAT_DOUBLE:
-        return "double"
+        return "double (display hint: 0 decimals)"
+    if format_id == FORMAT_DOUBLE_DEC1:
+        return "double (display hint: 1 decimal)"
+    if format_id == FORMAT_DOUBLE_DEC2:
+        return "double (display hint: 2 decimals)"
+    if format_id == FORMAT_DOUBLE_DEC3:
+        return "double (display hint: 3 decimals)"
+    if format_id == FORMAT_DOUBLE_DEC4:
+        return "double (display hint: 4 decimals)"
+    if format_id == FORMAT_DOUBLE_DEC5:
+        return "double (display hint: 5 decimals)"
+    if format_id == FORMAT_DOUBLE_DEC6PLUS:
+        return "double (display hint: 6+ decimals)"
     if format_id in (FORMAT_STRING_U8, FORMAT_STRING_U16, FORMAT_STRING_U32, FORMAT_STRING_U64):
         len_type = {
             FORMAT_STRING_U8: "uint8_t",
@@ -567,7 +599,15 @@ def _is_equal_6_digits(a: float, b: float) -> bool:
 
 
 def _encode_value_for_format(value: Any, format_id: int) -> Optional[bytes]:
-    if format_id == FORMAT_DOUBLE:
+    if format_id in (
+        FORMAT_DOUBLE,
+        FORMAT_DOUBLE_DEC1,
+        FORMAT_DOUBLE_DEC2,
+        FORMAT_DOUBLE_DEC3,
+        FORMAT_DOUBLE_DEC4,
+        FORMAT_DOUBLE_DEC5,
+        FORMAT_DOUBLE_DEC6PLUS,
+    ):
         numeric = float(value)
         if not math.isfinite(numeric):
             return None
@@ -956,8 +996,15 @@ class TimeSeriesDbAppender:
                     format_id = FORMAT_STRING_U64
                     payload = _encode_value_for_format(value, format_id)
                 else:
-                    format_id = FORMAT_DOUBLE
-                    payload = _encode_value_for_format(float(value), format_id)
+                    decimals_hint = 0
+                    numeric_value = value
+                    if isinstance(value, NumericWithDecimals):
+                        numeric_value = value.value
+                        decimals_hint = value.decimals
+                    format_id = self.series_to_format.get(series_name)
+                    if format_id is None:
+                        format_id = _double_format_id_for_decimals(decimals_hint)
+                    payload = _encode_value_for_format(float(numeric_value), format_id)
                 if payload is None:
                     raise ValueError(f"Cannot encode value for series={series_name!r}")
 
@@ -984,8 +1031,37 @@ def _value_from_mqtt_payload(payload: bytes) -> Any:
         return f"hex:{payload.hex()}"
     numeric = _parse_strict_float(text)
     if numeric is not None:
-        return numeric
+        mantissa = text
+        exp = 0
+        if "e" in mantissa.lower():
+            parts = mantissa.lower().split("e", 1)
+            mantissa = parts[0]
+            try:
+                exp = int(parts[1])
+            except Exception:
+                exp = 0
+        decimals = 0
+        if "." in mantissa:
+            decimals = len(mantissa.split(".", 1)[1])
+        effective_decimals = max(0, decimals - exp)
+        return NumericWithDecimals(float(numeric), max(0, effective_decimals))
     return text
+
+
+def _double_format_id_for_decimals(decimals: int) -> int:
+    if decimals <= 0:
+        return FORMAT_DOUBLE
+    if decimals == 1:
+        return FORMAT_DOUBLE_DEC1
+    if decimals == 2:
+        return FORMAT_DOUBLE_DEC2
+    if decimals == 3:
+        return FORMAT_DOUBLE_DEC3
+    if decimals == 4:
+        return FORMAT_DOUBLE_DEC4
+    if decimals == 5:
+        return FORMAT_DOUBLE_DEC5
+    return FORMAT_DOUBLE_DEC6PLUS
 
 
 def _quantize_timestamp_ms(timestamp_ms: int, quantize_timestamps_ms: int) -> int:
@@ -1040,8 +1116,9 @@ def collect_to_tsdb(
         ts_ms = int(time.time() * 1000)
         ts_ms = _quantize_timestamp_ms(ts_ms, quantize_timestamps_ms)
         value = _value_from_mqtt_payload(msg.payload)
+        value_for_log = value.value if isinstance(value, NumericWithDecimals) else value
         if verbose >= 2:
-            print(f"received: {msg.topic}={value}")
+            print(f"received: {msg.topic}={value_for_log}")
         with lock:
             queue.append((ts_ms, msg.topic, value))
 

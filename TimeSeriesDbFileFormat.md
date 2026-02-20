@@ -71,7 +71,13 @@ uint8_t type = 0xfe; // End of file marker. The presence of this byte marks the 
 Format ids
 ----------
 0x00: float value;
-0x01: double value;
+0x01: double value; With the display hint to display 0 decimals.
+0x02: double value; With the display hint to display 1 decimal.
+0x03: double value; With the display hint to display 2 decimals.
+0x04: double value; With the display hint to display 3 decimals.
+0x05: double value; With the display hint to display 4 decimals.
+0x06: double value; With the display hint to display 5 decimals.
+0x07: double value; With the display hint to display 6 or more decimals.
 0x08: String (UTF-8, 8-bit length): uint8_t len; uint8_t str[len];
 0x09: String (UTF-8, 16-bit length): uint16_t len; uint8_t str[len];
 0x0a: String (UTF-8, 32-bit length): uint32_t len; uint8_t str[len];

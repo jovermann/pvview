@@ -62,6 +62,12 @@ ENTRY_TYPE_VALUE_16 = 0xFF
 
 FORMAT_FLOAT = 0x00
 FORMAT_DOUBLE = 0x01
+FORMAT_DOUBLE_DEC1 = 0x02
+FORMAT_DOUBLE_DEC2 = 0x03
+FORMAT_DOUBLE_DEC3 = 0x04
+FORMAT_DOUBLE_DEC4 = 0x05
+FORMAT_DOUBLE_DEC5 = 0x06
+FORMAT_DOUBLE_DEC6PLUS = 0x07
 FORMAT_STRING_U8 = 0x08
 FORMAT_STRING_U16 = 0x09
 FORMAT_STRING_U32 = 0x0A
@@ -128,7 +134,15 @@ def _read_format_value(data: bytes, offset: int, format_id: int) -> Tuple[Any, i
     if format_id == FORMAT_FLOAT:
         _ensure_available(data, offset, 4, "float")
         return struct.unpack_from("<f", data, offset)[0], offset + 4
-    if format_id == FORMAT_DOUBLE:
+    if format_id in (
+        FORMAT_DOUBLE,
+        FORMAT_DOUBLE_DEC1,
+        FORMAT_DOUBLE_DEC2,
+        FORMAT_DOUBLE_DEC3,
+        FORMAT_DOUBLE_DEC4,
+        FORMAT_DOUBLE_DEC5,
+        FORMAT_DOUBLE_DEC6PLUS,
+    ):
         _ensure_available(data, offset, 8, "double")
         return struct.unpack_from("<d", data, offset)[0], offset + 8
 
@@ -364,6 +378,18 @@ def get_series_format_id_in_file(path: str, series_name: str) -> Optional[int]:
 def decimal_places_from_format_id(format_id: Optional[int]) -> int:
     if format_id is None:
         return 3
+    if format_id == FORMAT_DOUBLE_DEC1:
+        return 1
+    if format_id == FORMAT_DOUBLE_DEC2:
+        return 2
+    if format_id == FORMAT_DOUBLE_DEC3:
+        return 3
+    if format_id == FORMAT_DOUBLE_DEC4:
+        return 4
+    if format_id == FORMAT_DOUBLE_DEC5:
+        return 5
+    if format_id == FORMAT_DOUBLE_DEC6PLUS:
+        return 6
     if format_id in (FORMAT_FLOAT, FORMAT_DOUBLE):
         return 3
     lo = format_id & 0xF
