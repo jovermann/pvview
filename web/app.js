@@ -23,6 +23,7 @@
   const chartSettingsDialog = document.getElementById('chartSettingsDialog');
   const chartSettingsName = document.getElementById('chartSettingsName');
   const chartSettingsDots = document.getElementById('chartSettingsDots');
+  const chartSettingsArea = document.getElementById('chartSettingsArea');
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
@@ -43,6 +44,10 @@
     ['yieldday', 'Wh'],
     ['yieldtotal', 'kWh'],
   ]);
+  const seriesPalette = [
+    '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
+    '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc',
+  ];
   let settingsSaveTimer = null;
 
   function nowMs() {
@@ -312,6 +317,24 @@
     if (mode === 2) return { showSymbol: true, symbol: 'circle', symbolSize: 2 };
     if (mode === 3) return { showSymbol: true, symbol: 'circle', symbolSize: 3 };
     return { showSymbol: false, symbol: 'circle', symbolSize: 1 };
+  }
+
+  function normalizeAreaOpacity(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    if (n >= 1) return 1;
+    return Math.round(n * 10) / 10;
+  }
+
+  function rgbaFromHex(hex, alpha) {
+    const s = String(hex || '').trim();
+    const m = /^#([0-9a-fA-F]{6})$/.exec(s);
+    if (!m) return `rgba(76,164,255,${alpha})`;
+    const n = m[1];
+    const r = parseInt(n.slice(0, 2), 16);
+    const g = parseInt(n.slice(2, 4), 16);
+    const b = parseInt(n.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
   }
 
   function displayPrefixForSeries(seriesNames) {
@@ -645,6 +668,8 @@
       name: axisLabelForSuffix(axisKey),
       position: (i % 2 === 0) ? 'left' : 'right',
       offset: Math.floor(i / 2) * axisSlot,
+      min: (value) => Math.min(0, value.min),
+      max: (value) => Math.max(0, value.max),
       alignTicks: true,
       axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
       axisLabel: { color: '#aebbc9' },
@@ -656,6 +681,7 @@
 
     const axisCount = yAxes.length;
     const dots = dotVisual(cfg.dotStyle);
+    const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
 
     cfg.instance.setOption({
       backgroundColor: 'transparent',
@@ -676,18 +702,30 @@
         splitLine: { lineStyle: { color: '#2b3544' } },
       },
       yAxis: yAxes,
-      series: seriesResponses.map((s, i) => ({
-        name: s.displayName,
-        type: 'line',
-        yAxisIndex: axisIndexByKey.get(s.axisKey) || 0,
-        showSymbol: dots.showSymbol,
-        symbol: dots.symbol,
-        symbolSize: dots.symbolSize,
-        smooth: 0,
-        lineStyle: { width: 1 },
-        emphasis: { focus: 'series' },
-        data: s.points,
-      })),
+      series: seriesResponses.map((s, i) => {
+        const lineColor = seriesPalette[i % seriesPalette.length];
+        const seriesAreaStyle = areaOpacity > 0 ? {
+          origin: 'auto',
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: rgbaFromHex(lineColor, areaOpacity) },
+            { offset: 1, color: rgbaFromHex(lineColor, 0) },
+          ]),
+        } : undefined;
+        return {
+          name: s.displayName,
+          type: 'line',
+          yAxisIndex: axisIndexByKey.get(s.axisKey) || 0,
+          showSymbol: dots.showSymbol,
+          symbol: dots.symbol,
+          symbolSize: dots.symbolSize,
+          smooth: 0,
+          itemStyle: { color: lineColor },
+          lineStyle: { width: 1, color: lineColor },
+          areaStyle: seriesAreaStyle,
+          emphasis: { focus: 'series' },
+          data: s.points,
+        };
+      }),
     }, true);
     appendConsoleLine(
       `chart ${id} refresh done name="${chartName}" series=${seriesResponses.length} axes=${axisCount} `
@@ -716,6 +754,7 @@
     const initialDotStyle = normalizeDotStyle(
       options.dotStyle !== undefined ? options.dotStyle : (options.showSymbols ? 1 : 0)
     );
+    const initialAreaOpacity = normalizeAreaOpacity(options.areaOpacity);
     charts.set(id, {
       id,
       kind: 'chart',
@@ -723,6 +762,7 @@
       instance,
       series: [...initialSeries],
       dotStyle: initialDotStyle,
+      areaOpacity: initialAreaOpacity,
       label: options.label || null,
     });
     appendConsoleLine(`chart ${id} created series=${initialSeries.length}`);
@@ -831,6 +871,7 @@
         h: Number(nodeInfo.h || 3),
         series: Array.isArray(c.series) ? [...c.series] : [],
         dotStyle: normalizeDotStyle(c.dotStyle),
+        areaOpacity: normalizeAreaOpacity(c.areaOpacity),
         label: c.label || null,
       });
     }
@@ -867,6 +908,7 @@
         w: Number(ch.w) || 6,
         h: Number(ch.h) || 3,
         dotStyle: ch.dotStyle !== undefined ? normalizeDotStyle(ch.dotStyle) : (ch.showSymbols ? 1 : 0),
+        areaOpacity: normalizeAreaOpacity(ch.areaOpacity),
         label: typeof ch.label === 'string' ? ch.label : null,
         deferRefresh: true,
       });
@@ -943,6 +985,7 @@
     activeSettingsChartId = id;
     chartSettingsName.value = c.label || '';
     chartSettingsDots.value = String(normalizeDotStyle(c.dotStyle));
+    chartSettingsArea.value = String(normalizeAreaOpacity(c.areaOpacity));
     chartSettingsDialog.showModal();
   }
 
@@ -1092,7 +1135,10 @@
     }
     c.label = String(chartSettingsName.value || '').trim() || null;
     c.dotStyle = normalizeDotStyle(chartSettingsDots.value);
-    appendConsoleLine(`chart ${activeSettingsChartId} settings updated dotStyle=${c.dotStyle}`);
+    c.areaOpacity = normalizeAreaOpacity(chartSettingsArea.value);
+    appendConsoleLine(
+      `chart ${activeSettingsChartId} settings updated dotStyle=${c.dotStyle} areaOpacity=${c.areaOpacity}`
+    );
     updateTitle(activeSettingsChartId);
     refreshChart(activeSettingsChartId).catch((err) => console.error(err));
     activeSettingsChartId = null;
