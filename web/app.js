@@ -675,6 +675,21 @@
         axisOrder.push(s.axisKey);
       }
     }
+    const maxByLegendName = new Map();
+    for (const s of seriesResponses) {
+      let maxValue;
+      for (const p of s.points) {
+        if (!Array.isArray(p) || p.length < 2) continue;
+        const v = p[1];
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+        if (maxValue === undefined || v > maxValue) {
+          maxValue = v;
+        }
+      }
+      if (maxValue !== undefined) {
+        maxByLegendName.set(s.displayName, maxValue);
+      }
+    }
 
     const axisSlot = 36;
     const yAxes = axisOrder.map((axisKey, i) => ({
@@ -701,7 +716,17 @@
     cfg.instance.setOption({
       backgroundColor: 'transparent',
       animation: false,
-      legend: { orient: 'vertical', left: gridLeft, top: gridTop, textStyle: { color: '#c6d2e0' } },
+      legend: {
+        orient: 'vertical',
+        left: gridLeft,
+        top: gridTop,
+        textStyle: { color: '#c6d2e0' },
+        formatter: (name) => {
+          const maxValue = maxByLegendName.get(name);
+          if (maxValue === undefined) return name;
+          return `${name} (max ${formatTooltipValue(maxValue)})`;
+        },
+      },
       tooltip: { trigger: 'axis' },
       axisPointer: { type: 'cross', snap: false },
       grid: {
