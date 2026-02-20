@@ -26,6 +26,14 @@
   const savedDashboardNames = new Set();
   const inverterNames = new Map();
   const inverterNameRequests = new Map();
+  const axisUnitsBySuffix = new Map([
+    ['power', 'W'],
+    ['voltage', 'V'],
+    ['temperature', '°C'],
+    ['current', 'A'],
+    ['yieldday', 'Wh'],
+    ['yieldtotal', 'kWh'],
+  ]);
   let settingsSaveTimer = null;
 
   function nowMs() {
@@ -183,6 +191,12 @@
     if (!name.startsWith(prefix)) return name;
     const trimmed = name.slice(prefix.length);
     return trimmed.length ? trimmed : name;
+  }
+
+  function axisLabelForSuffix(suffix) {
+    const raw = String(suffix || '');
+    const unit = axisUnitsBySuffix.get(raw.toLowerCase());
+    return unit ? `${raw} / ${unit}` : raw;
   }
 
   function displayPrefixForSeries(seriesNames) {
@@ -422,7 +436,7 @@
     const axisSlot = 36;
     const yAxes = axisOrder.map((axisKey, i) => ({
       type: 'value',
-      name: axisKey,
+      name: axisLabelForSuffix(axisKey),
       position: (i % 2 === 0) ? 'left' : 'right',
       offset: Math.floor(i / 2) * axisSlot,
       alignTicks: true,
