@@ -8,6 +8,8 @@ API:
 - GET /dashboards
 - GET /dashboards/<name>
 - PUT /dashboards/<name>
+- GET /settings
+- PUT /settings
 
 Time parameters support either:
 - Unix milliseconds (e.g. 1707000000000)
@@ -491,6 +493,34 @@ def save_dashboards(data_dir: str, dashboards: Dict[str, Dict[str, Any]]) -> Non
     os.replace(tmp, path)
 
 
+def _settings_file_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "settings.json")
+
+
+def load_settings(data_dir: str) -> Dict[str, Any]:
+    path = _settings_file_path(data_dir)
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        return {}
+    settings = raw.get("settings", raw)
+    if not isinstance(settings, dict):
+        return {}
+    return settings
+
+
+def save_settings(data_dir: str, settings: Dict[str, Any]) -> None:
+    path = _settings_file_path(data_dir)
+    tmp = f"{path}.tmp"
+    payload = {"settings": settings}
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
 class TsdbRequestHandler(BaseHTTPRequestHandler):
     server_version = "TSDBServer/1.0"
 
@@ -584,6 +614,9 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/dashboards/"):
                 self._handle_dashboards_get(path)
                 return
+            if path == "/settings":
+                self._handle_settings_get()
+                return
 
             status, payload = build_error(404, "not_found", f"Unknown endpoint: {path}")
             self._send_json(status, payload)
@@ -606,6 +639,9 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/dashboards/"):
                 self._handle_dashboards_put(path)
+                return
+            if path == "/settings":
+                self._handle_settings_put()
                 return
             status, payload = build_error(404, "not_found", f"Unknown endpoint: {path}")
             self._send_json(status, payload)
@@ -747,6 +783,33 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         dashboards[name] = dashboard
         save_dashboards(data_dir, dashboards)
         self._send_json(200, {"ok": True, "name": name})
+
+    def _handle_settings_get(self) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+        settings = load_settings(data_dir)
+        self._send_json(200, {"settings": settings})
+
+    def _handle_settings_put(self) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+        length_raw = self.headers.get("Content-Length", "").strip()
+        if not length_raw:
+            raise ValueError("Missing Content-Length")
+        try:
+            length = int(length_raw)
+        except ValueError:
+            raise ValueError("Invalid Content-Length")
+        if length <= 0:
+            raise ValueError("Empty request body")
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            raise ValueError("Invalid JSON body")
+        settings = payload.get("settings", payload) if isinstance(payload, dict) else None
+        if not isinstance(settings, dict):
+            raise ValueError("Settings payload must be an object")
+        save_settings(data_dir, settings)
+        self._send_json(200, {"ok": True})
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Keep plain stderr logging with timestamp from BaseHTTPRequestHandler.

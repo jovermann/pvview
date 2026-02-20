@@ -26,6 +26,7 @@
   const savedDashboardNames = new Set();
   const inverterNames = new Map();
   const inverterNameRequests = new Map();
+  let settingsSaveTimer = null;
 
   function nowMs() {
     return Date.now();
@@ -93,6 +94,7 @@
     activePreset = null;
     clearPresetSelection();
     refreshAllCharts();
+    queueSaveSettings();
   }
 
   function zoomRangeWindow(zoomFactor) {
@@ -109,10 +111,54 @@
     activePreset = null;
     clearPresetSelection();
     refreshAllCharts();
+    queueSaveSettings();
   }
 
   function refreshAllCharts() {
     charts.forEach((_, id) => refreshChart(id).catch((err) => console.error(err)));
+  }
+
+  function currentSettingsPayload() {
+    return {
+      dashboard: String(dashboardSelect.value || 'Default'),
+      range: {
+        preset: activePreset || 'custom',
+        start: startInput.value,
+        end: endInput.value,
+      },
+    };
+  }
+
+  async function saveSettingsNow() {
+    const payload = { settings: currentSettingsPayload() };
+    await apiJson('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  function queueSaveSettings() {
+    if (settingsSaveTimer !== null) {
+      clearTimeout(settingsSaveTimer);
+      settingsSaveTimer = null;
+    }
+    settingsSaveTimer = setTimeout(() => {
+      settingsSaveTimer = null;
+      saveSettingsNow().catch((err) => console.error(err));
+    }, 250);
+  }
+
+  async function loadSettings() {
+    try {
+      const data = await apiJson('/settings');
+      if (data && data.settings && typeof data.settings === 'object') {
+        return data.settings;
+      }
+    } catch (err) {
+      console.error(err);
+    }
+    return {};
   }
 
   function commonSeriesPrefix(seriesNames) {
@@ -522,11 +568,6 @@
     chartList.sort((a, b) => (a.y - b.y) || (a.x - b.x));
     return {
       version: 1,
-      range: {
-        preset: activePreset || 'custom',
-        start: startInput.value,
-        end: endInput.value,
-      },
       charts: chartList,
     };
   }
@@ -534,18 +575,6 @@
   function applyDashboard(dashboard) {
     if (!dashboard || typeof dashboard !== 'object') {
       throw new Error('Invalid dashboard payload');
-    }
-
-    const range = dashboard.range || {};
-    const preset = typeof range.preset === 'string' ? range.preset : 'custom';
-    if (preset !== 'custom') {
-      activePreset = preset;
-      setRangeByPreset(preset);
-    } else {
-      activePreset = null;
-      if (typeof range.start === 'string' && range.start) startInput.value = range.start;
-      if (typeof range.end === 'string' && range.end) endInput.value = range.end;
-      clearPresetSelection();
     }
 
     clearAllCharts();
@@ -594,6 +623,7 @@
     await refreshDashboardNames();
     dashboardSelect.value = name;
     dashboardNameInput.value = name;
+    queueSaveSettings();
   }
 
   async function openSeriesDialog(id) {
@@ -671,6 +701,7 @@
       activePreset = target.dataset.range || null;
       setRangeByPreset(target.dataset.range);
       refreshAllCharts();
+      queueSaveSettings();
       return;
     }
 
@@ -737,11 +768,13 @@
   startInput.addEventListener('change', () => {
     activePreset = null;
     clearPresetSelection();
+    queueSaveSettings();
   });
 
   endInput.addEventListener('change', () => {
     activePreset = null;
     clearPresetSelection();
+    queueSaveSettings();
   });
 
   rangePresetSelect.addEventListener('change', () => {
@@ -749,11 +782,13 @@
     if (value === 'custom') {
       activePreset = null;
       clearPresetSelection();
+      queueSaveSettings();
       return;
     }
     activePreset = value;
     setRangeByPreset(value);
     refreshAllCharts();
+    queueSaveSettings();
   });
 
   autoRefreshSelect.addEventListener('change', () => {
@@ -765,10 +800,10 @@
     if (!name) return;
     dashboardNameInput.value = name;
     if (name === 'Default') {
-      buildDefaultCharts().catch((err) => console.error(err));
+      buildDefaultCharts().then(() => queueSaveSettings()).catch((err) => console.error(err));
       return;
     }
-    loadDashboardByName(name).catch((err) => console.error(err));
+    loadDashboardByName(name).then(() => queueSaveSettings()).catch((err) => console.error(err));
   });
 
   saveDashboardBtn.addEventListener('click', () => {
@@ -780,11 +815,38 @@
 
   setRangeByPreset('2d');
   configureAutoRefresh();
-  refreshDashboardNames().finally(() => {
+  refreshDashboardNames().then(async () => {
+    const settings = await loadSettings();
+    const range = settings && typeof settings.range === 'object' ? settings.range : {};
+    const preset = typeof range.preset === 'string' ? range.preset : '2d';
+    if (preset && preset !== 'custom') {
+      activePreset = preset;
+      setRangeByPreset(preset);
+    } else {
+      activePreset = null;
+      if (typeof range.start === 'string' && range.start) startInput.value = range.start;
+      if (typeof range.end === 'string' && range.end) endInput.value = range.end;
+      clearPresetSelection();
+    }
+
+    const desiredDashboard = (settings && typeof settings.dashboard === 'string' && settings.dashboard.trim())
+      ? settings.dashboard.trim()
+      : 'Default';
+    if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
+      dashboardSelect.value = desiredDashboard;
+      dashboardNameInput.value = desiredDashboard;
+      await loadDashboardByName(desiredDashboard);
+    } else {
+      dashboardSelect.value = 'Default';
+      dashboardNameInput.value = 'Default';
+      await buildDefaultCharts();
+    }
+  }).catch((err) => {
+    console.error(err);
     dashboardSelect.value = 'Default';
     dashboardNameInput.value = 'Default';
-    buildDefaultCharts().catch((err) => {
-      console.error(err);
+    buildDefaultCharts().catch((inner) => {
+      console.error(inner);
       if (charts.size === 0) {
         addChart(['solar/ac/power'], { label: 'AC Power' });
       }

@@ -76,6 +76,10 @@ input[type="datetime-local"], input[type="search"], select {
   padding: 6px 8px;
 }
 
+.dashboard-name {
+  width: 4.25rem;
+}
+
 main { padding: 4px; }
 
 .grid-stack-item-content {
