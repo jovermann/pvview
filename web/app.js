@@ -404,22 +404,37 @@
       return {
         name,
         displayName: compactSeriesLabel(displaySeriesName(name), prefix),
+        axisKey: String(name).split('/').pop() || String(name),
         points: breakLongGaps(points, 3600000),
         downsampled: !!data.downsampled,
       };
     }));
 
-    const yAxes = seriesResponses.map((s, i) => ({
+    const axisOrder = [];
+    const axisIndexByKey = new Map();
+    for (const s of seriesResponses) {
+      if (!axisIndexByKey.has(s.axisKey)) {
+        axisIndexByKey.set(s.axisKey, axisOrder.length);
+        axisOrder.push(s.axisKey);
+      }
+    }
+
+    const axisSlot = 36;
+    const yAxes = axisOrder.map((axisKey, i) => ({
       type: 'value',
-      name: '',
+      name: axisKey,
       position: (i % 2 === 0) ? 'left' : 'right',
-      offset: Math.floor(i / 2) * 52,
+      offset: Math.floor(i / 2) * axisSlot,
       alignTicks: true,
       axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
       axisLabel: { color: '#aebbc9' },
       splitLine: { show: i === 0, lineStyle: { color: '#2b3544' } },
       nameTextStyle: { color: '#aebbc9', fontSize: 10 },
+      nameLocation: 'middle',
+      nameGap: 32 + Math.floor(i / 2) * 6,
     }));
+
+    const axisCount = yAxes.length;
 
     cfg.instance.setOption({
       backgroundColor: 'transparent',
@@ -427,8 +442,8 @@
       legend: { top: 4, textStyle: { color: '#c6d2e0' } },
       tooltip: { trigger: 'axis' },
       grid: {
-        left: 52 + Math.floor((seriesResponses.length + 1) / 2) * 52,
-        right: 18 + Math.floor(seriesResponses.length / 2) * 52,
+        left: 8 + Math.floor((axisCount + 1) / 2) * axisSlot,
+        right: 8 + Math.floor(axisCount / 2) * axisSlot,
         top: 32,
         bottom: 30,
       },
@@ -443,7 +458,7 @@
       series: seriesResponses.map((s, i) => ({
         name: s.displayName,
         type: 'line',
-        yAxisIndex: i,
+        yAxisIndex: axisIndexByKey.get(s.axisKey) || 0,
         showSymbol: !!cfg.showSymbols,
         symbolSize: 1,
         smooth: 0,
