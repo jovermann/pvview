@@ -49,6 +49,13 @@
     return Date.now();
   }
 
+  function alignedNowMs(stepMs) {
+    const s = Number(stepMs);
+    if (!Number.isFinite(s) || s <= 0) return nowMs();
+    const t = nowMs();
+    return Math.floor(t / s) * s;
+  }
+
   function formatAbsTime(ms) {
     const d = new Date(ms);
     const pad2 = (n) => String(n).padStart(2, '0');
@@ -105,7 +112,7 @@
     const d = new Date(ms);
     const pad = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
-      `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
   function fromDatetimeLocalValue(value) {
@@ -143,7 +150,7 @@
       '5y': 43800,
       '10y': 87600,
     }[rangeKey] || 24;
-    const end = nowMs();
+    const end = alignedNowMs(5000);
     const start = end - hours * 3600 * 1000;
     startInput.value = toDatetimeLocalValue(start);
     endInput.value = toDatetimeLocalValue(end);
