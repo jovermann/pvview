@@ -27,6 +27,11 @@
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
   let activeSettingsChartId = null;
+  let consolePanelId = null;
+  let apiTraceEnabled = false;
+  let lastConsoleLogMs = null;
+  const consoleLines = [];
+  const maxConsoleLines = 3000;
   const savedDashboardNames = new Set();
   const inverterNames = new Map();
   const inverterNameRequests = new Map();
@@ -42,6 +47,58 @@
 
   function nowMs() {
     return Date.now();
+  }
+
+  function formatAbsTime(ms) {
+    const d = new Date(ms);
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const pad3 = (n) => String(n).padStart(3, '0');
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
+  }
+
+  function appendConsoleLine(text) {
+    const now = nowMs();
+    const rel = lastConsoleLogMs === null ? 0 : (now - lastConsoleLogMs);
+    lastConsoleLogMs = now;
+    const relText = String(rel).padStart(4, ' ');
+    const line = `${formatAbsTime(now)} ${relText}ms ${text}`;
+    consoleLines.push(line);
+    if (consoleLines.length > maxConsoleLines) {
+      consoleLines.splice(0, consoleLines.length - maxConsoleLines);
+    }
+    if (!consolePanelId) {
+      return;
+    }
+    const panel = charts.get(consolePanelId);
+    if (!panel || panel.kind !== 'console' || !(panel.logEl instanceof HTMLElement)) {
+      return;
+    }
+    panel.logEl.textContent = consoleLines.join('\n');
+    panel.logEl.scrollTop = panel.logEl.scrollHeight;
+  }
+
+  function refreshConsoleView() {
+    if (!consolePanelId) return;
+    const panel = charts.get(consolePanelId);
+    if (!panel || panel.kind !== 'console' || !(panel.logEl instanceof HTMLElement)) {
+      return;
+    }
+    panel.logEl.textContent = consoleLines.join('\n');
+    panel.logEl.scrollTop = panel.logEl.scrollHeight;
+  }
+
+  function isApiTraceEnabled() {
+    return !!apiTraceEnabled;
+  }
+
+  function chartIds() {
+    const ids = [];
+    for (const [id, cfg] of charts.entries()) {
+      if (cfg && cfg.kind === 'chart') {
+        ids.push(id);
+      }
+    }
+    return ids;
   }
 
   function toDatetimeLocalValue(ms) {
@@ -105,7 +162,7 @@
     endInput.value = toDatetimeLocalValue(end + delta);
     activePreset = null;
     clearPresetSelection();
-    refreshAllCharts();
+    refreshAllCharts('shift-range').catch((err) => console.error(err));
     queueSaveSettings();
   }
 
@@ -122,12 +179,23 @@
     endInput.value = toDatetimeLocalValue(center + clampedHalf);
     activePreset = null;
     clearPresetSelection();
-    refreshAllCharts();
+    refreshAllCharts('zoom-range').catch((err) => console.error(err));
     queueSaveSettings();
   }
 
-  function refreshAllCharts() {
-    charts.forEach((_, id) => refreshChart(id).catch((err) => console.error(err)));
+  async function refreshAllCharts(reason = 'manual') {
+    const ids = chartIds();
+    const t0 = performance.now();
+    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length}`);
+    const results = await Promise.allSettled(ids.map((id) => refreshChart(id)));
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        appendConsoleLine(`chart ${ids[i]} refresh error ${r.reason}`);
+      }
+    });
+    const elapsed = Math.round(performance.now() - t0);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} failed=${failed} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -142,12 +210,14 @@
   }
 
   async function saveSettingsNow() {
+    appendConsoleLine('settings save start');
     const payload = { settings: currentSettingsPayload() };
     await apiJson('/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    appendConsoleLine('settings save done');
   }
 
   function queueSaveSettings() {
@@ -163,11 +233,15 @@
 
   async function loadSettings() {
     try {
+      appendConsoleLine('settings load start');
       const data = await apiJson('/settings');
       if (data && data.settings && typeof data.settings === 'object') {
+        appendConsoleLine('settings load done');
         return data.settings;
       }
+      appendConsoleLine('settings load done (empty)');
     } catch (err) {
+      appendConsoleLine(`settings load failed ${err}`);
       console.error(err);
     }
     return {};
@@ -264,7 +338,7 @@
       if (activePreset) {
         setRangeByPreset(activePreset);
       }
-      refreshAllCharts();
+      refreshAllCharts('auto-refresh').catch((err) => console.error(err));
     }, intervalMs);
   }
 
@@ -275,18 +349,49 @@
   }
 
   async function apiJson(path, options = {}) {
-    const res = await fetch(path, options);
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`${res.status}: ${body}`);
+    const method = String(options.method || 'GET').toUpperCase();
+    const t0 = performance.now();
+    if (isApiTraceEnabled()) {
+      appendConsoleLine(`api start ${method} ${path}`);
     }
-    return res.json();
+    try {
+      const res = await fetch(path, options);
+      if (!res.ok) {
+        const body = await res.text();
+        if (isApiTraceEnabled()) {
+          appendConsoleLine(
+            `api error ${method} ${path} status=${res.status} elapsed=${Math.round(performance.now() - t0)}ms`
+          );
+        }
+        throw new Error(`${res.status}: ${body}`);
+      }
+      const data = await res.json();
+      if (isApiTraceEnabled()) {
+        appendConsoleLine(
+          `api done ${method} ${path} status=${res.status} elapsed=${Math.round(performance.now() - t0)}ms`
+        );
+      }
+      return data;
+    } catch (err) {
+      if (isApiTraceEnabled()) {
+        appendConsoleLine(
+          `api failed ${method} ${path} elapsed=${Math.round(performance.now() - t0)}ms error=${err}`
+        );
+      }
+      throw err;
+    }
   }
 
   async function fetchSeriesCatalog() {
     const { start, end } = getRange();
     const q = new URLSearchParams({ start: String(start), end: String(end) });
+    const t0 = performance.now();
+    appendConsoleLine(`catalog request start start=${start} end=${end}`);
     const data = await apiJson(`/series?${q}`);
+    appendConsoleLine(
+      `catalog request done series=${Array.isArray(data.series) ? data.series.length : 0} `
+      + `files=${Array.isArray(data.files) ? data.files.length : 0} elapsed=${Math.round(performance.now() - t0)}ms`
+    );
     return data.series || [];
   }
 
@@ -303,6 +408,7 @@
 
   async function refreshDashboardNames() {
     try {
+      appendConsoleLine('dashboards load start');
       const data = await apiJson('/dashboards');
       savedDashboardNames.clear();
       for (const name of (data.dashboards || [])) {
@@ -310,7 +416,9 @@
           savedDashboardNames.add(name);
         }
       }
+      appendConsoleLine(`dashboards load done count=${savedDashboardNames.size}`);
     } catch (err) {
+      appendConsoleLine(`dashboards load failed ${err}`);
       console.error(err);
       savedDashboardNames.clear();
     }
@@ -396,6 +504,57 @@
     return wrapper;
   }
 
+  function createConsolePanel(options = {}) {
+    if (consolePanelId && charts.has(consolePanelId)) {
+      appendConsoleLine(`console already exists as panel=${consolePanelId}`);
+      return consolePanelId;
+    }
+    const initialApiTrace = !!options.apiTrace;
+    apiTraceEnabled = initialApiTrace;
+    chartCounter += 1;
+    const id = String(chartCounter);
+    const widgetEl = document.createElement('div');
+    widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 12,
+      h: options.h || 2,
+    });
+    const wrapper = document.createElement('div');
+    wrapper.className = 'panel';
+    wrapper.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">Console</div>
+        <div class="panel-actions">
+          <label class="panel-check" title="Log all API requests">
+            <input type="checkbox" data-action="api-trace" data-id="${id}" ${initialApiTrace ? 'checked' : ''} />
+            <span>API</span>
+          </label>
+          <button class="icon-btn" data-action="console-clear" data-id="${id}">Clear</button>
+          <button class="icon-btn" data-action="console-bar" data-id="${id}">Bar</button>
+          <button class="icon-btn danger" data-action="remove-console" data-id="${id}">Remove</button>
+        </div>
+      </div>
+      <pre class="console-view" id="console-${id}"></pre>
+    `;
+    node.querySelector('.grid-stack-item-content').appendChild(wrapper);
+    const logEl = document.getElementById(`console-${id}`);
+    charts.set(id, {
+      id,
+      kind: 'console',
+      node,
+      logEl,
+      apiTrace: initialApiTrace,
+    });
+    consolePanelId = id;
+    if (logEl) {
+      refreshConsoleView();
+    }
+    appendConsoleLine(`console created panel=${id}`);
+    return id;
+  }
+
   function updateTitle(id) {
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
@@ -405,7 +564,10 @@
 
   async function refreshChart(id) {
     const cfg = charts.get(id);
-    if (!cfg || !cfg.instance) return;
+    if (!cfg || cfg.kind !== 'chart' || !cfg.instance) return;
+    const chartName = cfg.label || `Chart ${id}`;
+    const refreshT0 = performance.now();
+    appendConsoleLine(`chart ${id} refresh start name="${chartName}" series=${cfg.series.length}`);
     const { start, end } = getRange();
     await ensureInverterNames(cfg.series);
     if (!cfg.series.length) {
@@ -414,6 +576,7 @@
         backgroundColor: 'transparent',
         title: { text: 'No series selected', left: 'center', top: 'middle', textStyle: { color: '#8ca0b8' } }
       });
+      appendConsoleLine(`chart ${id} refresh done (no series) elapsed=${Math.round(performance.now() - refreshT0)}ms`);
       return;
     }
 
@@ -427,11 +590,17 @@
         end: String(end),
         maxEvents: String(maxEvents),
       });
+      const reqT0 = performance.now();
+      appendConsoleLine(`chart ${id} request start series=${name}`);
       const data = await apiJson(`/events?${q}`);
       const points = (data.points || []).map((p) => {
         if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, p.value];
         return [p.timestamp, p.avg];
       });
+      appendConsoleLine(
+        `chart ${id} request done series=${name} points=${points.length} downsampled=${!!data.downsampled} `
+        + `files=${Array.isArray(data.files) ? data.files.length : 0} elapsed=${Math.round(performance.now() - reqT0)}ms`
+      );
       return {
         name,
         displayName: compactSeriesLabel(displaySeriesName(name), prefix),
@@ -500,6 +669,10 @@
         data: s.points,
       })),
     }, true);
+    appendConsoleLine(
+      `chart ${id} refresh done name="${chartName}" series=${seriesResponses.length} axes=${axisCount} `
+      + `elapsed=${Math.round(performance.now() - refreshT0)}ms`
+    );
   }
 
   function addChart(initialSeries = [], options = {}) {
@@ -525,12 +698,14 @@
     );
     charts.set(id, {
       id,
+      kind: 'chart',
       node,
       instance,
       series: [...initialSeries],
       dotStyle: initialDotStyle,
       label: options.label || null,
     });
+    appendConsoleLine(`chart ${id} created series=${initialSeries.length}`);
 
     updateTitle(id);
     if (!options.deferRefresh) {
@@ -539,17 +714,30 @@
     return id;
   }
 
-  function removeChart(id) {
+  function removePanel(id) {
     const c = charts.get(id);
     if (!c) return;
-    c.instance.dispose();
+    appendConsoleLine(`panel ${id} removed type=${c.kind || 'unknown'}`);
+    if (c.kind === 'chart' && c.instance) {
+      c.instance.dispose();
+    }
+    if (consolePanelId === id) {
+      consolePanelId = null;
+      apiTraceEnabled = false;
+    }
     grid.removeWidget(c.node);
     charts.delete(id);
   }
 
+  function removeChart(id) {
+    const c = charts.get(id);
+    if (!c || c.kind !== 'chart') return;
+    removePanel(id);
+  }
+
   function clearAllCharts() {
     for (const id of Array.from(charts.keys())) {
-      removeChart(id);
+      removePanel(id);
     }
   }
 
@@ -561,6 +749,7 @@
   }
 
   async function buildDefaultCharts() {
+    appendConsoleLine('build default dashboard start');
     const catalog = await fetchSeriesCatalog();
     await ensureInverterNames(catalog);
     const available = new Set(catalog);
@@ -595,14 +784,27 @@
     }
     dashboardSelect.value = 'Default';
     dashboardNameInput.value = 'Default';
-    refreshAllCharts();
+    await refreshAllCharts('default-dashboard');
+    appendConsoleLine(`build default dashboard done charts=${chartIds().length}`);
   }
 
   function serializeDashboard() {
     const chartList = [];
     for (const c of charts.values()) {
       const nodeInfo = c.node && c.node.gridstackNode ? c.node.gridstackNode : {};
+      if (c.kind === 'console') {
+        chartList.push({
+          type: 'console',
+          x: Number(nodeInfo.x || 0),
+          y: Number(nodeInfo.y || 0),
+          w: Number(nodeInfo.w || 12),
+          h: Number(nodeInfo.h || 2),
+          apiTrace: !!c.apiTrace,
+        });
+        continue;
+      }
       chartList.push({
+        type: 'chart',
         x: Number(nodeInfo.x || 0),
         y: Number(nodeInfo.y || 0),
         w: Number(nodeInfo.w || 6),
@@ -628,6 +830,16 @@
     const chartDefs = Array.isArray(dashboard.charts) ? dashboard.charts : [];
     for (const ch of chartDefs) {
       if (!ch || typeof ch !== 'object') continue;
+      if (ch.type === 'console') {
+        createConsolePanel({
+          x: Number(ch.x),
+          y: Number(ch.y),
+          w: Number(ch.w) || 12,
+          h: Number(ch.h) || 2,
+          apiTrace: !!ch.apiTrace,
+        });
+        continue;
+      }
       const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
       addChart(series, {
         x: Number(ch.x),
@@ -639,7 +851,7 @@
         deferRefresh: true,
       });
     }
-    refreshAllCharts();
+    refreshAllCharts('dashboard-apply').catch((err) => console.error(err));
   }
 
   async function loadDashboardByName(name) {
@@ -647,8 +859,10 @@
       await buildDefaultCharts();
       return;
     }
+    appendConsoleLine(`dashboard load start name="${name}"`);
     const data = await apiJson(`/dashboards/${encodeURIComponent(name)}`);
     applyDashboard(data.dashboard);
+    appendConsoleLine(`dashboard load done name="${name}"`);
   }
 
   async function saveCurrentDashboard() {
@@ -661,6 +875,7 @@
       alert("The name 'Default' is reserved. Please choose another name.");
       return;
     }
+    appendConsoleLine(`dashboard save start name="${name}"`);
     const payload = { dashboard: serializeDashboard() };
     await apiJson(`/dashboards/${encodeURIComponent(name)}`, {
       method: 'PUT',
@@ -671,6 +886,7 @@
     dashboardSelect.value = name;
     dashboardNameInput.value = name;
     queueSaveSettings();
+    appendConsoleLine(`dashboard save done name="${name}"`);
   }
 
   async function openSeriesDialog(id) {
@@ -722,6 +938,7 @@
       return;
     }
     c.series = Array.from(activeSeriesSelection || []);
+    appendConsoleLine(`chart ${activeChartId} series updated count=${c.series.length}`);
     updateTitle(activeChartId);
     refreshChart(activeChartId).catch((err) => console.error(err));
     activeSeriesSelection = null;
@@ -756,7 +973,7 @@
     if (target.matches('.preset')) {
       activePreset = target.dataset.range || null;
       setRangeByPreset(target.dataset.range);
-      refreshAllCharts();
+      refreshAllCharts('preset-click').catch((err) => console.error(err));
       queueSaveSettings();
       return;
     }
@@ -785,12 +1002,17 @@
       if (activePreset) {
         setRangeByPreset(activePreset);
       }
-      refreshAllCharts();
+      refreshAllCharts('manual-refresh').catch((err) => console.error(err));
       return;
     }
 
     if (target.id === 'addChart') {
       addChart();
+      return;
+    }
+
+    if (target.id === 'addConsole') {
+      createConsolePanel();
       return;
     }
 
@@ -803,6 +1025,38 @@
       openChartSettingsDialog(target.dataset.id);
       return;
     }
+
+    if (target.dataset.action === 'remove-console') {
+      appendConsoleLine('console removed');
+      removePanel(target.dataset.id);
+      return;
+    }
+
+    if (target.dataset.action === 'console-clear') {
+      consoleLines.splice(0, consoleLines.length);
+      lastConsoleLogMs = null;
+      refreshConsoleView();
+      return;
+    }
+
+    if (target.dataset.action === 'console-bar') {
+      appendConsoleLine('================================================================');
+      appendConsoleLine('================================================================');
+      appendConsoleLine('================================================================');
+      return;
+    }
+  });
+
+  document.addEventListener('change', (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.dataset.action !== 'api-trace') return;
+    const id = target.dataset.id;
+    const panel = charts.get(id);
+    if (!panel || panel.kind !== 'console') return;
+    panel.apiTrace = !!target.checked;
+    apiTraceEnabled = !!target.checked;
+    appendConsoleLine(`console api logging ${apiTraceEnabled ? 'enabled' : 'disabled'}`);
   });
 
   document.getElementById('chartSettingsForm').addEventListener('submit', (e) => {
@@ -818,6 +1072,7 @@
     }
     c.label = String(chartSettingsName.value || '').trim() || null;
     c.dotStyle = normalizeDotStyle(chartSettingsDots.value);
+    appendConsoleLine(`chart ${activeSettingsChartId} settings updated dotStyle=${c.dotStyle}`);
     updateTitle(activeSettingsChartId);
     refreshChart(activeSettingsChartId).catch((err) => console.error(err));
     activeSettingsChartId = null;
@@ -845,11 +1100,19 @@
   });
 
   grid.on('resizestop', () => {
-    charts.forEach((c) => c.instance.resize());
+    charts.forEach((c) => {
+      if (c.kind === 'chart' && c.instance) {
+        c.instance.resize();
+      }
+    });
   });
 
   window.addEventListener('resize', () => {
-    charts.forEach((c) => c.instance.resize());
+    charts.forEach((c) => {
+      if (c.kind === 'chart' && c.instance) {
+        c.instance.resize();
+      }
+    });
   });
 
   startInput.addEventListener('change', () => {
@@ -874,7 +1137,7 @@
     }
     activePreset = value;
     setRangeByPreset(value);
-    refreshAllCharts();
+    refreshAllCharts('preset-select').catch((err) => console.error(err));
     queueSaveSettings();
   });
 

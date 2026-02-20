@@ -116,6 +116,19 @@ main { padding: 4px; }
 
 .panel-actions { display: flex; gap: 6px; }
 
+.panel-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.panel-check input {
+  margin: 0;
+}
+
 .icon-btn {
   border: 1px solid var(--border);
   background: #222a36;
@@ -142,6 +155,19 @@ main { padding: 4px; }
 .chart {
   flex: 1;
   min-height: 180px;
+}
+
+.console-view {
+  flex: 1;
+  margin: 0;
+  padding: 6px 8px;
+  overflow: auto;
+  background: #10151d;
+  color: #c9d4e2;
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre;
 }
 
 .modal {
