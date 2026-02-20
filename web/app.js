@@ -668,8 +668,6 @@
       name: axisLabelForSuffix(axisKey),
       position: (i % 2 === 0) ? 'left' : 'right',
       offset: Math.floor(i / 2) * axisSlot,
-      min: (value) => Math.min(0, value.min),
-      max: (value) => Math.max(0, value.max),
       alignTicks: true,
       axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
       axisLabel: { color: '#aebbc9' },
@@ -684,7 +682,7 @@
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
     const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
     const gridRight = 8 + Math.floor(axisCount / 2) * axisSlot;
-    const gridTop = 32;
+    const gridTop = 12;
 
     cfg.instance.setOption({
       backgroundColor: 'transparent',
@@ -757,7 +755,9 @@
     const initialDotStyle = normalizeDotStyle(
       options.dotStyle !== undefined ? options.dotStyle : (options.showSymbols ? 1 : 0)
     );
-    const initialAreaOpacity = normalizeAreaOpacity(options.areaOpacity);
+    const initialAreaOpacity = options.areaOpacity !== undefined
+      ? normalizeAreaOpacity(options.areaOpacity)
+      : 0.3;
     charts.set(id, {
       id,
       kind: 'chart',
@@ -911,7 +911,7 @@
         w: Number(ch.w) || 6,
         h: Number(ch.h) || 3,
         dotStyle: ch.dotStyle !== undefined ? normalizeDotStyle(ch.dotStyle) : (ch.showSymbols ? 1 : 0),
-        areaOpacity: normalizeAreaOpacity(ch.areaOpacity),
+        areaOpacity: ch.areaOpacity !== undefined ? normalizeAreaOpacity(ch.areaOpacity) : 0.3,
         label: typeof ch.label === 'string' ? ch.label : null,
         deferRefresh: true,
       });
