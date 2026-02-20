@@ -682,16 +682,19 @@
     const axisCount = yAxes.length;
     const dots = dotVisual(cfg.dotStyle);
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
+    const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
+    const gridRight = 8 + Math.floor(axisCount / 2) * axisSlot;
+    const gridTop = 32;
 
     cfg.instance.setOption({
       backgroundColor: 'transparent',
       animation: false,
-      legend: { top: 4, textStyle: { color: '#c6d2e0' } },
+      legend: { orient: 'vertical', left: gridLeft, top: gridTop, textStyle: { color: '#c6d2e0' } },
       tooltip: { trigger: 'axis' },
       grid: {
-        left: 8 + Math.floor((axisCount + 1) / 2) * axisSlot,
-        right: 8 + Math.floor(axisCount / 2) * axisSlot,
-        top: 32,
+        left: gridLeft,
+        right: gridRight,
+        top: gridTop,
         bottom: 30,
       },
       xAxis: {
