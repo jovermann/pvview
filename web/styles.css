@@ -215,19 +215,21 @@ menu {
   margin-right: auto;
 }
 
-.settings-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 13px;
+.settings-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  align-items: center;
 }
 
-.settings-check {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  color: var(--text);
+.settings-grid input,
+.settings-grid select {
+  width: 100%;
+}
+
+.settings-label {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 @media (max-width: 900px) {
