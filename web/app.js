@@ -20,9 +20,13 @@
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
+  const chartSettingsDialog = document.getElementById('chartSettingsDialog');
+  const chartSettingsName = document.getElementById('chartSettingsName');
+  const chartSettingsDots = document.getElementById('chartSettingsDots');
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
+  let activeSettingsChartId = null;
   const savedDashboardNames = new Set();
   const inverterNames = new Map();
   const inverterNameRequests = new Map();
@@ -367,10 +371,7 @@
         <div class="panel-title" id="title-${id}">Chart ${id}</div>
         <div class="panel-actions">
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
-          <label class="icon-toggle" title="Show/hide dots">
-            <input type="checkbox" data-action="symbols" data-id="${id}" />
-            <span>Dots</span>
-          </label>
+          <button class="settings-gadget" data-action="settings" data-id="${id}" title="Settings">⚙️</button>
           <button class="close-gadget" data-action="remove" data-id="${id}" title="Close">❎</button>
         </div>
       </div>
@@ -509,10 +510,6 @@
       showSymbols: !!options.showSymbols,
       label: options.label || null,
     });
-    const dotsInput = node.querySelector('input[data-action="symbols"]');
-    if (dotsInput instanceof HTMLInputElement) {
-      dotsInput.checked = !!options.showSymbols;
-    }
 
     updateTitle(id);
     if (!options.deferRefresh) {
@@ -683,6 +680,15 @@
     dialog.showModal();
   }
 
+  function openChartSettingsDialog(id) {
+    const c = charts.get(id);
+    if (!c) return;
+    activeSettingsChartId = id;
+    chartSettingsName.value = c.label || '';
+    chartSettingsDots.checked = !!c.showSymbols;
+    chartSettingsDialog.showModal();
+  }
+
   document.getElementById('seriesForm').addEventListener('submit', (e) => {
     e.preventDefault();
     if (!activeChartId) {
@@ -773,17 +779,39 @@
       openSeriesDialog(target.dataset.id).catch((err) => console.error(err));
       return;
     }
+
+    if (target.dataset.action === 'settings') {
+      openChartSettingsDialog(target.dataset.id);
+      return;
+    }
   });
 
-  document.addEventListener('change', (ev) => {
-    const target = ev.target;
-    if (!(target instanceof HTMLInputElement)) return;
-    if (target.dataset.action !== 'symbols') return;
-    const id = target.dataset.id;
-    const c = charts.get(id);
-    if (!c) return;
-    c.showSymbols = target.checked;
-    refreshChart(id).catch((err) => console.error(err));
+  document.getElementById('chartSettingsForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeSettingsChartId) {
+      chartSettingsDialog.close();
+      return;
+    }
+    const c = charts.get(activeSettingsChartId);
+    if (!c) {
+      chartSettingsDialog.close();
+      return;
+    }
+    c.label = String(chartSettingsName.value || '').trim() || null;
+    c.showSymbols = !!chartSettingsDots.checked;
+    updateTitle(activeSettingsChartId);
+    refreshChart(activeSettingsChartId).catch((err) => console.error(err));
+    activeSettingsChartId = null;
+    chartSettingsDialog.close();
+  });
+
+  document.getElementById('cancelChartSettings').addEventListener('click', () => {
+    activeSettingsChartId = null;
+    chartSettingsDialog.close();
+  });
+
+  chartSettingsDialog.addEventListener('close', () => {
+    activeSettingsChartId = null;
   });
 
   grid.on('resizestop', () => {

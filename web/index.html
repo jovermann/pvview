@@ -92,6 +92,24 @@
     </form>
   </dialog>
 
+  <dialog id="chartSettingsDialog" class="modal">
+    <form method="dialog" class="modal-content" id="chartSettingsForm">
+      <h2>Chart Settings</h2>
+      <label class="settings-field">
+        <span>Name</span>
+        <input id="chartSettingsName" type="text" placeholder="Chart name" />
+      </label>
+      <label class="settings-field settings-check">
+        <input id="chartSettingsDots" type="checkbox" />
+        <span>Show dots</span>
+      </label>
+      <menu>
+        <button id="cancelChartSettings" type="button" class="btn">Cancel</button>
+        <button id="saveChartSettings" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
   <script src="https://cdn.jsdelivr.net/npm/gridstack@10.2.0/dist/gridstack-all.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/static/app.js"></script>

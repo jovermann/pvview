@@ -135,21 +135,15 @@ main { padding: 4px; }
   cursor: pointer;
 }
 
-.icon-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 4px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: #222a36;
-  color: var(--text);
-  font-size: 12px;
-  user-select: none;
-}
-
-.icon-toggle input {
+.settings-gadget {
+  border: none;
+  background: transparent;
+  color: #c6d2e0;
+  padding: 0;
   margin: 0;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .chart {
@@ -196,6 +190,21 @@ menu {
   gap: 8px;
   margin: 0;
   padding: 0;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
 }
 
 @media (max-width: 900px) {
