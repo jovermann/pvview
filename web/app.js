@@ -20,6 +20,8 @@
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
+  const inverterNames = new Map();
+  const inverterNameRequests = new Map();
 
   function nowMs() {
     return Date.now();
@@ -203,6 +205,69 @@
     return data.series || [];
   }
 
+  function inverterIdFromSeries(seriesName) {
+    const m = /^solar\/(\d+)\//.exec(String(seriesName));
+    return m ? m[1] : null;
+  }
+
+  async function fetchInverterName(inverterId) {
+    if (inverterNames.has(inverterId)) {
+      return inverterNames.get(inverterId);
+    }
+    if (inverterNameRequests.has(inverterId)) {
+      return inverterNameRequests.get(inverterId);
+    }
+    const p = (async () => {
+      const candidates = [`solar/${inverterId}/name`];
+      try {
+        for (const seriesName of candidates) {
+          const q = new URLSearchParams({
+            series: seriesName,
+            start: '0',
+            end: '9999999999999',
+            maxEvents: '1',
+          });
+          const data = await apiJson(`/events?${q}`);
+          const first = Array.isArray(data.points) && data.points.length ? data.points[0] : null;
+          const name = first && typeof first.value === 'string' ? first.value.trim() : '';
+          if (name) {
+            inverterNames.set(inverterId, name);
+            return name;
+          }
+        }
+      } catch (_err) {
+        // ignore, fallback to inverter id
+      } finally {
+        inverterNameRequests.delete(inverterId);
+      }
+      return null;
+    })();
+    inverterNameRequests.set(inverterId, p);
+    return p;
+  }
+
+  async function ensureInverterNames(seriesNames) {
+    const ids = new Set();
+    for (const s of (seriesNames || [])) {
+      const id = inverterIdFromSeries(s);
+      if (id && !inverterNames.has(id)) {
+        ids.add(id);
+      }
+    }
+    if (ids.size === 0) return;
+    await Promise.all(Array.from(ids).map((id) => fetchInverterName(id)));
+  }
+
+  function displaySeriesName(seriesName) {
+    const s = String(seriesName);
+    const m = /^solar\/(\d+)(?=\/)/.exec(s);
+    if (!m) return s;
+    const inverterId = m[1];
+    const name = inverterNames.get(inverterId);
+    if (!name) return s;
+    return s.replace(/^solar\/\d+/, `solar/${name}`);
+  }
+
   function createPanelDom(id) {
     const wrapper = document.createElement('div');
     wrapper.className = 'panel';
@@ -234,6 +299,7 @@
     const cfg = charts.get(id);
     if (!cfg || !cfg.instance) return;
     const { start, end } = getRange();
+    await ensureInverterNames(cfg.series);
     if (!cfg.series.length) {
       cfg.instance.clear();
       cfg.instance.setOption({
@@ -244,7 +310,8 @@
     }
 
     const maxEvents = 1200;
-    const prefix = displayPrefixForSeries(cfg.series);
+    const displaySeries = cfg.series.map((s) => displaySeriesName(s));
+    const prefix = displayPrefixForSeries(displaySeries);
     const seriesResponses = await Promise.all(cfg.series.map(async (name) => {
       const q = new URLSearchParams({
         series: name,
@@ -259,7 +326,7 @@
       });
       return {
         name,
-        displayName: compactSeriesLabel(name, prefix),
+        displayName: compactSeriesLabel(displaySeriesName(name), prefix),
         points: breakLongGaps(points, 3600000),
         downsampled: !!data.downsampled,
       };
@@ -360,6 +427,7 @@
 
   async function buildDefaultCharts() {
     const catalog = await fetchSeriesCatalog();
+    await ensureInverterNames(catalog);
     const available = new Set(catalog);
     clearAllCharts();
 
@@ -383,7 +451,7 @@
       if (available.has(power)) selected.push(power);
       if (available.has(temp)) selected.push(temp);
       if (selected.length === 0) continue;
-      addChart(selected, { label: `INV ${inverterId}`, w: 6, h: 3 });
+      addChart(selected, { label: inverterNames.get(inverterId) || `INV ${inverterId}`, w: 6, h: 3 });
       created += 1;
     }
 
@@ -397,14 +465,19 @@
     const c = charts.get(id);
     if (!c) return;
     const catalog = await fetchSeriesCatalog();
+    await ensureInverterNames(catalog);
     activeSeriesSelection = new Set(c.series);
 
     function renderList(filter = '') {
-      const filtered = catalog.filter((s) => s.toLowerCase().includes(filter.toLowerCase()));
+      const f = String(filter || '').toLowerCase();
+      const filtered = catalog.filter((s) => {
+        const display = displaySeriesName(s);
+        return s.toLowerCase().includes(f) || display.toLowerCase().includes(f);
+      });
       seriesList.innerHTML = filtered.map((name) => `
         <label class="series-item">
           <input type="checkbox" value="${name}" ${activeSeriesSelection.has(name) ? 'checked' : ''} />
-          <span>${name}</span>
+          <span>${displaySeriesName(name)}</span>
         </label>
       `).join('');
     }
