@@ -162,7 +162,7 @@ def test_dump_includes_format_and_abs_rel_timestamps(tmp_path, capsys):
 
 
 def test_generate_demo_data_creates_daily_files_and_yields(tmp_path):
-    files = generateDemoData(2, output_dir=str(tmp_path), data_txt_path=str(Path(__file__).resolve().parents[1] / "data.txt"))
+    files = generateDemoData(2, output_dir=str(tmp_path))
     assert len(files) == 2
     assert Path(files[0]).exists()
     assert Path(files[1]).exists()
@@ -186,7 +186,7 @@ def test_generate_demo_data_creates_daily_files_and_yields(tmp_path):
 
 
 def test_cli_dump_db_file_works_with_generated_demo(tmp_path):
-    files = generateDemoData(1, output_dir=str(tmp_path), data_txt_path=str(Path(__file__).resolve().parents[1] / "data.txt"))
+    files = generateDemoData(1, output_dir=str(tmp_path))
     db_path = files[0]
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(

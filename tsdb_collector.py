@@ -1200,20 +1200,64 @@ def _quantize_numeric(value: float, decimal_places: int) -> float:
     return round(value, decimal_places)
 
 
-def _load_demo_series(data_txt_path: str) -> list[tuple[str, Any, bool, int]]:
+_EMBEDDED_DEMO_SERIES_TEXT = """
+solar/ac/power=1200.0
+solar/ac/yieldday=0
+solar/ac/yieldtotal=12500
+solar/114172608275/0/current=0.02
+solar/114172608275/0/efficiency=95.000
+solar/114172608275/0/frequency=49.99
+solar/114172608275/0/power=5.7
+solar/114172608275/0/powerdc=6.0
+solar/114172608275/0/powerfactor=1.001
+solar/114172608275/0/reactivepower=0.0
+solar/114172608275/0/temperature=14.2
+solar/114172608275/0/voltage=236.4
+solar/114172608275/0/yieldday=175
+solar/114172608275/0/yieldtotal=6.283
+solar/114172608275/1/current=0.10
+solar/114172608275/1/irradiation=0.600
+solar/114172608275/1/power=3.0
+solar/114172608275/1/voltage=29.3
+solar/114172608275/1/yieldday=87
+solar/114172608275/1/yieldtotal=3.151
+solar/114172608275/2/current=0.10
+solar/114172608275/2/irradiation=0.600
+solar/114172608275/2/power=3.0
+solar/114172608275/2/voltage=29.4
+solar/114172608275/2/yieldday=88
+solar/114172608275/2/yieldtotal=3.132
+solar/114172608275/device/bootloaderversion=104
+solar/114172608275/device/fwbuildversion=10008
+solar/114172608275/device/hwpartnumber=269553683
+solar/114172608275/name=HM600_BalkonUnten
+solar/114172608275/radio/rssi=-80
+solar/114172608275/status/last_update=1770827328
+solar/114172608275/status/limit_absolute=600.00
+solar/114172608275/status/limit_relative=100.00
+solar/114172608275/status/producing=1
+solar/114172608275/status/reachable=0
+""".strip()
+
+
+def _parse_demo_series_lines(lines: list[str]) -> list[tuple[str, Any, bool, int]]:
     series: list[tuple[str, Any, bool, int]] = []
-    with open(data_txt_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or "=" not in line:
-                continue
-            name, value_raw = line.split("=", 1)
-            value_num = _parse_strict_float(value_raw)
-            if value_num is None:
-                series.append((name, value_raw, False, 0))
-            else:
-                series.append((name, value_num, True, _decimal_places_from_literal(value_raw)))
+    for line in lines:
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        name, value_raw = line.split("=", 1)
+        value_num = _parse_strict_float(value_raw)
+        if value_num is None:
+            series.append((name, value_raw, False, 0))
+        else:
+            series.append((name, value_num, True, _decimal_places_from_literal(value_raw)))
     return series
+
+
+def _load_demo_series(data_txt_path: str) -> list[tuple[str, Any, bool, int]]:
+    with open(data_txt_path, "r", encoding="utf-8") as f:
+        return _parse_demo_series_lines(f.readlines())
 
 
 def _metric_suffix(series_name: str) -> str:
@@ -1276,15 +1320,11 @@ def generateDemoData(days: int, output_dir: str = ".", data_txt_path: Optional[s
     if days <= 0:
         raise ValueError(f"days must be > 0, got {days}")
     if data_txt_path is None:
-        data_txt_path = os.path.join(os.path.dirname(__file__), "data.txt")
-    if not os.path.exists(data_txt_path):
-        fallback = os.path.join(os.path.dirname(__file__), "opendtu.txt")
-        if os.path.exists(fallback):
-            data_txt_path = fallback
-
-    series = _load_demo_series(data_txt_path)
+        series = _parse_demo_series_lines(_EMBEDDED_DEMO_SERIES_TEXT.splitlines())
+    else:
+        series = _load_demo_series(data_txt_path)
     if not series:
-        raise ValueError(f"No series found in {data_txt_path!r}")
+        raise ValueError(f"No series found in {data_txt_path!r}" if data_txt_path else "No embedded demo series configured")
 
     os.makedirs(output_dir, exist_ok=True)
     steps_per_day = 24 * 12  # 5-minute intervals
