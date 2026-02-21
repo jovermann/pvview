@@ -21,6 +21,7 @@ body {
 
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: center;
   padding: 4px 12px;
@@ -78,6 +79,15 @@ input[type="datetime-local"], input[type="search"], input[type="text"], select {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 6px 8px;
+  max-width: 100%;
+}
+
+.topbar .date-field {
+  min-width: 0;
+}
+
+.topbar input[type="datetime-local"] {
+  width: 13.5rem;
 }
 
 main { padding: 2px; }

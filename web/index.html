@@ -61,32 +61,32 @@
         <button class="preset" data-range="1d">1d</button>
         <button class="preset active" data-range="2d">2d</button>
       </div>
-      <label class="date-field">Start <input id="startTime" type="datetime-local" step="5" /></label>
-      <label class="date-field">End <input id="endTime" type="datetime-local" step="5" /></label>
-      <label class="date-field">Auto
-        <select id="autoRefresh">
-          <option value="0" selected>Off</option>
-          <option value="5000">5s</option>
-          <option value="10000">10s</option>
-          <option value="15000">15s</option>
-          <option value="30000">30s</option>
-          <option value="60000">1m</option>
-          <option value="120000">2m</option>
-          <option value="300000">5m</option>
-          <option value="600000">10m</option>
-          <option value="900000">15m</option>
-          <option value="1800000">30m</option>
-          <option value="3600000">1h</option>
-          <option value="7200000">2h</option>
-          <option value="10800000">3h</option>
-          <option value="21600000">6h</option>
-          <option value="86400000">1d</option>
-        </select>
-      </label>
-      <button id="addChart" class="btn accent">Add Chart</button>
-      <button id="addStat" class="btn">Add Stat</button>
-      <button id="addConsole" class="btn">Add Console</button>
+      <label class="date-field"><input id="startTime" type="datetime-local" step="5" /></label>
+      <label class="date-field">to <input id="endTime" type="datetime-local" step="5" /></label>
+      <span class="date-field">Auto</span>
       <button id="refreshAll" class="btn">Refresh</button>
+      <select id="autoRefresh">
+        <option value="0" selected>Off</option>
+        <option value="5000">5s</option>
+        <option value="10000">10s</option>
+        <option value="15000">15s</option>
+        <option value="30000">30s</option>
+        <option value="60000">1m</option>
+        <option value="120000">2m</option>
+        <option value="300000">5m</option>
+        <option value="600000">10m</option>
+        <option value="900000">15m</option>
+        <option value="1800000">30m</option>
+        <option value="3600000">1h</option>
+        <option value="7200000">2h</option>
+        <option value="10800000">3h</option>
+        <option value="21600000">6h</option>
+        <option value="86400000">1d</option>
+      </select>
+      <span class="date-field">Add</span>
+      <button id="addChart" class="btn accent">Chart</button>
+      <button id="addStat" class="btn">Stat</button>
+      <button id="addConsole" class="btn">Console</button>
     </header>
 
     <main>
