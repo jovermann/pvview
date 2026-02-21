@@ -10,6 +10,7 @@
 }
 
 * { box-sizing: border-box; }
+
 body {
   margin: 0;
   background: radial-gradient(circle at 0% 0%, #1a2330 0%, var(--bg) 40%);
@@ -80,6 +81,19 @@ input[type="datetime-local"], input[type="search"], input[type="text"], select {
   border-radius: 4px;
   padding: 6px 8px;
   max-width: 100%;
+}
+
+.topbar input[type="datetime-local"],
+.topbar input[type="search"],
+.topbar input[type="text"],
+.topbar select,
+.modal input[type="search"],
+.modal input[type="text"],
+.modal select,
+.modal .btn {
+  font-family: "Segoe UI", "Ubuntu", sans-serif;
+  font-size: 13px;
+  line-height: 1.2;
 }
 
 .topbar .date-field {
