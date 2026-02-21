@@ -144,6 +144,11 @@ textarea {
   min-width: 0;
 }
 
+.http-right {
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+
 .table-wrap {
   overflow: auto;
 }
@@ -153,6 +158,22 @@ table {
   border-collapse: collapse;
 }
 
+.inline-form-table td {
+  border-bottom: none;
+  padding: 3px 0;
+  vertical-align: middle;
+}
+
+.inline-form-table td:first-child {
+  width: 95px;
+  white-space: nowrap;
+  padding-right: 8px;
+}
+
+.form-value {
+  word-break: break-all;
+}
+
 th, td {
   border-bottom: 1px solid var(--border);
   padding: 6px 6px;
@@ -160,8 +181,46 @@ th, td {
   vertical-align: middle;
 }
 
+#httpValuesTable {
+  table-layout: fixed;
+}
+
+#httpUrlsTable {
+  table-layout: fixed;
+}
+
+#httpUrlsTable td:nth-child(2),
+#httpUrlsTable td:nth-child(3),
+#httpUrlsTable td:nth-child(4),
+#httpUrlsTable td:nth-child(5),
+#httpUrlsTable th:nth-child(2),
+#httpUrlsTable th:nth-child(3),
+#httpUrlsTable th:nth-child(4),
+#httpUrlsTable th:nth-child(5) {
+  white-space: nowrap;
+  text-align: center;
+}
+
+#httpValuesTable td:nth-child(2),
+#httpValuesTable td:nth-child(3),
+#httpValuesTable th:nth-child(2),
+#httpValuesTable th:nth-child(3) {
+  white-space: nowrap;
+}
+
+#httpValuesTable td:nth-child(4) input {
+  width: 100%;
+}
+
 .selected-row {
   background: #1a2433;
+}
+
+.remove-gadget {
+  display: inline-block;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1;
 }
 
 .modal {
@@ -191,5 +250,12 @@ menu {
 @media (max-width: 1100px) {
   .http-layout {
     grid-template-columns: 1fr;
+  }
+
+  .http-right {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
   }
 }

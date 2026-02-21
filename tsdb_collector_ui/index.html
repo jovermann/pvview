@@ -41,21 +41,34 @@
       <section id="tab-http" class="panel">
         <div class="http-layout">
           <div class="http-left">
-            <div class="row">
+            <div class="row row-inline">
               <label>Poll Interval (ms)</label>
               <input id="httpPollInterval" type="number" min="100" step="100" />
             </div>
+            <div class="row row-inline">
+              <label>Base URL</label>
+              <input id="httpBaseUrl" type="text" placeholder="http://server:port" />
+            </div>
             <div class="row">
               <button id="addHttpUrl" class="btn">Add URL</button>
+              <button id="addFroniusUrls" class="btn">Add Fronius JSON API URLs</button>
             </div>
             <div class="table-wrap">
               <table id="httpUrlsTable">
+                <colgroup>
+                  <col />
+                  <col style="width: 72px" />
+                  <col style="width: 72px" />
+                  <col style="width: 72px" />
+                  <col style="width: 36px" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>URL</th>
-                    <th>Base Topic</th>
+                    <th>Values</th>
+                    <th>Selected</th>
                     <th>Fetch</th>
-                    <th>Remove</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -63,13 +76,32 @@
             </div>
           </div>
           <div class="http-right">
-            <div class="row row-inline">
-              <div class="muted" id="httpSelectedUrlLabel">No URL selected</div>
-              <label>Filter</label>
-              <input id="httpValueFilter" type="text" placeholder="substring" />
+            <div class="row">
+              <table class="inline-form-table">
+                <tbody>
+                  <tr>
+                    <td><label>URL</label></td>
+                    <td><div class="muted form-value" id="httpSelectedUrlLabel">No URL selected</div></td>
+                  </tr>
+                  <tr>
+                    <td><label for="httpBaseTopic">Base Topic</label></td>
+                    <td><input id="httpBaseTopic" type="text" placeholder="base topic" /></td>
+                  </tr>
+                  <tr>
+                    <td><label for="httpValueFilter">Filter</label></td>
+                    <td><input id="httpValueFilter" type="text" placeholder="substring" /></td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
             <div class="table-wrap">
               <table id="httpValuesTable">
+                <colgroup>
+                  <col style="width: 52px" />
+                  <col style="width: 30%" />
+                  <col style="width: 22%" />
+                  <col />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>On</th>
@@ -94,7 +126,7 @@
         <label>URL</label>
         <input id="newHttpUrl" type="text" placeholder="http://host/path" />
         <label>Base Topic</label>
-        <input id="newHttpBaseTopic" type="text" placeholder="meter" />
+        <input id="newHttpBaseTopic" type="text" placeholder="base topic" />
       </div>
       <menu>
         <button id="cancelAddUrl" type="button" class="btn">Cancel</button>

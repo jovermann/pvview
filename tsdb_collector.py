@@ -1088,6 +1088,7 @@ def collect_to_tsdb(
     http_cfg = http_config if isinstance(http_config, dict) else {}
     http_urls_raw = http_cfg.get("urls", [])
     http_urls = [u for u in http_urls_raw if isinstance(u, dict) and str(u.get("url", "")).strip()]
+    http_base_url = str(http_cfg.get("base_url", "")).strip()
     try:
         http_poll_interval_ms = max(100, int(http_cfg.get("poll_interval_ms", 5000)))
     except Exception:
@@ -1182,7 +1183,8 @@ def collect_to_tsdb(
                 http_events: list[tuple[int, str, Any]] = []
                 emitted = 0
                 for url_cfg in http_urls:
-                    url = str(url_cfg.get("url", "")).strip()
+                    url_raw = str(url_cfg.get("url", "")).strip()
+                    url = resolve_http_url(url_raw, http_base_url)
                     base_topic = str(url_cfg.get("base_topic", "")).strip().strip("/")
                     if not url:
                         continue
@@ -1543,6 +1545,16 @@ def fetch_http_json_flattened(url: str, timeout: float = 10.0) -> tuple[Optional
     except Exception as exc:
         return None, f"{exc.__class__.__name__}: {exc}"
     return flatten_json(text)
+
+
+def resolve_http_url(url: str, base_url: str) -> str:
+    text = str(url or "").strip()
+    if text.startswith("base_url/"):
+        base = str(base_url or "").strip()
+        if not base:
+            return text
+        return base.rstrip("/") + "/" + text[len("base_url/"):].lstrip("/")
+    return text
 
 
 def _value_from_http_text(text: str) -> Any:
@@ -1979,6 +1991,15 @@ def load_collector_config(rc_path: str) -> dict[str, Any]:
                 poll_interval_ms = 5000
             break
 
+    base_url = ""
+    for key in ("base_url", "base-url"):
+        if key in http_block:
+            base_url = str(http_block[key]).strip()
+            break
+        if key in data:
+            base_url = str(data[key]).strip()
+            break
+
     urls_raw = http_block.get("urls")
     # Backward compatibility with old shape: http.sources / http_sources.
     if not isinstance(urls_raw, list):
@@ -2035,6 +2056,7 @@ def load_collector_config(rc_path: str) -> dict[str, Any]:
         },
         "http": {
             "poll_interval_ms": poll_interval_ms,
+            "base_url": base_url,
             "urls": urls,
         },
     }
@@ -2175,10 +2197,12 @@ def _dumps_collector_config_toml(
         poll_interval_ms = max(100, int(http.get("poll_interval_ms", 5000)))
     except Exception:
         poll_interval_ms = 5000
+    base_url = str(http.get("base_url", "")).strip()
     if lines and lines[-1].strip() != "" and not has_block("[http]"):
         lines.append("")
     emit_item("[http]", "[http]")
     lines.append(f"poll_interval_ms = {poll_interval_ms}")
+    emit_item("base_url", f'base_url = {_quote_toml_string(base_url)}')
 
     urls = http.get("urls", [])
     if isinstance(urls, list):
@@ -2359,8 +2383,10 @@ class CollectorUiRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             self._send_json(400, {"error": {"code": "bad_request", "message": "Request body must be object"}})
             return
-        url = str(payload.get("url", "")).strip()
-        if not url:
+        url_raw = str(payload.get("url", "")).strip()
+        base_url = str(payload.get("base_url", "")).strip()
+        url = resolve_http_url(url_raw, base_url)
+        if not url_raw:
             self._send_json(400, {"error": {"code": "bad_request", "message": "Missing url"}})
             return
         flat, error = fetch_http_json_flattened(url)

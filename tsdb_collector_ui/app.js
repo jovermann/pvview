@@ -1,5 +1,14 @@
 (() => {
   const API_VERSION = 1;
+  const FRONIUS_BASE_URL_TEMPLATES = [
+    "base_url/solar_api/v1/GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=3PInverterData",
+    "base_url/solar_api/v1/GetInverterRealtimeData.cgi?Scope=Device&DeviceId=1&DataCollection=CommonInverterData",
+    "base_url/solar_api/v1/GetMeterRealtimeData.cgi?Scope=Device&DeviceId=0",
+    "base_url/solar_api/v1/GetStorageRealtimeData.cgi?Scope=Device&DeviceId=0",
+    "base_url/solar_api/v1/GetPowerFlowRealtimeData.fcgi",
+    "base_url/components/inverter/readable",
+    "base_url/components/PowerMeter/readable",
+  ];
   const state = {
     config: {
       mqtt: { mqtt_server: "", data_dir: ".", quantize_timestamps: 0, topics: [] },
@@ -19,6 +28,7 @@
   const httpUrlsTbody = document.querySelector("#httpUrlsTable tbody");
   const httpValuesTbody = document.querySelector("#httpValuesTable tbody");
   const httpSelectedUrlLabelEl = document.getElementById("httpSelectedUrlLabel");
+  const httpBaseTopicEl = document.getElementById("httpBaseTopic");
   const httpValueFilterEl = document.getElementById("httpValueFilter");
   const addUrlDialog = document.getElementById("addUrlDialog");
   const newHttpUrlEl = document.getElementById("newHttpUrl");
@@ -88,6 +98,7 @@
         poll_interval_ms: Number.isFinite(Number(http.poll_interval_ms))
           ? Math.max(100, Number(http.poll_interval_ms))
           : 5000,
+        base_url: String(http.base_url || "").trim(),
         urls,
       },
     };
@@ -116,25 +127,32 @@
   }
 
   function renderHttpUrls() {
-    const rows = state.config.http.urls.map((u, i) => `
+    const rendered = state.config.http.urls.map((u, i) => {
+      const fetched = Array.isArray(state.fetchedByIndex[i]) ? state.fetchedByIndex[i] : [];
+      const selected = Array.isArray(u.values) ? u.values.filter((v) => v && v.enabled).length : 0;
+      return `
       <tr data-row="${i}" class="${i === state.selectedHttpUrlIndex ? "selected-row" : ""}">
         <td><input type="text" data-field="url" data-row="${i}" value="${escapeHtml(u.url)}" /></td>
-        <td><input type="text" data-field="base_topic" data-row="${i}" value="${escapeHtml(u.base_topic)}" /></td>
-        <td><button class="btn tiny" data-action="fetch-url" data-row="${i}">Fetch Values</button></td>
-        <td><button class="btn danger tiny" data-action="remove-url" data-row="${i}">X</button></td>
+        <td>${fetched.length}</td>
+        <td>${selected}</td>
+        <td><button class="btn tiny" data-action="fetch-url" data-row="${i}">Fetch</button></td>
+        <td><span class="remove-gadget" data-action="remove-url" data-row="${i}" title="Remove URL">🗑️</span></td>
       </tr>
-    `).join("");
-    httpUrlsTbody.innerHTML = rows;
+    `;
+    }).join("");
+    httpUrlsTbody.innerHTML = rendered;
   }
 
   function renderHttpValues() {
     const urlCfg = selectedUrlCfg();
     if (!urlCfg) {
       httpSelectedUrlLabelEl.textContent = "No URL selected";
+      httpBaseTopicEl.value = "";
       httpValuesTbody.innerHTML = "";
       return;
     }
     httpSelectedUrlLabelEl.textContent = `URL: ${urlCfg.url || "(empty)"}`;
+    httpBaseTopicEl.value = urlCfg.base_topic || "";
     const fetched = Array.isArray(state.fetchedByIndex[state.selectedHttpUrlIndex])
       ? state.fetchedByIndex[state.selectedHttpUrlIndex]
       : [];
@@ -161,6 +179,8 @@
   function renderAll() {
     renderMqtt();
     httpPollIntervalEl.value = String(state.config.http.poll_interval_ms);
+    const baseUrlEl = document.getElementById("httpBaseUrl");
+    if (baseUrlEl) baseUrlEl.value = state.config.http.base_url || "";
     renderHttpUrls();
     renderHttpValues();
   }
@@ -174,6 +194,8 @@
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
     state.config.http.poll_interval_ms = Math.max(100, Number(httpPollIntervalEl.value || 5000) || 5000);
+    const baseUrlEl = document.getElementById("httpBaseUrl");
+    state.config.http.base_url = baseUrlEl ? baseUrlEl.value.trim() : "";
   }
 
   async function loadConfig() {
@@ -209,7 +231,7 @@
     const data = await apiJson("/http/fetch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, base_url: state.config.http.base_url || "" }),
     });
     state.selectedHttpUrlIndex = index;
     state.fetchedByIndex[index] = Array.isArray(data.values) ? data.values : [];
@@ -239,6 +261,22 @@
     newHttpBaseTopicEl.value = "";
     addUrlDialog.showModal();
     newHttpUrlEl.focus();
+  });
+  document.getElementById("addFroniusUrls").addEventListener("click", () => {
+    const existing = new Set(state.config.http.urls.map((u) => String(u.url || "").trim()));
+    let added = 0;
+    for (const url of FRONIUS_BASE_URL_TEMPLATES) {
+      if (existing.has(url)) continue;
+      state.config.http.urls.push({ url, base_topic: "", values: [] });
+      existing.add(url);
+      added += 1;
+    }
+    if (state.selectedHttpUrlIndex < 0 && state.config.http.urls.length > 0) {
+      state.selectedHttpUrlIndex = 0;
+    }
+    renderHttpUrls();
+    renderHttpValues();
+    setStatus(added > 0 ? `Added ${added} Fronius URLs` : "All Fronius URLs already present");
   });
   document.getElementById("cancelAddUrl").addEventListener("click", () => addUrlDialog.close());
   document.getElementById("addUrlForm").addEventListener("submit", (ev) => {
@@ -294,7 +332,12 @@
     if (!Number.isInteger(row) || row < 0 || row >= state.config.http.urls.length) return;
     const field = target.dataset.field;
     if (field === "url") state.config.http.urls[row].url = target.value.trim();
-    if (field === "base_topic") state.config.http.urls[row].base_topic = target.value.trim().replace(/^\/+|\/+$/g, "");
+  });
+
+  httpBaseTopicEl.addEventListener("input", () => {
+    const urlCfg = selectedUrlCfg();
+    if (!urlCfg) return;
+    urlCfg.base_topic = httpBaseTopicEl.value.trim().replace(/^\/+|\/+$/g, "");
   });
 
   httpValuesTbody.addEventListener("input", (ev) => {
@@ -316,6 +359,12 @@
   httpPollIntervalEl.addEventListener("input", () => {
     state.config.http.poll_interval_ms = Math.max(100, Number(httpPollIntervalEl.value || 5000) || 5000);
   });
+  const baseUrlEl = document.getElementById("httpBaseUrl");
+  if (baseUrlEl) {
+    baseUrlEl.addEventListener("input", () => {
+      state.config.http.base_url = baseUrlEl.value.trim();
+    });
+  }
 
   (async () => {
     try {
