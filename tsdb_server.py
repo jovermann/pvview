@@ -1080,8 +1080,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ui-dir",
-        default=os.path.join(os.path.dirname(__file__), "web"),
-        help="Directory containing frontend assets (default: ./web next to tsdb_server.py)",
+        default=os.path.join(os.path.dirname(__file__), "dashboard_ui"),
+        help="Directory containing frontend assets (default: ./dashboard_ui next to tsdb_server.py)",
     )
     return parser.parse_args()
 
