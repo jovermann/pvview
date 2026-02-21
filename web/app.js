@@ -113,6 +113,16 @@
     return ids;
   }
 
+  function statIds() {
+    const ids = [];
+    for (const [id, cfg] of charts.entries()) {
+      if (cfg && cfg.kind === 'stat') {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
   function toDatetimeLocalValue(ms) {
     const d = new Date(ms);
     const pad = (n) => String(n).padStart(2, '0');
@@ -210,17 +220,21 @@
 
   async function refreshAllCharts(reason = 'manual') {
     const ids = chartIds();
+    const statPanelIds = statIds();
     const t0 = performance.now();
-    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length}`);
-    const results = await Promise.allSettled(ids.map((id) => refreshChart(id)));
+    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} stats=${statPanelIds.length}`);
+    const chartResults = await Promise.allSettled(ids.map((id) => refreshChart(id)));
+    const statResults = await Promise.allSettled(statPanelIds.map((id) => refreshStat(id)));
+    const results = [...chartResults, ...statResults];
     const failed = results.filter((r) => r.status === 'rejected').length;
+    const allIds = [...ids, ...statPanelIds];
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
-        appendConsoleLine(`chart ${ids[i]} refresh error ${r.reason}`);
+        appendConsoleLine(`panel ${allIds[i]} refresh error ${r.reason}`);
       }
     });
     const elapsed = Math.round(performance.now() - t0);
-    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} failed=${failed} elapsed=${elapsed}ms`);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} stats=${statPanelIds.length} failed=${failed} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -612,10 +626,32 @@
     return id;
   }
 
+  function createStatPanel(id) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'panel';
+    wrapper.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title" id="title-${id}">Stat ${id}</div>
+        <div class="panel-actions">
+          <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
+          <button class="icon-btn danger" data-action="remove-stat" data-id="${id}">Remove</button>
+        </div>
+      </div>
+      <div class="stat-wrap">
+        <table class="stat-table" id="stat-${id}"></table>
+      </div>
+    `;
+    return wrapper;
+  }
+
   function updateTitle(id) {
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
     if (!titleEl || !c) return;
+    if (c.kind === 'stat') {
+      titleEl.textContent = c.label || `Stat ${id}`;
+      return;
+    }
     titleEl.textContent = c.label || `Chart ${id}`;
   }
 
@@ -825,6 +861,59 @@
     );
   }
 
+  async function refreshStat(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'stat' || !(cfg.tableEl instanceof HTMLElement)) return;
+    const panelName = cfg.label || `Stat ${id}`;
+    appendConsoleLine(`stat ${id} refresh start name="${panelName}" series=${cfg.series.length}`);
+    const { start, end } = getRange();
+    await ensureInverterNames(cfg.series);
+    if (!cfg.series.length) {
+      cfg.tableEl.innerHTML = '<tr><td class="stat-name">No series selected</td><td></td></tr>';
+      appendConsoleLine(`stat ${id} refresh done (no series)`);
+      return;
+    }
+    const displaySeries = cfg.series.map((s) => displaySeriesName(s));
+    const prefix = displayPrefixForSeries(displaySeries);
+    const rows = await Promise.all(cfg.series.map(async (name) => {
+      const q = new URLSearchParams({
+        series: name,
+        start: String(start),
+        end: String(end),
+      });
+      const reqT0 = performance.now();
+      appendConsoleLine(`stat ${id} request start series=${name}`);
+      const data = await apiJson(`/stats?${q}`);
+      appendConsoleLine(
+        `stat ${id} request done series=${name} count=${data.count || 0} files=${Array.isArray(data.files) ? data.files.length : 0} `
+        + `elapsed=${Math.round(performance.now() - reqT0)}ms`
+      );
+      const currentValue = data.currentValue;
+      const maxValue = data.maxValue;
+      const currentText = (typeof currentValue === 'number')
+        ? formatTooltipValue(roundNumeric(currentValue))
+        : (currentValue === null || currentValue === undefined ? '-' : String(currentValue));
+      const maxText = (typeof maxValue === 'number')
+        ? formatTooltipValue(roundNumeric(maxValue))
+        : '-';
+      return {
+        name: compactSeriesLabel(displaySeriesName(name), prefix),
+        currentText,
+        maxText,
+      };
+    }));
+    cfg.tableEl.innerHTML = rows.map((r) => `
+      <tr>
+        <td class="stat-name">${r.name}</td>
+        <td>
+          <div class="stat-current">${r.currentText}</div>
+          <div class="stat-max">max ${r.maxText}</div>
+        </td>
+      </tr>
+    `).join('');
+    appendConsoleLine(`stat ${id} refresh done name="${panelName}" series=${rows.length}`);
+  }
+
   function addChart(initialSeries = [], options = {}) {
     chartCounter += 1;
     const id = String(chartCounter);
@@ -882,6 +971,36 @@
     updateTitle(id);
     if (!options.deferRefresh) {
       refreshChart(id).catch((err) => console.error(err));
+    }
+    return id;
+  }
+
+  function addStat(initialSeries = [], options = {}) {
+    chartCounter += 1;
+    const id = String(chartCounter);
+    const widgetEl = document.createElement('div');
+    widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 6,
+      h: options.h || 3,
+    });
+    const panel = createStatPanel(id);
+    node.querySelector('.grid-stack-item-content').appendChild(panel);
+    const tableEl = document.getElementById(`stat-${id}`);
+    charts.set(id, {
+      id,
+      kind: 'stat',
+      node,
+      tableEl,
+      series: [...initialSeries],
+      label: options.label || null,
+    });
+    appendConsoleLine(`stat ${id} created series=${initialSeries.length}`);
+    updateTitle(id);
+    if (!options.deferRefresh) {
+      refreshStat(id).catch((err) => console.error(err));
     }
     return id;
   }
@@ -975,6 +1094,18 @@
         });
         continue;
       }
+      if (c.kind === 'stat') {
+        chartList.push({
+          type: 'stat',
+          x: Number(nodeInfo.x || 0),
+          y: Number(nodeInfo.y || 0),
+          w: Number(nodeInfo.w || 6),
+          h: Number(nodeInfo.h || 3),
+          series: Array.isArray(c.series) ? [...c.series] : [],
+          label: c.label || null,
+        });
+        continue;
+      }
       chartList.push({
         type: 'chart',
         x: Number(nodeInfo.x || 0),
@@ -1011,6 +1142,18 @@
           w: Number(ch.w) || 12,
           h: Number(ch.h) || 2,
           apiTrace: !!ch.apiTrace,
+        });
+        continue;
+      }
+      if (ch.type === 'stat') {
+        const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+        addStat(series, {
+          x: Number(ch.x),
+          y: Number(ch.y),
+          w: Number(ch.w) || 6,
+          h: Number(ch.h) || 3,
+          label: typeof ch.label === 'string' ? ch.label : null,
+          deferRefresh: true,
         });
         continue;
       }
@@ -1117,9 +1260,13 @@
       return;
     }
     c.series = Array.from(activeSeriesSelection || []);
-    appendConsoleLine(`chart ${activeChartId} series updated count=${c.series.length}`);
+    appendConsoleLine(`panel ${activeChartId} series updated count=${c.series.length}`);
     updateTitle(activeChartId);
-    refreshChart(activeChartId).catch((err) => console.error(err));
+    if (c.kind === 'stat') {
+      refreshStat(activeChartId).catch((err) => console.error(err));
+    } else {
+      refreshChart(activeChartId).catch((err) => console.error(err));
+    }
     activeSeriesSelection = null;
     dialog.close();
   });
@@ -1190,6 +1337,11 @@
       return;
     }
 
+    if (target.id === 'addStat') {
+      addStat();
+      return;
+    }
+
     if (target.id === 'addConsole') {
       createConsolePanel();
       return;
@@ -1207,6 +1359,11 @@
 
     if (target.dataset.action === 'remove-console') {
       appendConsoleLine('console removed');
+      removePanel(target.dataset.id);
+      return;
+    }
+
+    if (target.dataset.action === 'remove-stat') {
       removePanel(target.dataset.id);
       return;
     }

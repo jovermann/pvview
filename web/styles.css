@@ -157,6 +157,42 @@ main { padding: 2px; }
   min-height: 180px;
 }
 
+.stat-wrap {
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+}
+
+.stat-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.stat-table td {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.stat-name {
+  color: #c6d2e0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.stat-current {
+  color: #e5effc;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.stat-max {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
 .console-view {
   flex: 1;
   margin: 0;

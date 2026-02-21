@@ -5,6 +5,7 @@ API:
 - GET /health
 - GET /series?start=<ts>&end=<ts>
 - GET /events?series=<name>&start=<ts>&end=<ts>&maxEvents=<n>
+- GET /stats?series=<name>&start=<ts>&end=<ts>
 - GET /dashboards
 - GET /dashboards/<name>
 - PUT /dashboards/<name>
@@ -668,6 +669,9 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             if path == "/events":
                 self._handle_events(params)
                 return
+            if path == "/stats":
+                self._handle_stats(params)
+                return
             if path == "/dashboards":
                 self._handle_dashboards_list()
                 return
@@ -799,6 +803,54 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             response["note"] = "Series is non-numeric; returned first maxEvents without min/avg/max aggregation."
 
         self._send_json(200, response)
+
+    def _handle_stats(self, params: Dict[str, List[str]]) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+
+        series = self._query_param(params, "series", required=True)
+        start_raw = self._query_param(params, "start", required=True)
+        end_raw = self._query_param(params, "end", required=True)
+        assert series is not None and start_raw is not None and end_raw is not None
+
+        start_ms = parse_timestamp(start_raw)
+        end_ms = parse_timestamp(end_raw)
+        if end_ms < start_ms:
+            raise ValueError("end must be >= start")
+
+        files = find_candidate_files(data_dir, start_ms, end_ms)
+        events: List[Event] = []
+        for path in files:
+            events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
+        events.sort(key=lambda e: e.timestamp_ms)
+
+        current_ts: Optional[int] = None
+        current_value: Any = None
+        max_value: Optional[float] = None
+        numeric_count = 0
+        for ev in events:
+            current_ts = ev.timestamp_ms
+            current_value = ev.value
+            if isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool):
+                numeric_count += 1
+                v = float(ev.value)
+                if max_value is None or v > max_value:
+                    max_value = v
+
+        self._send_json(
+            200,
+            {
+                "series": series,
+                "start": start_ms,
+                "end": end_ms,
+                "count": len(events),
+                "numericCount": numeric_count,
+                "isNumeric": numeric_count == len(events) and len(events) > 0,
+                "currentTimestamp": current_ts,
+                "currentValue": current_value,
+                "maxValue": max_value,
+                "files": [os.path.basename(p) for p in files],
+            },
+        )
 
     def _dashboard_name_from_path(self, path: str) -> str:
         raw = path[len("/dashboards/"):]
