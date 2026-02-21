@@ -3,8 +3,10 @@
   const state = {
     config: {
       mqtt: { mqtt_server: "", data_dir: ".", quantize_timestamps: 0, topics: [] },
-      http: { sources: [] },
+      http: { poll_interval_ms: 5000, urls: [] },
     },
+    selectedHttpUrlIndex: -1,
+    fetchedByIndex: {},
   };
 
   const statusEl = document.getElementById("status");
@@ -13,11 +15,27 @@
   const dataDirEl = document.getElementById("dataDir");
   const quantizeEl = document.getElementById("quantizeTimestamps");
   const topicsEl = document.getElementById("topics");
-  const httpTbody = document.querySelector("#httpSourcesTable tbody");
+  const httpPollIntervalEl = document.getElementById("httpPollInterval");
+  const httpUrlsTbody = document.querySelector("#httpUrlsTable tbody");
+  const httpValuesTbody = document.querySelector("#httpValuesTable tbody");
+  const httpSelectedUrlLabelEl = document.getElementById("httpSelectedUrlLabel");
+  const httpValueFilterEl = document.getElementById("httpValueFilter");
+  const addUrlDialog = document.getElementById("addUrlDialog");
+  const newHttpUrlEl = document.getElementById("newHttpUrl");
+  const newHttpBaseTopicEl = document.getElementById("newHttpBaseTopic");
 
   function setStatus(text, isError = false) {
     statusEl.textContent = text;
     statusEl.classList.toggle("error", isError);
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   async function apiJson(path, options = {}) {
@@ -40,14 +58,23 @@
     const mqtt = config && typeof config.mqtt === "object" ? config.mqtt : {};
     const http = config && typeof config.http === "object" ? config.http : {};
     const topics = Array.isArray(mqtt.topics) ? mqtt.topics.map((v) => String(v)) : [];
-    const sourcesRaw = Array.isArray(http.sources) ? http.sources : [];
-    const sources = sourcesRaw.map((s) => ({
-      name: String((s && s.name) || ""),
-      url: String((s && s.url) || ""),
-      topic_prefix: String((s && s.topic_prefix) || ""),
-      interval_ms: Number.isFinite(Number(s && s.interval_ms)) ? Math.max(100, Number(s.interval_ms)) : 5000,
-      enabled: !s || s.enabled !== false,
-    }));
+    const urlsRaw = Array.isArray(http.urls) ? http.urls : [];
+    const urls = urlsRaw.map((u) => {
+      const valuesRaw = Array.isArray(u && u.values) ? u.values : [];
+      const values = valuesRaw
+        .filter((v) => v && typeof v === "object")
+        .map((v) => ({
+          path: String(v.path || "").trim(),
+          topic: String(v.topic || "").trim(),
+          enabled: !!v.enabled,
+        }))
+        .filter((v) => v.path.length > 0);
+      return {
+        url: String((u && u.url) || "").trim(),
+        base_topic: String((u && u.base_topic) || "").trim(),
+        values,
+      };
+    });
     return {
       mqtt: {
         mqtt_server: String(mqtt.mqtt_server || ""),
@@ -57,7 +84,12 @@
           : 0,
         topics,
       },
-      http: { sources },
+      http: {
+        poll_interval_ms: Number.isFinite(Number(http.poll_interval_ms))
+          ? Math.max(100, Number(http.poll_interval_ms))
+          : 5000,
+        urls,
+      },
     };
   }
 
@@ -68,23 +100,69 @@
     topicsEl.value = state.config.mqtt.topics.join("\n");
   }
 
-  function renderHttp() {
-    const rows = state.config.http.sources.map((source, idx) => `
-      <tr data-row="${idx}">
-        <td><input type="text" data-field="name" value="${escapeHtml(source.name)}" /></td>
-        <td><input type="text" data-field="url" value="${escapeHtml(source.url)}" /></td>
-        <td><input type="text" data-field="topic_prefix" value="${escapeHtml(source.topic_prefix)}" /></td>
-        <td><input type="number" min="100" step="1" data-field="interval_ms" value="${source.interval_ms}" /></td>
-        <td><input type="checkbox" data-field="enabled" ${source.enabled ? "checked" : ""} /></td>
-        <td><button class="btn danger tiny" data-action="remove-source" data-row="${idx}">X</button></td>
+  function ensureUrlMapping(urlCfg, path) {
+    let mapping = urlCfg.values.find((v) => v.path === path);
+    if (!mapping) {
+      mapping = { path, topic: path.replace(/\./g, "/"), enabled: false };
+      urlCfg.values.push(mapping);
+    }
+    return mapping;
+  }
+
+  function selectedUrlCfg() {
+    const i = state.selectedHttpUrlIndex;
+    if (!Number.isInteger(i) || i < 0 || i >= state.config.http.urls.length) return null;
+    return state.config.http.urls[i];
+  }
+
+  function renderHttpUrls() {
+    const rows = state.config.http.urls.map((u, i) => `
+      <tr data-row="${i}" class="${i === state.selectedHttpUrlIndex ? "selected-row" : ""}">
+        <td><input type="text" data-field="url" data-row="${i}" value="${escapeHtml(u.url)}" /></td>
+        <td><input type="text" data-field="base_topic" data-row="${i}" value="${escapeHtml(u.base_topic)}" /></td>
+        <td><button class="btn tiny" data-action="fetch-url" data-row="${i}">Fetch Values</button></td>
+        <td><button class="btn danger tiny" data-action="remove-url" data-row="${i}">X</button></td>
       </tr>
     `).join("");
-    httpTbody.innerHTML = rows;
+    httpUrlsTbody.innerHTML = rows;
+  }
+
+  function renderHttpValues() {
+    const urlCfg = selectedUrlCfg();
+    if (!urlCfg) {
+      httpSelectedUrlLabelEl.textContent = "No URL selected";
+      httpValuesTbody.innerHTML = "";
+      return;
+    }
+    httpSelectedUrlLabelEl.textContent = `URL: ${urlCfg.url || "(empty)"}`;
+    const fetched = Array.isArray(state.fetchedByIndex[state.selectedHttpUrlIndex])
+      ? state.fetchedByIndex[state.selectedHttpUrlIndex]
+      : [];
+    const filter = String(httpValueFilterEl.value || "").toLowerCase();
+    const sorted = [...fetched].sort((a, b) => String(a.path).localeCompare(String(b.path)));
+    const rows = [];
+    for (const entry of sorted) {
+      const path = String(entry.path || "");
+      const value = String(entry.value || "");
+      const mapping = ensureUrlMapping(urlCfg, path);
+      if (filter && !path.toLowerCase().includes(filter)) continue;
+      rows.push(`
+        <tr>
+          <td><input type="checkbox" data-mapping-field="enabled" data-path="${escapeHtml(path)}" ${mapping.enabled ? "checked" : ""} /></td>
+          <td>${escapeHtml(path)}</td>
+          <td>${escapeHtml(value)}</td>
+          <td><input type="text" data-mapping-field="topic" data-path="${escapeHtml(path)}" value="${escapeHtml(mapping.topic)}" /></td>
+        </tr>
+      `);
+    }
+    httpValuesTbody.innerHTML = rows.join("");
   }
 
   function renderAll() {
     renderMqtt();
-    renderHttp();
+    httpPollIntervalEl.value = String(state.config.http.poll_interval_ms);
+    renderHttpUrls();
+    renderHttpValues();
   }
 
   function collectFromUi() {
@@ -95,6 +173,7 @@
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
+    state.config.http.poll_interval_ms = Math.max(100, Number(httpPollIntervalEl.value || 5000) || 5000);
   }
 
   async function loadConfig() {
@@ -102,6 +181,8 @@
     const payload = await apiJson("/config");
     configPathEl.textContent = payload.configPath || "";
     state.config = normalizeConfig(payload.config || {});
+    state.selectedHttpUrlIndex = state.config.http.urls.length > 0 ? 0 : -1;
+    state.fetchedByIndex = {};
     renderAll();
     setStatus("Loaded");
   }
@@ -117,13 +198,24 @@
     setStatus("Saved");
   }
 
-  function escapeHtml(value) {
-    return String(value)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
+  async function fetchUrlValues(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= state.config.http.urls.length) return;
+    const url = state.config.http.urls[index].url.trim();
+    if (!url) {
+      setStatus("URL is empty", true);
+      return;
+    }
+    setStatus(`Fetching ${url} ...`);
+    const data = await apiJson("/http/fetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    state.selectedHttpUrlIndex = index;
+    state.fetchedByIndex[index] = Array.isArray(data.values) ? data.values : [];
+    renderHttpUrls();
+    renderHttpValues();
+    setStatus(`Fetched ${url}: ${state.fetchedByIndex[index].length} values`);
   }
 
   document.querySelectorAll(".tab").forEach((btn) => {
@@ -138,49 +230,91 @@
   document.getElementById("reloadBtn").addEventListener("click", () => {
     loadConfig().catch((err) => setStatus(String(err), true));
   });
-
   document.getElementById("saveBtn").addEventListener("click", () => {
     saveConfig().catch((err) => setStatus(String(err), true));
   });
 
-  document.getElementById("addHttpSource").addEventListener("click", () => {
-    collectFromUi();
-    state.config.http.sources.push({
-      name: "",
-      url: "",
-      topic_prefix: "",
-      interval_ms: 5000,
-      enabled: true,
-    });
-    renderHttp();
+  document.getElementById("addHttpUrl").addEventListener("click", () => {
+    newHttpUrlEl.value = "";
+    newHttpBaseTopicEl.value = "";
+    addUrlDialog.showModal();
+    newHttpUrlEl.focus();
+  });
+  document.getElementById("cancelAddUrl").addEventListener("click", () => addUrlDialog.close());
+  document.getElementById("addUrlForm").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const url = newHttpUrlEl.value.trim();
+    const baseTopic = newHttpBaseTopicEl.value.trim().replace(/^\/+|\/+$/g, "");
+    if (!url) {
+      setStatus("URL is required", true);
+      return;
+    }
+    state.config.http.urls.push({ url, base_topic: baseTopic, values: [] });
+    state.selectedHttpUrlIndex = state.config.http.urls.length - 1;
+    renderHttpUrls();
+    renderHttpValues();
+    addUrlDialog.close();
   });
 
-  httpTbody.addEventListener("input", (ev) => {
+  httpUrlsTbody.addEventListener("click", (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    const row = Number(target.dataset.row);
+    if (!Number.isInteger(row) || row < 0 || row >= state.config.http.urls.length) return;
+    if (target.dataset.action === "remove-url") {
+      state.config.http.urls.splice(row, 1);
+      delete state.fetchedByIndex[row];
+      const remapped = {};
+      Object.keys(state.fetchedByIndex).forEach((k) => {
+        const i = Number(k);
+        if (!Number.isInteger(i)) return;
+        remapped[i > row ? i - 1 : i] = state.fetchedByIndex[i];
+      });
+      state.fetchedByIndex = remapped;
+      if (state.selectedHttpUrlIndex >= state.config.http.urls.length) {
+        state.selectedHttpUrlIndex = state.config.http.urls.length - 1;
+      }
+      renderHttpUrls();
+      renderHttpValues();
+      return;
+    }
+    if (target.dataset.action === "fetch-url") {
+      fetchUrlValues(row).catch((err) => setStatus(String(err), true));
+      return;
+    }
+    state.selectedHttpUrlIndex = row;
+    renderHttpUrls();
+    renderHttpValues();
+  });
+
+  httpUrlsTbody.addEventListener("input", (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLInputElement)) return;
-    const tr = target.closest("tr");
-    if (!tr) return;
-    const row = Number(tr.dataset.row);
-    if (!Number.isInteger(row) || row < 0 || row >= state.config.http.sources.length) return;
+    const row = Number(target.dataset.row);
+    if (!Number.isInteger(row) || row < 0 || row >= state.config.http.urls.length) return;
     const field = target.dataset.field;
-    if (!field) return;
-    if (field === "enabled") {
-      state.config.http.sources[row].enabled = target.checked;
-    } else if (field === "interval_ms") {
-      state.config.http.sources[row].interval_ms = Math.max(100, Number(target.value || 5000) || 5000);
-    } else if (field === "name" || field === "url" || field === "topic_prefix") {
-      state.config.http.sources[row][field] = target.value;
+    if (field === "url") state.config.http.urls[row].url = target.value.trim();
+    if (field === "base_topic") state.config.http.urls[row].base_topic = target.value.trim().replace(/^\/+|\/+$/g, "");
+  });
+
+  httpValuesTbody.addEventListener("input", (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    const urlCfg = selectedUrlCfg();
+    if (!urlCfg) return;
+    const path = String(target.dataset.path || "");
+    if (!path) return;
+    const mapping = ensureUrlMapping(urlCfg, path);
+    if (target.dataset.mappingField === "enabled") {
+      mapping.enabled = target.checked;
+    } else if (target.dataset.mappingField === "topic") {
+      mapping.topic = target.value.trim().replace(/^\/+|\/+$/g, "");
     }
   });
 
-  httpTbody.addEventListener("click", (ev) => {
-    const target = ev.target;
-    if (!(target instanceof HTMLElement)) return;
-    if (target.dataset.action !== "remove-source") return;
-    const row = Number(target.dataset.row);
-    if (!Number.isInteger(row) || row < 0 || row >= state.config.http.sources.length) return;
-    state.config.http.sources.splice(row, 1);
-    renderHttp();
+  httpValueFilterEl.addEventListener("input", () => renderHttpValues());
+  httpPollIntervalEl.addEventListener("input", () => {
+    state.config.http.poll_interval_ms = Math.max(100, Number(httpPollIntervalEl.value || 5000) || 5000);
   });
 
   (async () => {

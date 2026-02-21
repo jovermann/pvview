@@ -19,7 +19,7 @@
     <main>
       <div class="tabs">
         <button class="tab active" data-tab="mqtt">MQTT</button>
-        <button class="tab" data-tab="http">HTTP JSON</button>
+        <button class="tab" data-tab="http">HTTP</button>
       </div>
 
       <section id="tab-mqtt" class="panel active">
@@ -39,27 +39,69 @@
       </section>
 
       <section id="tab-http" class="panel">
-        <div class="row">
-          <button id="addHttpSource" class="btn">Add HTTP Source</button>
-        </div>
-        <div class="table-wrap">
-          <table id="httpSourcesTable">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>URL</th>
-                <th>Topic Prefix</th>
-                <th>Interval (ms)</th>
-                <th>Enabled</th>
-                <th>Remove</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+        <div class="http-layout">
+          <div class="http-left">
+            <div class="row">
+              <label>Poll Interval (ms)</label>
+              <input id="httpPollInterval" type="number" min="100" step="100" />
+            </div>
+            <div class="row">
+              <button id="addHttpUrl" class="btn">Add URL</button>
+            </div>
+            <div class="table-wrap">
+              <table id="httpUrlsTable">
+                <thead>
+                  <tr>
+                    <th>URL</th>
+                    <th>Base Topic</th>
+                    <th>Fetch</th>
+                    <th>Remove</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="http-right">
+            <div class="row row-inline">
+              <div class="muted" id="httpSelectedUrlLabel">No URL selected</div>
+              <label>Filter</label>
+              <input id="httpValueFilter" type="text" placeholder="substring" />
+            </div>
+            <div class="table-wrap">
+              <table id="httpValuesTable">
+                <thead>
+                  <tr>
+                    <th>On</th>
+                    <th>JSON Path</th>
+                    <th>Value</th>
+                    <th>Topic</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
     </main>
   </div>
+
+  <dialog id="addUrlDialog" class="modal">
+    <form method="dialog" class="modal-content" id="addUrlForm">
+      <h2>Add URL</h2>
+      <div class="form-grid">
+        <label>URL</label>
+        <input id="newHttpUrl" type="text" placeholder="http://host/path" />
+        <label>Base Topic</label>
+        <input id="newHttpBaseTopic" type="text" placeholder="meter" />
+      </div>
+      <menu>
+        <button id="cancelAddUrl" type="button" class="btn">Cancel</button>
+        <button id="saveAddUrl" value="default" class="btn accent">Add</button>
+      </menu>
+    </form>
+  </dialog>
   <script src="/static/app.js"></script>
 </body>
 </html>

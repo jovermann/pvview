@@ -335,9 +335,9 @@ def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):
     assert text.index("# c_data_dir") < text.index("data_dir = ")
     assert text.index("# c_quantize") < text.index("quantize_timestamps = ")
     assert text.index("# c_topics") < text.index("topics = ")
-    first_http = text.index("[[http.sources]]")
+    first_http = text.index("[[http.urls]]")
     assert text.index("# c_http_block_1") < first_http
-    second_http = text.index("[[http.sources]]", first_http + 1)
+    second_http = text.index("[[http.urls]]", first_http + 1)
     assert text.index("# c_http_block_2") < second_http
     assert text.strip().endswith("# c_trailing_end_2")
 
@@ -377,7 +377,7 @@ def test_collector_config_preserves_comment_blocks_after_modify_write(tmp_path):
     cfg["mqtt"]["mqtt_server"] = "new-broker:2883"
     cfg["mqtt"]["quantize_timestamps"] = 250
     cfg["mqtt"]["topics"] = ["solar/ac/#", "solar/dtu/#"]
-    cfg["http"]["sources"][0]["interval_ms"] = 5000
+    cfg["http"]["poll_interval_ms"] = 5000
     save_collector_config(str(config_path), cfg)
     text = config_path.read_text(encoding="utf-8")
 
@@ -386,8 +386,8 @@ def test_collector_config_preserves_comment_blocks_after_modify_write(tmp_path):
     assert text.index("# c_topics") < text.index("topics = [")
     assert '    "solar/ac/#",' in text
     assert '    "solar/dtu/#",' in text
-    assert text.index("# c_http_block_1") < text.index("[[http.sources]]")
-    assert "interval_ms = 5000" in text
+    assert text.index("# c_http_block_1") < text.index("[[http.urls]]")
+    assert "poll_interval_ms = 5000" in text
 
 
 def test_collector_config_repeated_save_does_not_add_blank_lines_before_trailing_comments(tmp_path):

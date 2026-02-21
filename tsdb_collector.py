@@ -17,6 +17,7 @@ import json
 import fnmatch
 import re
 from urllib.parse import unquote, urlparse
+import urllib.request
 
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
@@ -1077,64 +1078,82 @@ def _quantize_timestamp_ms(timestamp_ms: int, quantize_timestamps_ms: int) -> in
 
 
 def collect_to_tsdb(
-    server: str,
+    server: Optional[str],
     subscriptions: list[str],
     verbose: int,
     quantize_timestamps_ms: int = 0,
     data_dir: str = ".",
+    http_config: Optional[dict[str, Any]] = None,
 ) -> int:
-    if not subscriptions:
+    http_cfg = http_config if isinstance(http_config, dict) else {}
+    http_urls_raw = http_cfg.get("urls", [])
+    http_urls = [u for u in http_urls_raw if isinstance(u, dict) and str(u.get("url", "")).strip()]
+    try:
+        http_poll_interval_ms = max(100, int(http_cfg.get("poll_interval_ms", 5000)))
+    except Exception:
+        http_poll_interval_ms = 5000
+
+    if not subscriptions and not http_urls:
         print("--collect requires at least one topic via --topics or config")
         return 2
-    try:
-        import paho.mqtt.client as mqtt
-    except Exception:
-        print("paho-mqtt is required. Install with: pip install paho-mqtt")
-        return 2
-    host, port = parse_host_port(server)
-    if not hasattr(mqtt, "CallbackAPIVersion"):
-        print("paho-mqtt v2 is required. Please upgrade paho-mqtt.")
-        return 2
+
+    mqtt = None
+    client = None
+    host = ""
+    port = 0
+    if subscriptions:
+        if not server:
+            print("MQTT server not specified. Use --mqtt-server or set mqtt_server in config.")
+            return 2
+        try:
+            import paho.mqtt.client as mqtt  # type: ignore
+        except Exception:
+            print("paho-mqtt is required. Install with: pip install paho-mqtt")
+            return 2
+        host, port = parse_host_port(server)
+        if not hasattr(mqtt, "CallbackAPIVersion"):
+            print("paho-mqtt v2 is required. Please upgrade paho-mqtt.")
+            return 2
 
     queue: list[tuple[int, str, Any]] = []
     lock = threading.Lock()
     appenders: dict[datetime.date, TimeSeriesDbAppender] = {}
     os.makedirs(data_dir, exist_ok=True)
 
-    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+    if mqtt is not None:
+        client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 
-    def on_connect(client, userdata, flags, reason_code, properties=None):
-        try:
-            rc = int(reason_code)
-        except Exception:
-            rc = reason_code
-        if rc != 0:
-            print(f"Failed to connect to MQTT server (rc={rc})")
-            return
-        if verbose:
-            print(f"connected to MQTT server {host}:{port}")
-        for topic in subscriptions:
-            client.subscribe(topic)
+        def on_connect(client, userdata, flags, reason_code, properties=None):
+            try:
+                rc = int(reason_code)
+            except Exception:
+                rc = reason_code
+            if rc != 0:
+                print(f"Failed to connect to MQTT server (rc={rc})")
+                return
             if verbose:
-                print(f"subscribed: {topic}")
+                print(f"connected to MQTT server {host}:{port}")
+            for topic in subscriptions:
+                client.subscribe(topic)
+                if verbose:
+                    print(f"subscribed: {topic}")
 
-    def on_message(client, userdata, msg):
-        ts_ms = int(time.time() * 1000)
-        ts_ms = _quantize_timestamp_ms(ts_ms, quantize_timestamps_ms)
-        value = _value_from_mqtt_payload(msg.payload)
-        value_for_log = value.value if isinstance(value, NumericWithDecimals) else value
-        if verbose >= 2:
-            print(f"received: {msg.topic}={value_for_log}")
-        with lock:
-            queue.append((ts_ms, msg.topic, value))
+        def on_message(client, userdata, msg):
+            ts_ms = _quantize_timestamp_ms(int(time.time() * 1000), quantize_timestamps_ms)
+            value = _value_from_mqtt_payload(msg.payload)
+            value_for_log = value.value if isinstance(value, NumericWithDecimals) else value
+            if verbose >= 2:
+                print(f"received: {msg.topic}={value_for_log}")
+            with lock:
+                queue.append((ts_ms, msg.topic, value))
 
-    client.on_connect = on_connect
-    client.on_message = on_message
-    try:
-        client.connect(host, port, keepalive=30)
-    except Exception as exc:
-        print(f"Unable to connect to MQTT server {host}:{port}: {exc}")
-        return 2
+        client.on_connect = on_connect
+        client.on_message = on_message
+        try:
+            client.connect(host, port, keepalive=30)
+        except Exception as exc:
+            print(f"Unable to connect to MQTT server {host}:{port}: {exc}")
+            return 2
 
     def flush_batch(batch: list[tuple[int, str, Any]]) -> None:
         by_day: dict[datetime.date, list[tuple[int, str, Any]]] = {}
@@ -1152,11 +1171,56 @@ def collect_to_tsdb(
         if verbose and batch:
             print(f"flushed {len(batch)} events")
 
-    client.loop_start()
+    if client is not None:
+        client.loop_start()
     last_flush = time.monotonic()
+    next_http_poll = time.monotonic()
     try:
         while True:
             now = time.monotonic()
+            if http_urls and now >= next_http_poll:
+                http_events: list[tuple[int, str, Any]] = []
+                emitted = 0
+                for url_cfg in http_urls:
+                    url = str(url_cfg.get("url", "")).strip()
+                    base_topic = str(url_cfg.get("base_topic", "")).strip().strip("/")
+                    if not url:
+                        continue
+                    flat, error = fetch_http_json_flattened(url)
+                    if error:
+                        if verbose:
+                            print(f"http fetch failed: {url} ({error})")
+                        continue
+                    if flat is None:
+                        if verbose:
+                            print(f"http fetch returned non-object JSON: {url}")
+                        continue
+                    ts_ms = _quantize_timestamp_ms(int(time.time() * 1000), quantize_timestamps_ms)
+                    values_raw = url_cfg.get("values", [])
+                    values = values_raw if isinstance(values_raw, list) else []
+                    for value_cfg in values:
+                        if not isinstance(value_cfg, dict):
+                            continue
+                        if not bool(value_cfg.get("enabled", False)):
+                            continue
+                        path = str(value_cfg.get("path", "")).strip()
+                        if not path:
+                            continue
+                        if path not in flat:
+                            continue
+                        topic_leaf = str(value_cfg.get("topic", "")).strip() or path.replace(".", "/")
+                        full_topic = f"{base_topic}/{topic_leaf}" if base_topic else topic_leaf
+                        http_events.append((ts_ms, full_topic, _value_from_http_text(flat[path])))
+                        emitted += 1
+                    if verbose >= 2:
+                        print(f"http fetched: {url} keys={len(flat)}")
+                if http_events:
+                    with lock:
+                        queue.extend(http_events)
+                if verbose and http_urls:
+                    print(f"http poll done urls={len(http_urls)} emitted={emitted}")
+                next_http_poll = now + (http_poll_interval_ms / 1000.0)
+
             if now - last_flush >= 10.0:
                 with lock:
                     batch = list(queue)
@@ -1171,8 +1235,9 @@ def collect_to_tsdb(
             batch = list(queue)
             queue.clear()
         flush_batch(batch)
-        client.loop_stop()
-        client.disconnect()
+        if client is not None:
+            client.loop_stop()
+            client.disconnect()
     return 0
 
 
@@ -1465,6 +1530,27 @@ def flatten_json(raw: str) -> tuple[Optional[dict[str, str]], Optional[str]]:
 
     walk("", data)
     return flat, None
+
+
+def fetch_http_json_flattened(url: str, timeout: float = 10.0) -> tuple[Optional[dict[str, str]], Optional[str]]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            raw = resp.read()
+    except Exception as exc:
+        return None, f"{exc.__class__.__name__}: {exc}"
+    try:
+        text = raw.decode("utf-8-sig")
+    except Exception as exc:
+        return None, f"{exc.__class__.__name__}: {exc}"
+    return flatten_json(text)
+
+
+def _value_from_http_text(text: str) -> Any:
+    stripped = text.strip()
+    numeric = _parse_strict_float(stripped)
+    if numeric is None:
+        return stripped
+    return NumericWithDecimals(float(numeric), _decimal_places_from_literal(stripped))
 
 
 def list_topics(server: str, timeout: float, verbose: int, topic_filter: Optional[str], flatten: bool, monitor: bool) -> int:
@@ -1878,28 +1964,65 @@ def load_collector_config(rc_path: str) -> dict[str, Any]:
                 data_dir = str(mqtt_block[key]).strip() or "."
                 break
 
-    sources_raw = http_block.get("sources", data.get("http_sources", []))
-    sources: list[dict[str, Any]] = []
-    if isinstance(sources_raw, list):
-        for item in sources_raw:
+    poll_interval_ms = 5000
+    for key in ("poll_interval_ms", "poll-interval-ms", "http_poll_interval_ms"):
+        if key in http_block:
+            try:
+                poll_interval_ms = max(100, int(http_block[key]))
+            except Exception:
+                poll_interval_ms = 5000
+            break
+        if key in data:
+            try:
+                poll_interval_ms = max(100, int(data[key]))
+            except Exception:
+                poll_interval_ms = 5000
+            break
+
+    urls_raw = http_block.get("urls")
+    # Backward compatibility with old shape: http.sources / http_sources.
+    if not isinstance(urls_raw, list):
+        urls_raw = http_block.get("sources", data.get("http_sources", []))
+    if poll_interval_ms == 5000 and isinstance(urls_raw, list):
+        for item in urls_raw:
             if not isinstance(item, dict):
                 continue
-            name = str(item.get("name", "")).strip()
+            if "interval_ms" in item:
+                try:
+                    poll_interval_ms = max(100, int(item.get("interval_ms", 5000)))
+                except Exception:
+                    poll_interval_ms = 5000
+                break
+    urls: list[dict[str, Any]] = []
+    if isinstance(urls_raw, list):
+        for item in urls_raw:
+            if not isinstance(item, dict):
+                continue
             url = str(item.get("url", "")).strip()
-            topic_prefix = str(item.get("topic_prefix", "")).strip()
-            interval_ms = item.get("interval_ms", 5000)
-            enabled = bool(item.get("enabled", True))
-            try:
-                interval_ms = max(100, int(interval_ms))
-            except Exception:
-                interval_ms = 5000
-            sources.append(
+            base_topic = str(item.get("base_topic", item.get("topic_prefix", ""))).strip()
+            values_raw = item.get("values", [])
+            values: list[dict[str, Any]] = []
+            if isinstance(values_raw, list):
+                for value_item in values_raw:
+                    if not isinstance(value_item, dict):
+                        continue
+                    path = str(value_item.get("path", "")).strip()
+                    topic = str(value_item.get("topic", "")).strip()
+                    enabled = bool(value_item.get("enabled", False))
+                    if not path:
+                        continue
+                    values.append(
+                        {
+                            "path": path,
+                            "topic": topic,
+                            "enabled": enabled,
+                        }
+                    )
+            urls.append(
                 {
-                    "name": name,
                     "url": url,
-                    "topic_prefix": topic_prefix,
-                    "interval_ms": interval_ms,
-                    "enabled": enabled,
+                    "base_topic": base_topic,
+                    "values": values,
                 }
             )
 
@@ -1911,7 +2034,8 @@ def load_collector_config(rc_path: str) -> dict[str, Any]:
             "topics": topics,
         },
         "http": {
-            "sources": sources,
+            "poll_interval_ms": poll_interval_ms,
+            "urls": urls,
         },
     }
 
@@ -1953,7 +2077,7 @@ def _toml_top_level_item_id(stripped_line: str) -> Optional[str]:
 def _extract_toml_comment_blocks_by_item(path: str) -> tuple[dict[str, list[list[str]]], list[str], list[str]]:
     """Preserve comment/blank blocks and associate each with the next top-level TOML item."""
     if not os.path.exists(path):
-        return {}, []
+        return {}, [], []
     blocks_by_item: dict[str, list[list[str]]] = {}
     pending_block: list[str] = []
     orphan_lines: list[str] = []
@@ -1979,7 +2103,7 @@ def _extract_toml_comment_blocks_by_item(path: str) -> tuple[dict[str, list[list
                 # Non-item content breaks association.
                 pending_block.clear()
     except Exception:
-        return {}, []
+        return {}, [], []
 
     if pending_block:
         if seen_any_item:
@@ -2009,12 +2133,32 @@ def _dumps_collector_config_toml(
     lines: list[str] = []
     blocks = dict(comment_blocks_by_item or {})
 
-    def emit_item(item_id: str, line: str) -> None:
-        queue = blocks.get(item_id)
-        if queue:
+    def emit_item(item_id: str, line: str, aliases: Optional[list[str]] = None) -> None:
+        keys = [item_id]
+        if aliases:
+            keys.extend(aliases)
+        queue = None
+        selected_key = None
+        for key in keys:
+            q = blocks.get(key)
+            if q:
+                queue = q
+                selected_key = key
+                break
+        if queue and selected_key is not None:
             block = queue.pop(0)
             lines.extend(block)
         lines.append(line)
+
+    def has_block(item_id: str, aliases: Optional[list[str]] = None) -> bool:
+        keys = [item_id]
+        if aliases:
+            keys.extend(aliases)
+        for key in keys:
+            q = blocks.get(key)
+            if q:
+                return True
+        return False
 
     if orphan_preamble_lines:
         lines.extend(orphan_preamble_lines)
@@ -2027,26 +2171,44 @@ def _dumps_collector_config_toml(
     for continuation in topic_lines[1:]:
         lines.append(continuation)
 
-    sources = http.get("sources", [])
-    if isinstance(sources, list):
-        for source in sources:
-            if not isinstance(source, dict):
+    try:
+        poll_interval_ms = max(100, int(http.get("poll_interval_ms", 5000)))
+    except Exception:
+        poll_interval_ms = 5000
+    if lines and lines[-1].strip() != "" and not has_block("[http]"):
+        lines.append("")
+    emit_item("[http]", "[http]")
+    lines.append(f"poll_interval_ms = {poll_interval_ms}")
+
+    urls = http.get("urls", [])
+    if isinstance(urls, list):
+        for url_item in urls:
+            if not isinstance(url_item, dict):
                 continue
-            name = str(source.get("name", "")).strip()
-            url = str(source.get("url", "")).strip()
-            topic_prefix = str(source.get("topic_prefix", "")).strip()
-            try:
-                interval_ms = max(100, int(source.get("interval_ms", 5000)))
-            except Exception:
-                interval_ms = 5000
-            enabled = bool(source.get("enabled", True))
-            lines.append("")
-            emit_item("[[http.sources]]", "[[http.sources]]")
-            lines.append(f'name = {_quote_toml_string(name)}')
+            url = str(url_item.get("url", "")).strip()
+            base_topic = str(url_item.get("base_topic", "")).strip()
+            if lines and lines[-1].strip() != "" and not has_block("[[http.urls]]", aliases=["[[http.sources]]"]):
+                lines.append("")
+            emit_item("[[http.urls]]", "[[http.urls]]", aliases=["[[http.sources]]"])
             lines.append(f'url = {_quote_toml_string(url)}')
-            lines.append(f'topic_prefix = {_quote_toml_string(topic_prefix)}')
-            lines.append(f"interval_ms = {interval_ms}")
-            lines.append(f"enabled = {'true' if enabled else 'false'}")
+            emit_item("base_topic", f'base_topic = {_quote_toml_string(base_topic)}', aliases=["topic_prefix"])
+
+            values = url_item.get("values", [])
+            if isinstance(values, list):
+                for value_item in values:
+                    if not isinstance(value_item, dict):
+                        continue
+                    path = str(value_item.get("path", "")).strip()
+                    topic = str(value_item.get("topic", "")).strip()
+                    enabled = bool(value_item.get("enabled", False))
+                    if not path:
+                        continue
+                    if lines and lines[-1].strip() != "" and not has_block("[[http.urls.values]]"):
+                        lines.append("")
+                    emit_item("[[http.urls.values]]", "[[http.urls.values]]")
+                    lines.append(f'path = {_quote_toml_string(path)}')
+                    lines.append(f'topic = {_quote_toml_string(topic)}')
+                    lines.append(f"enabled = {'true' if enabled else 'false'}")
     if trailing_lines:
         lines.extend(trailing_lines)
     return "\n".join(lines) + "\n"
@@ -2117,7 +2279,7 @@ class CollectorUiRequestHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
@@ -2170,6 +2332,46 @@ class CollectorUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": {"code": "io_error", "message": str(exc)}})
             return
         self._send_json(200, {"ok": True, "configPath": config_path})
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path != "/http/fetch":
+            self._send_json(404, {"error": {"code": "not_found", "message": f"Unknown endpoint: {path}"}})
+            return
+        length_raw = self.headers.get("Content-Length", "").strip()
+        if not length_raw:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Missing Content-Length"}})
+            return
+        try:
+            length = int(length_raw)
+        except ValueError:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Invalid Content-Length"}})
+            return
+        if length <= 0:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Empty request body"}})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Invalid JSON body"}})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Request body must be object"}})
+            return
+        url = str(payload.get("url", "")).strip()
+        if not url:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Missing url"}})
+            return
+        flat, error = fetch_http_json_flattened(url)
+        if error:
+            self._send_json(502, {"error": {"code": "fetch_failed", "message": error}})
+            return
+        if flat is None:
+            self._send_json(200, {"url": url, "values": [], "note": "JSON root is not an object"})
+            return
+        values = [{"path": k, "value": flat[k]} for k in sorted(flat.keys())]
+        self._send_json(200, {"url": url, "values": values})
 
     def log_message(self, fmt: str, *args: Any) -> None:
         timestamp = time.strftime("%d/%b/%Y %H:%M:%S")
@@ -2315,25 +2517,37 @@ def main() -> int:
 
     if args.mqtt_server:
         persist_server(rc_path, args.mqtt_server)
+    loaded_config = load_collector_config(rc_path)
     default_server = read_default_server(rc_path)
     default_topics = read_default_topics(rc_path)
     default_quantize_timestamps = read_default_quantize_timestamps(rc_path)
+    default_http = loaded_config.get("http", {}) if isinstance(loaded_config.get("http"), dict) else {}
+    default_http_urls = default_http.get("urls", []) if isinstance(default_http.get("urls"), list) else []
     server = args.mqtt_server or default_server
     quantize_timestamps_ms = args.quantize_timestamps if args.quantize_timestamps is not None else default_quantize_timestamps
     quantize_timestamps_ms = max(0, quantize_timestamps_ms)
 
-    if not server:
+    if not server and not default_http_urls:
         print(f"MQTT server not specified. Use --mqtt-server or set mqtt_server in {rc_path}")
         return 2
 
     no_cli_options = len(sys.argv) == 1
-    default_to_collect = no_cli_options and bool(default_server)
+    default_to_collect = no_cli_options and (bool(default_server) or bool(default_http_urls))
 
     if args.list_topics:
+        if not server:
+            print(f"MQTT server not specified. Use --mqtt-server or set mqtt_server in {rc_path}")
+            return 2
         return list_topics(server, args.timeout, args.verbose, args.filter, args.flatten, False)
     if args.monitor:
+        if not server:
+            print(f"MQTT server not specified. Use --mqtt-server or set mqtt_server in {rc_path}")
+            return 2
         return list_topics(server, args.timeout, args.verbose, args.filter, args.flatten, True)
     if args.open_dtu_summary:
+        if not server:
+            print(f"MQTT server not specified. Use --mqtt-server or set mqtt_server in {rc_path}")
+            return 2
         return open_dtu_summary(server, args.timeout, args.filter, args.verbose)
     if args.collect or default_to_collect:
         topics = args.topics if args.topics else default_topics
@@ -2343,6 +2557,7 @@ def main() -> int:
             args.verbose,
             quantize_timestamps_ms=quantize_timestamps_ms,
             data_dir=data_dir,
+            http_config=default_http,
         )
 
     print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --generate-demo-db, or --compress.")

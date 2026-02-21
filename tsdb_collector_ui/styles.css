@@ -127,6 +127,23 @@ textarea {
   margin-bottom: 8px;
 }
 
+.row-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.http-layout {
+  display: grid;
+  grid-template-columns: 36% 64%;
+  gap: 10px;
+}
+
+.http-left,
+.http-right {
+  min-width: 0;
+}
+
 .table-wrap {
   overflow: auto;
 }
@@ -141,4 +158,38 @@ th, td {
   padding: 6px 6px;
   text-align: left;
   vertical-align: middle;
+}
+
+.selected-row {
+  background: #1a2433;
+}
+
+.modal {
+  width: min(680px, 92vw);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0;
+  color: var(--text);
+  background: var(--panel);
+}
+
+.modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+
+@media (max-width: 1100px) {
+  .http-layout {
+    grid-template-columns: 1fr;
+  }
 }
