@@ -235,6 +235,7 @@ main { padding: 2px; }
 .stat-value-cell {
   white-space: nowrap;
   width: 1%;
+  text-align: right;
 }
 
 .stat-spacer {

@@ -391,6 +391,10 @@
     return unitForSuffix(parts[parts.length - 1]);
   }
 
+  function isYieldSuffix(suffix) {
+    return String(suffix || '').toLowerCase().startsWith('yield');
+  }
+
   function normalizeDotStyle(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return 0;
@@ -824,6 +828,7 @@
     const curTsByLegendName = new Map();
     const unitByLegendName = new Map();
     const decimalsByLegendName = new Map();
+    const hideMaxByLegendName = new Map();
     for (const s of seriesResponses) {
       let maxValue = s.legendMax;
       let curValue;
@@ -848,6 +853,11 @@
       }
       if (!unitByLegendName.has(s.displayName)) {
         unitByLegendName.set(s.displayName, unitForSuffix(s.axisKey));
+      }
+      if (!hideMaxByLegendName.has(s.displayName)) {
+        hideMaxByLegendName.set(s.displayName, isYieldSuffix(s.axisKey));
+      } else if (isYieldSuffix(s.axisKey)) {
+        hideMaxByLegendName.set(s.displayName, true);
       }
       if (!decimalsByLegendName.has(s.displayName)) {
         decimalsByLegendName.set(s.displayName, normalizeDecimalPlaces(s.decimalPlaces));
@@ -913,7 +923,12 @@
           const curTs = curTsByLegendName.get(name);
           const unit = unitByLegendName.get(name);
           const decimals = decimalsByLegendName.get(name);
+          const hideMax = !!hideMaxByLegendName.get(name);
           const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
+          if (hideMax) {
+            if (curValue === undefined || !curFresh) return name;
+            return `${name} (cur ${formatValueWithUnit(curValue, unit, decimals)})`;
+          }
           if (maxValue === undefined) return name;
           if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit, decimals)})`;
           return `${name} (cur ${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)})`;
@@ -1014,6 +1029,7 @@
           maxText: (typeof maxValue === 'number')
             ? formatValueWithUnit(roundNumeric(maxValue), unit, decimals)
             : '-',
+          hideMax: isYieldSuffix(suffix),
         };
       }));
       const displayParent = splitSeriesParentSuffix(displaySeriesName(seriesName)).parent.replace(/\/$/, '');
@@ -1037,7 +1053,7 @@
         ${r.cells.map((cell) => `
           <td class="stat-value-cell">
             <div class="stat-current">${cell.currentText}</div>
-            <div class="stat-max">max ${cell.maxText}</div>
+            ${cell.hideMax ? '' : `<div class="stat-max">max ${cell.maxText}</div>`}
           </td>
         `).join('')}
         <td class="stat-spacer"></td>
