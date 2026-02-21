@@ -9,7 +9,9 @@ from tsdb_collector import (
     compress_timeseries_db_file,
     create_timeseries_db_writer,
     generateDemoData,
+    load_collector_config,
     read_timeseries_db,
+    save_collector_config,
 )
 
 
@@ -267,3 +269,102 @@ def test_cli_collect_requires_subscription(tmp_path):
     )
     assert result.returncode == 2
     assert "--collect requires at least one topic via --topics or config" in result.stderr
+
+
+def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):
+    config_path = tmp_path / "collector.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "# c_mqtt_server",
+                'mqtt_server = "broker:1883"',
+                "",
+                "# c_data_dir",
+                'data_dir = "./data"',
+                "",
+                "# c_quantize",
+                "quantize_timestamps = 100",
+                "",
+                "# c_topics",
+                'topics = ["solar/#", "dtu/#"]',
+                "",
+                "# c_http_block_1",
+                "[[http.sources]]",
+                'name = "A"',
+                'url = "http://a.local/json"',
+                'topic_prefix = "http/a"',
+                "interval_ms = 2000",
+                "enabled = true",
+                "",
+                "# c_http_block_2",
+                "[[http.sources]]",
+                'name = "B"',
+                'url = "http://b.local/json"',
+                'topic_prefix = "http/b"',
+                "interval_ms = 3000",
+                "enabled = false",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_collector_config(str(config_path))
+    save_collector_config(str(config_path), cfg)
+    text = config_path.read_text(encoding="utf-8")
+
+    assert text.index("# c_mqtt_server") < text.index("mqtt_server = ")
+    assert text.index("# c_data_dir") < text.index("data_dir = ")
+    assert text.index("# c_quantize") < text.index("quantize_timestamps = ")
+    assert text.index("# c_topics") < text.index("topics = ")
+    first_http = text.index("[[http.sources]]")
+    assert text.index("# c_http_block_1") < first_http
+    second_http = text.index("[[http.sources]]", first_http + 1)
+    assert text.index("# c_http_block_2") < second_http
+
+
+def test_collector_config_preserves_comment_blocks_after_modify_write(tmp_path):
+    config_path = tmp_path / "collector_modify.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "# c_mqtt_server",
+                'mqtt_server = "broker:1883"',
+                "",
+                "# c_data_dir",
+                'data_dir = "./data"',
+                "",
+                "# c_quantize",
+                "quantize_timestamps = 100",
+                "",
+                "# c_topics",
+                'topics = ["solar/#"]',
+                "",
+                "# c_http_block_1",
+                "[[http.sources]]",
+                'name = "A"',
+                'url = "http://a.local/json"',
+                'topic_prefix = "http/a"',
+                "interval_ms = 2000",
+                "enabled = true",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_collector_config(str(config_path))
+    cfg["mqtt"]["mqtt_server"] = "new-broker:2883"
+    cfg["mqtt"]["quantize_timestamps"] = 250
+    cfg["mqtt"]["topics"] = ["solar/ac/#", "solar/dtu/#"]
+    cfg["http"]["sources"][0]["interval_ms"] = 5000
+    save_collector_config(str(config_path), cfg)
+    text = config_path.read_text(encoding="utf-8")
+
+    assert text.index("# c_mqtt_server") < text.index('mqtt_server = "new-broker:2883"')
+    assert text.index("# c_quantize") < text.index("quantize_timestamps = 250")
+    assert text.index("# c_topics") < text.index('topics = ["solar/ac/#", "solar/dtu/#"]')
+    assert text.index("# c_http_block_1") < text.index("[[http.sources]]")
+    assert "interval_ms = 5000" in text

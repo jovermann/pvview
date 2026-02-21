@@ -1876,7 +1876,58 @@ def _quote_toml_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _dumps_collector_config_toml(config: dict[str, Any]) -> str:
+def _toml_top_level_item_id(stripped_line: str) -> Optional[str]:
+    if stripped_line.startswith("[[") and stripped_line.endswith("]]"):
+        return stripped_line
+    if stripped_line.startswith("[") and stripped_line.endswith("]"):
+        return stripped_line
+    if "=" in stripped_line:
+        key = stripped_line.split("=", 1)[0].strip()
+        if key and " " not in key and not key.startswith("#"):
+            return key
+    return None
+
+
+def _extract_toml_comment_blocks_by_item(path: str) -> tuple[dict[str, list[list[str]]], list[str]]:
+    """Preserve comment/blank blocks and associate each with the next top-level TOML item."""
+    if not os.path.exists(path):
+        return {}, []
+    blocks_by_item: dict[str, list[list[str]]] = {}
+    pending_block: list[str] = []
+    orphan_lines: list[str] = []
+    seen_any_item = False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                stripped = line.strip()
+                if stripped == "" or stripped.startswith("#"):
+                    pending_block.append(line)
+                    continue
+
+                item_id = _toml_top_level_item_id(stripped)
+                if item_id is not None:
+                    seen_any_item = True
+                    if pending_block:
+                        blocks_by_item.setdefault(item_id, []).append(list(pending_block))
+                        pending_block.clear()
+                    continue
+
+                # Non-item content breaks association.
+                pending_block.clear()
+    except Exception:
+        return {}, []
+
+    if pending_block and not seen_any_item:
+        orphan_lines = pending_block
+    return blocks_by_item, orphan_lines
+
+
+def _dumps_collector_config_toml(
+    config: dict[str, Any],
+    comment_blocks_by_item: Optional[dict[str, list[list[str]]]] = None,
+    orphan_preamble_lines: Optional[list[str]] = None,
+) -> str:
     mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
     http = config.get("http", {}) if isinstance(config.get("http"), dict) else {}
 
@@ -1889,10 +1940,22 @@ def _dumps_collector_config_toml(config: dict[str, Any]) -> str:
     topics = _normalize_topics(mqtt.get("topics", []))
 
     lines: list[str] = []
-    lines.append(f'mqtt_server = {_quote_toml_string(mqtt_server)}')
-    lines.append(f'data_dir = {_quote_toml_string(data_dir)}')
-    lines.append(f"quantize_timestamps = {quantize}")
-    lines.append("topics = [" + ", ".join(_quote_toml_string(t) for t in topics) + "]")
+    blocks = dict(comment_blocks_by_item or {})
+
+    def emit_item(item_id: str, line: str) -> None:
+        queue = blocks.get(item_id)
+        if queue:
+            block = queue.pop(0)
+            lines.extend(block)
+        lines.append(line)
+
+    if orphan_preamble_lines:
+        lines.extend(orphan_preamble_lines)
+
+    emit_item("mqtt_server", f'mqtt_server = {_quote_toml_string(mqtt_server)}')
+    emit_item("data_dir", f'data_dir = {_quote_toml_string(data_dir)}')
+    emit_item("quantize_timestamps", f"quantize_timestamps = {quantize}")
+    emit_item("topics", "topics = [" + ", ".join(_quote_toml_string(t) for t in topics) + "]")
 
     sources = http.get("sources", [])
     if isinstance(sources, list):
@@ -1908,7 +1971,7 @@ def _dumps_collector_config_toml(config: dict[str, Any]) -> str:
                 interval_ms = 5000
             enabled = bool(source.get("enabled", True))
             lines.append("")
-            lines.append("[[http.sources]]")
+            emit_item("[[http.sources]]", "[[http.sources]]")
             lines.append(f'name = {_quote_toml_string(name)}')
             lines.append(f'url = {_quote_toml_string(url)}')
             lines.append(f'topic_prefix = {_quote_toml_string(topic_prefix)}')
@@ -1918,7 +1981,12 @@ def _dumps_collector_config_toml(config: dict[str, Any]) -> str:
 
 
 def save_collector_config(rc_path: str, config: dict[str, Any]) -> None:
-    text = _dumps_collector_config_toml(config)
+    comment_blocks_by_item, orphan_preamble_lines = _extract_toml_comment_blocks_by_item(rc_path)
+    text = _dumps_collector_config_toml(
+        config,
+        comment_blocks_by_item=comment_blocks_by_item,
+        orphan_preamble_lines=orphan_preamble_lines,
+    )
     parent = os.path.dirname(os.path.abspath(rc_path))
     os.makedirs(parent, exist_ok=True)
     tmp = rc_path + ".tmp"
