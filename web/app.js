@@ -316,6 +316,16 @@
     return unit ? `${raw} / ${unit}` : raw;
   }
 
+  function unitForSuffix(suffix) {
+    return axisUnitsBySuffix.get(String(suffix || '').toLowerCase()) || null;
+  }
+
+  function unitForSeriesName(seriesName) {
+    const parts = String(seriesName || '').split('/');
+    if (!parts.length) return null;
+    return unitForSuffix(parts[parts.length - 1]);
+  }
+
   function normalizeDotStyle(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return 0;
@@ -352,6 +362,13 @@
       return Number(rounded).toString();
     }
     return String(value);
+  }
+
+  function formatValueWithUnit(value, unit) {
+    const base = formatTooltipValue(value);
+    if (!unit) return base;
+    if (base === '-' || base === '') return base;
+    return `${base} ${unit}`;
   }
 
   function rgbaFromHex(hex, alpha) {
@@ -730,6 +747,7 @@
     const maxByLegendName = new Map();
     const curByLegendName = new Map();
     const curTsByLegendName = new Map();
+    const unitByLegendName = new Map();
     for (const s of seriesResponses) {
       let maxValue = s.legendMax;
       let curValue;
@@ -751,6 +769,9 @@
       }
       if (curTs !== undefined && Number.isFinite(curTs)) {
         curTsByLegendName.set(s.displayName, curTs);
+      }
+      if (!unitByLegendName.has(s.displayName)) {
+        unitByLegendName.set(s.displayName, unitForSuffix(s.axisKey));
       }
     }
     const displayNameToSeries = new Map();
@@ -807,10 +828,11 @@
           const maxValue = maxByLegendName.get(name);
           const curValue = curByLegendName.get(name);
           const curTs = curTsByLegendName.get(name);
+          const unit = unitByLegendName.get(name);
           const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
           if (maxValue === undefined) return name;
-          if (curValue === undefined || !curFresh) return `${name} (max ${formatTooltipValue(maxValue)})`;
-          return `${name} (cur ${formatTooltipValue(curValue)}, max ${formatTooltipValue(maxValue)})`;
+          if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit)})`;
+          return `${name} (cur ${formatValueWithUnit(curValue, unit)}, max ${formatValueWithUnit(maxValue, unit)})`;
         },
       },
       tooltip: { trigger: 'axis' },
@@ -869,7 +891,7 @@
     const { start, end } = getRange();
     await ensureInverterNames(cfg.series);
     if (!cfg.series.length) {
-      cfg.tableEl.innerHTML = '<tr><td class="stat-name">No series selected</td><td></td></tr>';
+      cfg.tableEl.innerHTML = '<tr><td class="stat-name" colspan="3">No series selected</td></tr>';
       appendConsoleLine(`stat ${id} refresh done (no series)`);
       return;
     }
@@ -890,11 +912,12 @@
       );
       const currentValue = data.currentValue;
       const maxValue = data.maxValue;
+      const unit = unitForSeriesName(name);
       const currentText = (typeof currentValue === 'number')
-        ? formatTooltipValue(roundNumeric(currentValue))
+        ? formatValueWithUnit(roundNumeric(currentValue), unit)
         : (currentValue === null || currentValue === undefined ? '-' : String(currentValue));
       const maxText = (typeof maxValue === 'number')
-        ? formatTooltipValue(roundNumeric(maxValue))
+        ? formatValueWithUnit(roundNumeric(maxValue), unit)
         : '-';
       return {
         name: compactSeriesLabel(displaySeriesName(name), prefix),
@@ -905,10 +928,11 @@
     cfg.tableEl.innerHTML = rows.map((r) => `
       <tr>
         <td class="stat-name">${r.name}</td>
-        <td>
+        <td class="stat-value-cell">
           <div class="stat-current">${r.currentText}</div>
           <div class="stat-max">max ${r.maxText}</div>
         </td>
+        <td class="stat-spacer"></td>
       </tr>
     `).join('');
     appendConsoleLine(`stat ${id} refresh done name="${panelName}" series=${rows.length}`);
