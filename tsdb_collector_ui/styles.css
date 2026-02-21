@@ -1,0 +1,144 @@
+:root {
+  --bg: #0f1218;
+  --panel: #171b23;
+  --panel-2: #1f2530;
+  --text: #d8dee9;
+  --muted: #9aa7b5;
+  --accent: #4ca4ff;
+  --danger: #d86a6a;
+  --border: #2a3341;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at 0% 0%, #1a2330 0%, var(--bg) 40%);
+  color: var(--text);
+  font-family: "Segoe UI", "Ubuntu", sans-serif;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #171d28 0%, #121821 100%);
+}
+
+.brand {
+  font-weight: 700;
+  margin-right: 8px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.muted.error {
+  color: #ffb4b4;
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn.accent {
+  background: #1a3c61;
+  border-color: #2e6ea9;
+  color: #dfefff;
+}
+
+.btn.danger {
+  color: #ffb4b4;
+}
+
+.btn.tiny {
+  padding: 2px 6px;
+}
+
+main {
+  padding: 8px;
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tab {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: #1a3c61;
+  border-color: #2e6ea9;
+}
+
+.panel {
+  display: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+}
+
+.panel.active {
+  display: block;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: start;
+}
+
+input[type="text"], input[type="number"], textarea, select {
+  width: 100%;
+  background: #10151d;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.row {
+  margin-bottom: 8px;
+}
+
+.table-wrap {
+  overflow: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 6px;
+  text-align: left;
+  vertical-align: middle;
+}

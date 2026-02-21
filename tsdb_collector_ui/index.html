@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TSDB Collector UI</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">TSDB Collector</div>
+      <div id="configPath" class="muted"></div>
+      <button id="reloadBtn" class="btn">Reload</button>
+      <button id="saveBtn" class="btn accent">Save</button>
+      <div id="status" class="muted"></div>
+    </header>
+
+    <main>
+      <div class="tabs">
+        <button class="tab active" data-tab="mqtt">MQTT</button>
+        <button class="tab" data-tab="http">HTTP JSON</button>
+      </div>
+
+      <section id="tab-mqtt" class="panel active">
+        <div class="form-grid">
+          <label>MQTT Server</label>
+          <input id="mqttServer" type="text" placeholder="127.0.0.1:1883" />
+
+          <label>Data Dir</label>
+          <input id="dataDir" type="text" placeholder="." />
+
+          <label>Quantize Timestamps (ms)</label>
+          <input id="quantizeTimestamps" type="number" min="0" step="1" />
+
+          <label>Topics</label>
+          <textarea id="topics" rows="12" placeholder="One topic pattern per line"></textarea>
+        </div>
+      </section>
+
+      <section id="tab-http" class="panel">
+        <div class="row">
+          <button id="addHttpSource" class="btn">Add HTTP Source</button>
+        </div>
+        <div class="table-wrap">
+          <table id="httpSourcesTable">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>URL</th>
+                <th>Topic Prefix</th>
+                <th>Interval (ms)</th>
+                <th>Enabled</th>
+                <th>Remove</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -2,7 +2,10 @@
 import argparse
 import dataclasses
 import datetime
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import math
+import mimetypes
 import os
 import struct
 import sys
@@ -13,6 +16,7 @@ from typing import Any, Optional, TextIO
 import json
 import fnmatch
 import re
+from urllib.parse import unquote, urlparse
 
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
@@ -40,6 +44,8 @@ FORMAT_STRING_U8 = 0x08
 FORMAT_STRING_U16 = 0x09
 FORMAT_STRING_U32 = 0x0A
 FORMAT_STRING_U64 = 0x0B
+
+COLLECTOR_UI_API_VERSION = 1
 
 
 def _ensure_available(data: bytes, offset: int, size: int, what: str) -> None:
@@ -1357,140 +1363,32 @@ def generateDemoData(days: int, output_dir: str = ".", data_txt_path: Optional[s
 
 
 def read_default_server(rc_path: str) -> Optional[str]:
-    if not os.path.exists(rc_path):
-        return None
-    try:
-        try:
-            import tomllib  # Python 3.11+
-        except Exception:  # pragma: no cover - fallback if tomllib missing
-            import toml as tomllib  # type: ignore
-    except Exception:
-        return None
-    try:
-        with open(rc_path, "rb") as f:
-            data = tomllib.load(f)
-    except OSError:
-        return None
-    except Exception:
-        return None
-    for key in ("mqtt_server", "mqtt-server", "server"):
-        if key in data:
-            return str(data[key]).strip()
-    mqtt_block = data.get("mqtt")
-    if isinstance(mqtt_block, dict):
-        for key in ("mqtt_server", "mqtt-server", "server"):
-            if key in mqtt_block:
-                return str(mqtt_block[key]).strip()
-    return None
+    config = load_collector_config(rc_path)
+    mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
+    server = str(mqtt.get("mqtt_server", "")).strip()
+    return server or None
 
 
 def read_default_topics(rc_path: str) -> list[str]:
-    if not os.path.exists(rc_path):
-        return []
-    try:
-        try:
-            import tomllib  # Python 3.11+
-        except Exception:  # pragma: no cover - fallback if tomllib missing
-            import toml as tomllib  # type: ignore
-    except Exception:
-        return []
-    try:
-        with open(rc_path, "rb") as f:
-            data = tomllib.load(f)
-    except OSError:
-        return []
-    except Exception:
-        return []
-
-    def normalize_topics(value: Any) -> list[str]:
-        if isinstance(value, list):
-            return [str(v).strip() for v in value if str(v).strip()]
-        if isinstance(value, str) and value.strip():
-            return [value.strip()]
-        return []
-
-    for key in ("topics", "mqtt_topics", "mqtt-topics"):
-        if key in data:
-            topics = normalize_topics(data[key])
-            if topics:
-                return topics
-    mqtt_block = data.get("mqtt")
-    if isinstance(mqtt_block, dict):
-        for key in ("topics", "mqtt_topics", "mqtt-topics"):
-            if key in mqtt_block:
-                topics = normalize_topics(mqtt_block[key])
-                if topics:
-                    return topics
-    return []
+    config = load_collector_config(rc_path)
+    mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
+    return _normalize_topics(mqtt.get("topics", []))
 
 
 def read_default_quantize_timestamps(rc_path: str) -> int:
-    if not os.path.exists(rc_path):
-        return 0
+    config = load_collector_config(rc_path)
+    mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
     try:
-        try:
-            import tomllib  # Python 3.11+
-        except Exception:  # pragma: no cover - fallback if tomllib missing
-            import toml as tomllib  # type: ignore
+        return max(0, int(mqtt.get("quantize_timestamps", 0)))
     except Exception:
         return 0
-    try:
-        with open(rc_path, "rb") as f:
-            data = tomllib.load(f)
-    except OSError:
-        return 0
-    except Exception:
-        return 0
-
-    def normalize_quantize(value: Any) -> int:
-        try:
-            parsed = int(value)
-        except Exception:
-            return 0
-        return max(0, parsed)
-
-    for key in ("quantize_timestamps", "quantize-timestamps"):
-        if key in data:
-            return normalize_quantize(data[key])
-    mqtt_block = data.get("mqtt")
-    if isinstance(mqtt_block, dict):
-        for key in ("quantize_timestamps", "quantize-timestamps"):
-            if key in mqtt_block:
-                return normalize_quantize(mqtt_block[key])
-    return 0
 
 
 def read_default_data_dir(rc_path: str) -> str:
-    if not os.path.exists(rc_path):
-        return "."
-    try:
-        try:
-            import tomllib  # Python 3.11+
-        except Exception:  # pragma: no cover - fallback if tomllib missing
-            import toml as tomllib  # type: ignore
-    except Exception:
-        return "."
-    try:
-        with open(rc_path, "rb") as f:
-            data = tomllib.load(f)
-    except OSError:
-        return "."
-    except Exception:
-        return "."
-
-    def normalize_dir(value: Any) -> str:
-        text = str(value).strip()
-        return text if text else "."
-
-    for key in ("data_dir", "data-dir"):
-        if key in data:
-            return normalize_dir(data[key])
-    mqtt_block = data.get("mqtt")
-    if isinstance(mqtt_block, dict):
-        for key in ("data_dir", "data-dir"):
-            if key in mqtt_block:
-                return normalize_dir(mqtt_block[key])
-    return "."
+    config = load_collector_config(rc_path)
+    mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
+    text = str(mqtt.get("data_dir", ".")).strip()
+    return text if text else "."
 
 
 def parse_host_port(server: str) -> tuple[str, int]:
@@ -1850,19 +1748,317 @@ def persist_server(rc_path: str, server: str) -> None:
 
 
 def _resolve_config_path_for_read() -> str:
-    return os.path.expanduser("~/.mqtt_collector.toml")
+    return os.path.expanduser("~/.tsdb_collector.toml")
+
+
+def _load_toml_dict(path: str) -> dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        try:
+            import tomllib  # Python 3.11+
+        except Exception:  # pragma: no cover - fallback if tomllib missing
+            import toml as tomllib  # type: ignore
+    except Exception:
+        return {}
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalize_topics(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def load_collector_config(rc_path: str) -> dict[str, Any]:
+    data = _load_toml_dict(rc_path)
+    mqtt_block = data.get("mqtt") if isinstance(data.get("mqtt"), dict) else {}
+    http_block = data.get("http") if isinstance(data.get("http"), dict) else {}
+
+    mqtt_server = ""
+    for key in ("mqtt_server", "mqtt-server", "server"):
+        if key in data and str(data[key]).strip():
+            mqtt_server = str(data[key]).strip()
+            break
+    if not mqtt_server:
+        for key in ("mqtt_server", "mqtt-server", "server"):
+            if key in mqtt_block and str(mqtt_block[key]).strip():
+                mqtt_server = str(mqtt_block[key]).strip()
+                break
+
+    topics: list[str] = []
+    for key in ("topics", "mqtt_topics", "mqtt-topics"):
+        if key in data:
+            topics = _normalize_topics(data[key])
+            if topics:
+                break
+    if not topics:
+        for key in ("topics", "mqtt_topics", "mqtt-topics"):
+            if key in mqtt_block:
+                topics = _normalize_topics(mqtt_block[key])
+                if topics:
+                    break
+
+    quantize_timestamps = 0
+    for key in ("quantize_timestamps", "quantize-timestamps"):
+        if key in data:
+            try:
+                quantize_timestamps = max(0, int(data[key]))
+            except Exception:
+                quantize_timestamps = 0
+            break
+    else:
+        for key in ("quantize_timestamps", "quantize-timestamps"):
+            if key in mqtt_block:
+                try:
+                    quantize_timestamps = max(0, int(mqtt_block[key]))
+                except Exception:
+                    quantize_timestamps = 0
+                break
+
+    data_dir = "."
+    for key in ("data_dir", "data-dir"):
+        if key in data:
+            data_dir = str(data[key]).strip() or "."
+            break
+    else:
+        for key in ("data_dir", "data-dir"):
+            if key in mqtt_block:
+                data_dir = str(mqtt_block[key]).strip() or "."
+                break
+
+    sources_raw = http_block.get("sources", data.get("http_sources", []))
+    sources: list[dict[str, Any]] = []
+    if isinstance(sources_raw, list):
+        for item in sources_raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            topic_prefix = str(item.get("topic_prefix", "")).strip()
+            interval_ms = item.get("interval_ms", 5000)
+            enabled = bool(item.get("enabled", True))
+            try:
+                interval_ms = max(100, int(interval_ms))
+            except Exception:
+                interval_ms = 5000
+            sources.append(
+                {
+                    "name": name,
+                    "url": url,
+                    "topic_prefix": topic_prefix,
+                    "interval_ms": interval_ms,
+                    "enabled": enabled,
+                }
+            )
+
+    return {
+        "mqtt": {
+            "mqtt_server": mqtt_server,
+            "data_dir": data_dir,
+            "quantize_timestamps": quantize_timestamps,
+            "topics": topics,
+        },
+        "http": {
+            "sources": sources,
+        },
+    }
+
+
+def _quote_toml_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _dumps_collector_config_toml(config: dict[str, Any]) -> str:
+    mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
+    http = config.get("http", {}) if isinstance(config.get("http"), dict) else {}
+
+    mqtt_server = str(mqtt.get("mqtt_server", "")).strip()
+    data_dir = str(mqtt.get("data_dir", ".")).strip() or "."
+    try:
+        quantize = max(0, int(mqtt.get("quantize_timestamps", 0)))
+    except Exception:
+        quantize = 0
+    topics = _normalize_topics(mqtt.get("topics", []))
+
+    lines: list[str] = []
+    lines.append(f'mqtt_server = {_quote_toml_string(mqtt_server)}')
+    lines.append(f'data_dir = {_quote_toml_string(data_dir)}')
+    lines.append(f"quantize_timestamps = {quantize}")
+    lines.append("topics = [" + ", ".join(_quote_toml_string(t) for t in topics) + "]")
+
+    sources = http.get("sources", [])
+    if isinstance(sources, list):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            name = str(source.get("name", "")).strip()
+            url = str(source.get("url", "")).strip()
+            topic_prefix = str(source.get("topic_prefix", "")).strip()
+            try:
+                interval_ms = max(100, int(source.get("interval_ms", 5000)))
+            except Exception:
+                interval_ms = 5000
+            enabled = bool(source.get("enabled", True))
+            lines.append("")
+            lines.append("[[http.sources]]")
+            lines.append(f'name = {_quote_toml_string(name)}')
+            lines.append(f'url = {_quote_toml_string(url)}')
+            lines.append(f'topic_prefix = {_quote_toml_string(topic_prefix)}')
+            lines.append(f"interval_ms = {interval_ms}")
+            lines.append(f"enabled = {'true' if enabled else 'false'}")
+    return "\n".join(lines) + "\n"
+
+
+def save_collector_config(rc_path: str, config: dict[str, Any]) -> None:
+    text = _dumps_collector_config_toml(config)
+    parent = os.path.dirname(os.path.abspath(rc_path))
+    os.makedirs(parent, exist_ok=True)
+    tmp = rc_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, rc_path)
+
+
+class CollectorUiRequestHandler(BaseHTTPRequestHandler):
+    server_version = "TSDBCollectorUI/1.0"
+
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_static(self, path: str) -> bool:
+        ui_dir = self.server.ui_dir  # type: ignore[attr-defined]
+        if not ui_dir:
+            return False
+        rel = ""
+        if path in ("/", "/index.html"):
+            rel = "index.html"
+        elif path.startswith("/static/"):
+            rel = path[len("/static/"):]
+        else:
+            return False
+        rel = unquote(rel).lstrip("/")
+        full_path = os.path.abspath(os.path.join(ui_dir, rel))
+        ui_dir_abs = os.path.abspath(ui_dir)
+        if not (full_path == ui_dir_abs or full_path.startswith(ui_dir_abs + os.sep)):
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Invalid static path"}})
+            return True
+        if not os.path.isfile(full_path):
+            self._send_json(404, {"error": {"code": "not_found", "message": f"Static file not found: {rel}"}})
+            return True
+        with open(full_path, "rb") as f:
+            body = f.read()
+        mime, _ = mimetypes.guess_type(full_path)
+        self._send_bytes(200, body, mime or "application/octet-stream")
+        return True
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if self._handle_static(path):
+            return
+        if path == "/health":
+            self._send_json(200, {"ok": True, "apiVersion": COLLECTOR_UI_API_VERSION})
+            return
+        if path == "/config":
+            config_path = self.server.config_path  # type: ignore[attr-defined]
+            self._send_json(200, {"configPath": config_path, "config": load_collector_config(config_path)})
+            return
+        self._send_json(404, {"error": {"code": "not_found", "message": f"Unknown endpoint: {path}"}})
+
+    def do_PUT(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path != "/config":
+            self._send_json(404, {"error": {"code": "not_found", "message": f"Unknown endpoint: {path}"}})
+            return
+        length_raw = self.headers.get("Content-Length", "").strip()
+        if not length_raw:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Missing Content-Length"}})
+            return
+        try:
+            length = int(length_raw)
+        except ValueError:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Invalid Content-Length"}})
+            return
+        if length <= 0:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Empty request body"}})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Invalid JSON body"}})
+            return
+        config = payload.get("config", payload) if isinstance(payload, dict) else None
+        if not isinstance(config, dict):
+            self._send_json(400, {"error": {"code": "bad_request", "message": "Config payload must be an object"}})
+            return
+        config_path = self.server.config_path  # type: ignore[attr-defined]
+        try:
+            save_collector_config(config_path, config)
+        except Exception as exc:
+            self._send_json(500, {"error": {"code": "io_error", "message": str(exc)}})
+            return
+        self._send_json(200, {"ok": True, "configPath": config_path})
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        super().log_message(fmt, *args)
+
+
+class CollectorUiHttpServer(ThreadingHTTPServer):
+    def __init__(self, server_address: tuple[str, int], config_path: str, ui_dir: str):
+        super().__init__(server_address, CollectorUiRequestHandler)
+        self.config_path = config_path
+        self.ui_dir = ui_dir
 
 
 def main() -> int:
     default_config_path = _resolve_config_path_for_read()
     parser = argparse.ArgumentParser(
-        description="MQTT collector utilities.",
+        description="TSDB collector utilities.",
     )
     parser.add_argument(
         "--config",
         default=default_config_path,
         help=f"Path to config file (default: {default_config_path})",
     )
+    parser.add_argument("--ui", action="store_true", help="Start web UI for editing config and do not collect")
+    parser.add_argument(
+        "--ui-dir",
+        default=os.path.join(os.path.dirname(__file__), "tsdb_collector_ui"),
+        help="Directory containing UI assets (default: ./tsdb_collector_ui next to tsdb_collector.py)",
+    )
+    parser.add_argument("--ui-host", default="127.0.0.1", help="UI bind host (default: 127.0.0.1)")
+    parser.add_argument("--ui-port", type=int, default=8081, help="UI bind port (default: 8081)")
     parser.add_argument(
         "--mqtt-server",
         help="MQTT server host[:port]. If omitted, read from config file",
@@ -1894,6 +2090,26 @@ def main() -> int:
     args = parser.parse_args()
 
     rc_path = os.path.expanduser(args.config)
+
+    if args.ui:
+        ui_dir = os.path.abspath(os.path.expanduser(args.ui_dir))
+        if not os.path.isdir(ui_dir):
+            print(f"UI directory not found: {ui_dir}")
+            return 2
+        if not (1 <= args.ui_port <= 65535):
+            print("--ui-port must be in range 1..65535")
+            return 2
+        config_path = os.path.abspath(os.path.expanduser(rc_path))
+        httpd = CollectorUiHttpServer((args.ui_host, args.ui_port), config_path=config_path, ui_dir=ui_dir)
+        print(f"Serving TSDB Collector UI on http://{args.ui_host}:{args.ui_port} (config={config_path}, ui_dir={ui_dir})")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            httpd.server_close()
+        return 0
+
     default_data_dir = read_default_data_dir(rc_path)
     selected_data_dir = args.data_dir if args.data_dir else default_data_dir
     data_dir = os.path.abspath(os.path.expanduser(selected_data_dir))
@@ -1985,7 +2201,7 @@ def main() -> int:
             data_dir=data_dir,
         )
 
-    print("No action specified. Use --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --generate-demo-db, or --compress.")
+    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --generate-demo-db, or --compress.")
     return 2
 
 
