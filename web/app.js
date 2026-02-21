@@ -939,11 +939,11 @@
           const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
           if (hideMax) {
             if (curValue === undefined || !curFresh) return name;
-            return `${name} (cur ${formatValueWithUnit(curValue, unit, decimals)})`;
+            return `${name} (${formatValueWithUnit(curValue, unit, decimals)})`;
           }
           if (maxValue === undefined) return name;
           if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit, decimals)})`;
-          return `${name} (cur ${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)})`;
+          return `${name} (${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)})`;
         },
       },
       tooltip: { trigger: 'axis' },
