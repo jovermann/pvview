@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mqtt_collector import (
+from tsdb_collector import (
     TimeSeriesDbAppender,
     compress_timeseries_db_file,
     create_timeseries_db_writer,
@@ -188,7 +188,7 @@ def test_cli_dump_db_file_works_with_generated_demo(tmp_path):
     db_path = files[0]
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "mqtt_collector.py"), "--dump-db-file", db_path],
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump-db-file", db_path],
         capture_output=True,
         text=True,
         check=False,
@@ -201,7 +201,7 @@ def test_cli_dump_db_file_works_with_generated_demo(tmp_path):
 def test_cli_generate_demo_db_creates_files(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "mqtt_collector.py"), "--generate-demo-db", "1"],
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--generate-demo-db", "1"],
         capture_output=True,
         text=True,
         check=False,
@@ -223,7 +223,7 @@ def test_cli_compress_in_place_with_verbose_stats(tmp_path):
     old_size = db_path.stat().st_size
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "mqtt_collector.py"), "--compress", str(db_path), "-v"],
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--compress", str(db_path), "-v"],
         capture_output=True,
         text=True,
         check=False,
@@ -259,7 +259,7 @@ def test_tsdb_appender_appends_multiple_batches(tmp_path):
 def test_cli_collect_requires_subscription(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "mqtt_collector.py"), "--collect", "--mqtt-server", "127.0.0.1:1883"],
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--collect", "--mqtt-server", "127.0.0.1:1883"],
         capture_output=True,
         text=True,
         check=False,
