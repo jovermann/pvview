@@ -18,6 +18,7 @@
         <input id="dashboardName" class="dashboard-name" placeholder="Name for Save" />
       </label>
       <button id="saveDashboard" class="btn">Save</button>
+      <button id="manageDashboards" class="btn">Manage</button>
       <div class="range-controls">
         <button id="pageBack" class="btn" title="Shift window left by half range">&lt;</button>
         <button id="zoomIn" class="btn" title="Zoom in (2x)">+</button>
@@ -171,6 +172,16 @@
       <menu>
         <button id="cancelStatColumns" type="button" class="btn">Cancel</button>
         <button id="saveStatColumns" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dashboardManageDialog" class="modal">
+    <form method="dialog" class="modal-content" id="dashboardManageForm">
+      <h2>Manage Dashboards</h2>
+      <div id="dashboardManageList" class="series-list"></div>
+      <menu>
+        <button id="closeDashboardManage" type="button" class="btn">Close</button>
       </menu>
     </form>
   </dialog>

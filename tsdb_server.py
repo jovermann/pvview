@@ -9,6 +9,8 @@ API:
 - GET /dashboards
 - GET /dashboards/<name>
 - PUT /dashboards/<name>
+- POST /dashboards/<name>/rename
+- DELETE /dashboards/<name>
 - GET /settings
 - PUT /settings
 
@@ -50,7 +52,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 2  # Increment when API endpoints or payload schemas change.
+API_VERSION = 3  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -615,7 +617,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(body)
@@ -670,7 +672,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
@@ -729,6 +731,44 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/settings":
                 self._handle_settings_put()
+                return
+            status, payload = build_error(404, "not_found", f"Unknown endpoint: {path}")
+            self._send_json(status, payload)
+        except ValueError as exc:
+            status, payload = build_error(400, "bad_request", str(exc))
+            self._send_json(status, payload)
+        except OSError as exc:
+            status, payload = build_error(500, "io_error", str(exc))
+            self._send_json(status, payload)
+        except Exception as exc:
+            status, payload = build_error(500, "internal_error", str(exc))
+            self._send_json(status, payload)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            if path.startswith("/dashboards/") and path.endswith("/rename"):
+                self._handle_dashboards_rename(path)
+                return
+            status, payload = build_error(404, "not_found", f"Unknown endpoint: {path}")
+            self._send_json(status, payload)
+        except ValueError as exc:
+            status, payload = build_error(400, "bad_request", str(exc))
+            self._send_json(status, payload)
+        except OSError as exc:
+            status, payload = build_error(500, "io_error", str(exc))
+            self._send_json(status, payload)
+        except Exception as exc:
+            status, payload = build_error(500, "internal_error", str(exc))
+            self._send_json(status, payload)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            if path.startswith("/dashboards/"):
+                self._handle_dashboards_delete(path)
                 return
             status, payload = build_error(404, "not_found", f"Unknown endpoint: {path}")
             self._send_json(status, payload)
@@ -888,6 +928,9 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
     def _dashboard_name_from_path(self, path: str) -> str:
         raw = path[len("/dashboards/"):]
         name = unquote(raw).strip()
+        return self._validate_dashboard_name(name)
+
+    def _validate_dashboard_name(self, name: str) -> str:
         if not name:
             raise ValueError("Dashboard name must not be empty")
         if "/" in name:
@@ -937,6 +980,55 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         dashboards[name] = dashboard
         save_dashboards(data_dir, dashboards)
         self._send_json(200, {"ok": True, "name": name})
+
+    def _handle_dashboards_delete(self, path: str) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+        name = self._dashboard_name_from_path(path)
+        dashboards = load_dashboards(data_dir)
+        if name not in dashboards:
+            status, payload = build_error(404, "not_found", f"Dashboard not found: {name}")
+            self._send_json(status, payload)
+            return
+        del dashboards[name]
+        save_dashboards(data_dir, dashboards)
+        self._send_json(200, {"ok": True, "name": name, "deleted": True})
+
+    def _handle_dashboards_rename(self, path: str) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+        old_raw = path[len("/dashboards/"):-len("/rename")]
+        old_name = self._validate_dashboard_name(unquote(old_raw).strip().rstrip("/"))
+        length_raw = self.headers.get("Content-Length", "").strip()
+        if not length_raw:
+            raise ValueError("Missing Content-Length")
+        try:
+            length = int(length_raw)
+        except ValueError:
+            raise ValueError("Invalid Content-Length")
+        if length <= 0:
+            raise ValueError("Empty request body")
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            raise ValueError("Invalid JSON body")
+        if not isinstance(payload, dict):
+            raise ValueError("Rename payload must be an object")
+        new_name_raw = payload.get("newName")
+        if not isinstance(new_name_raw, str):
+            raise ValueError("Rename payload must include string newName")
+        new_name = self._validate_dashboard_name(new_name_raw.strip())
+        dashboards = load_dashboards(data_dir)
+        if old_name not in dashboards:
+            status, payload = build_error(404, "not_found", f"Dashboard not found: {old_name}")
+            self._send_json(status, payload)
+            return
+        if new_name in dashboards and new_name != old_name:
+            status, payload = build_error(409, "conflict", f"Dashboard already exists: {new_name}")
+            self._send_json(status, payload)
+            return
+        dashboards[new_name] = dashboards.pop(old_name)
+        save_dashboards(data_dir, dashboards)
+        self._send_json(200, {"ok": True, "oldName": old_name, "newName": new_name})
 
     def _handle_settings_get(self) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]

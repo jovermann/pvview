@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 2;
+  const FRONTEND_API_VERSION = 3;
   const grid = GridStack.init({
     cellHeight: 102,
     margin: 2,
@@ -18,6 +18,9 @@
   const dashboardSelect = document.getElementById('dashboardSelect');
   const dashboardNameInput = document.getElementById('dashboardName');
   const saveDashboardBtn = document.getElementById('saveDashboard');
+  const manageDashboardsBtn = document.getElementById('manageDashboards');
+  const dashboardManageDialog = document.getElementById('dashboardManageDialog');
+  const dashboardManageList = document.getElementById('dashboardManageList');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
@@ -58,6 +61,15 @@
     '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc',
   ];
   let settingsSaveTimer = null;
+
+  function htmlEscape(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
 
   function renderVersionError(details) {
     const topbar = document.querySelector('.topbar');
@@ -1366,6 +1378,30 @@
     appendConsoleLine(`dashboard save done name="${name}"`);
   }
 
+  function renderDashboardManageList() {
+    const names = Array.from(savedDashboardNames).sort();
+    if (names.length === 0) {
+      dashboardManageList.innerHTML = '<div class="series-item"><span>No saved dashboards</span></div>';
+      return;
+    }
+    dashboardManageList.innerHTML = names.map((name) => `
+      <div class="series-item">
+        <span>${htmlEscape(name)}</span>
+        <span style="margin-left:auto;display:inline-flex;gap:6px">
+          <button type="button" class="icon-btn" data-action="dashboard-load" data-name="${htmlEscape(name)}">Load</button>
+          <button type="button" class="icon-btn" data-action="dashboard-rename" data-name="${htmlEscape(name)}">Rename</button>
+          <button type="button" class="icon-btn danger" data-action="dashboard-delete" data-name="${htmlEscape(name)}">Delete</button>
+        </span>
+      </div>
+    `).join('');
+  }
+
+  async function openDashboardManageDialog() {
+    await refreshDashboardNames();
+    renderDashboardManageList();
+    dashboardManageDialog.showModal();
+  }
+
   async function openSeriesDialog(id) {
     activeChartId = id;
     const c = charts.get(id);
@@ -1727,6 +1763,68 @@
     activeColumnsStatId = null;
   });
 
+  dashboardManageList.addEventListener('click', async (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    const action = target.dataset.action;
+    const name = target.dataset.name;
+    if (!action || !name) return;
+    try {
+      if (action === 'dashboard-load') {
+        appendConsoleLine(`dashboard load start name="${name}"`);
+        dashboardSelect.value = name;
+        dashboardNameInput.value = name;
+        await loadDashboardByName(name);
+        queueSaveSettings();
+        dashboardManageDialog.close();
+        appendConsoleLine(`dashboard load done name="${name}"`);
+        return;
+      }
+      if (action === 'dashboard-rename') {
+        const newName = prompt(`Rename dashboard "${name}" to:`, name);
+        if (newName === null) return;
+        const trimmed = newName.trim();
+        if (!trimmed || trimmed === name) return;
+        appendConsoleLine(`dashboard rename start old="${name}" new="${trimmed}"`);
+        await apiJson(`/dashboards/${encodeURIComponent(name)}/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ newName: trimmed }),
+        });
+        await refreshDashboardNames();
+        renderDashboardManageList();
+        if (dashboardSelect.value === name) {
+          dashboardSelect.value = trimmed;
+          dashboardNameInput.value = trimmed;
+          queueSaveSettings();
+        }
+        appendConsoleLine(`dashboard rename done old="${name}" new="${trimmed}"`);
+        return;
+      }
+      if (action === 'dashboard-delete') {
+        if (!confirm(`Delete dashboard "${name}"?`)) return;
+        appendConsoleLine(`dashboard delete start name="${name}"`);
+        await apiJson(`/dashboards/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        await refreshDashboardNames();
+        renderDashboardManageList();
+        if (dashboardSelect.value === name) {
+          dashboardSelect.value = 'Default';
+          dashboardNameInput.value = 'Default';
+          await buildDefaultCharts();
+          queueSaveSettings();
+        }
+        appendConsoleLine(`dashboard delete done name="${name}"`);
+      }
+    } catch (err) {
+      appendConsoleLine(`dashboard manage failed action=${action} name="${name}" error=${err}`);
+      alert(`Dashboard action failed: ${err.message || err}`);
+    }
+  });
+
+  document.getElementById('closeDashboardManage').addEventListener('click', () => {
+    dashboardManageDialog.close();
+  });
+
   grid.on('resizestop', () => {
     charts.forEach((c) => {
       if (c.kind === 'chart' && c.instance) {
@@ -1788,6 +1886,13 @@
     saveCurrentDashboard().catch((err) => {
       console.error(err);
       alert(`Failed to save dashboard: ${err.message || err}`);
+    });
+  });
+
+  manageDashboardsBtn.addEventListener('click', () => {
+    openDashboardManageDialog().catch((err) => {
+      console.error(err);
+      alert(`Failed to open dashboard manager: ${err.message || err}`);
     });
   });
 
