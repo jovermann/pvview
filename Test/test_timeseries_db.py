@@ -369,6 +369,37 @@ def test_collector_config_preserves_comment_blocks_after_modify_write(tmp_path):
 
     assert text.index("# c_mqtt_server") < text.index('mqtt_server = "new-broker:2883"')
     assert text.index("# c_quantize") < text.index("quantize_timestamps = 250")
-    assert text.index("# c_topics") < text.index('topics = ["solar/ac/#", "solar/dtu/#"]')
+    assert text.index("# c_topics") < text.index("topics = [")
+    assert '    "solar/ac/#",' in text
+    assert '    "solar/dtu/#",' in text
     assert text.index("# c_http_block_1") < text.index("[[http.sources]]")
     assert "interval_ms = 5000" in text
+
+
+def test_collector_config_repeated_save_does_not_add_blank_lines_before_trailing_comments(tmp_path):
+    config_path = tmp_path / "collector_repeat.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'mqtt_server = "broker:1883"',
+                'data_dir = "."',
+                "quantize_timestamps = 0",
+                "topics = [",
+                '    "solar/#",',
+                "]",
+                "",
+                "# trailing comment",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_collector_config(str(config_path))
+    save_collector_config(str(config_path), cfg)
+    first = config_path.read_text(encoding="utf-8")
+    save_collector_config(str(config_path), cfg)
+    second = config_path.read_text(encoding="utf-8")
+
+    assert second == first

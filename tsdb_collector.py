@@ -1876,6 +1876,24 @@ def _quote_toml_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _format_toml_list(values: list[Any], indent: str = "    ") -> list[str]:
+    if not values:
+        return ["[]"]
+    lines = ["["]
+    for value in values:
+        if isinstance(value, str):
+            rendered = _quote_toml_string(value)
+        elif isinstance(value, bool):
+            rendered = "true" if value else "false"
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            rendered = str(value)
+        else:
+            rendered = _quote_toml_string(str(value))
+        lines.append(f"{indent}{rendered},")
+    lines.append("]")
+    return lines
+
+
 def _toml_top_level_item_id(stripped_line: str) -> Optional[str]:
     if stripped_line.startswith("[[") and stripped_line.endswith("]]"):
         return stripped_line
@@ -1960,7 +1978,10 @@ def _dumps_collector_config_toml(
     emit_item("mqtt_server", f'mqtt_server = {_quote_toml_string(mqtt_server)}')
     emit_item("data_dir", f'data_dir = {_quote_toml_string(data_dir)}')
     emit_item("quantize_timestamps", f"quantize_timestamps = {quantize}")
-    emit_item("topics", "topics = [" + ", ".join(_quote_toml_string(t) for t in topics) + "]")
+    topic_lines = _format_toml_list(topics, indent="    ")
+    emit_item("topics", f"topics = {topic_lines[0]}")
+    for continuation in topic_lines[1:]:
+        lines.append(continuation)
 
     sources = http.get("sources", [])
     if isinstance(sources, list):
@@ -1983,8 +2004,6 @@ def _dumps_collector_config_toml(
             lines.append(f"interval_ms = {interval_ms}")
             lines.append(f"enabled = {'true' if enabled else 'false'}")
     if trailing_lines:
-        if lines and lines[-1].strip() != "":
-            lines.append("")
         lines.extend(trailing_lines)
     return "\n".join(lines) + "\n"
 
