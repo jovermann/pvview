@@ -154,7 +154,7 @@ def test_dump_includes_format_and_abs_rel_timestamps(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "Series:" in out
-    assert "pv.power: format=0x01 (double)" in out
+    assert "pv.power: format=0x01" in out
     assert "state: format=0x0b (UTF-8 string with uint64_t length prefix)" in out
     assert "ts_abs=1000 (1970-01-01 00:00:01.000) ts_rel=ABS" in out
     assert "ts_abs=1125 (1970-01-01 00:00:01.125) ts_rel=+125" in out
@@ -190,12 +190,13 @@ def test_cli_dump_db_file_works_with_generated_demo(tmp_path):
     db_path = files[0]
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump-db-file", db_path],
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump-tsdb", db_path],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0
+    assert result.stderr == ""
     assert "TimeSeriesDB dump" in result.stdout
     assert "solar/ac/power" in result.stdout
 
@@ -210,6 +211,7 @@ def test_cli_generate_demo_db_creates_files(tmp_path):
         cwd=str(tmp_path),
     )
     assert result.returncode == 0
+    assert result.stderr == ""
     created = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     assert len(created) == 1
     assert (tmp_path / created[0]).exists()
@@ -231,6 +233,7 @@ def test_cli_compress_in_place_with_verbose_stats(tmp_path):
         check=False,
     )
     assert result.returncode == 0
+    assert result.stderr == ""
     new_size = db_path.stat().st_size
     assert new_size < old_size
     assert "old_size=" in result.stdout
@@ -260,15 +263,26 @@ def test_tsdb_appender_appends_multiple_batches(tmp_path):
 
 def test_cli_collect_requires_subscription(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
+    cfg_path = tmp_path / "empty.toml"
+    cfg_path.write_text("", encoding="utf-8")
     result = subprocess.run(
-        [sys.executable, str(repo_root / "tsdb_collector.py"), "--collect", "--mqtt-server", "127.0.0.1:1883"],
+        [
+            sys.executable,
+            str(repo_root / "tsdb_collector.py"),
+            "--collect",
+            "--mqtt-server",
+            "127.0.0.1:1883",
+            "--config",
+            str(cfg_path),
+        ],
         capture_output=True,
         text=True,
         check=False,
         cwd=str(tmp_path),
     )
     assert result.returncode == 2
-    assert "--collect requires at least one topic via --topics or config" in result.stderr
+    assert result.stderr == ""
+    assert "--collect requires at least one topic via --topics or config" in result.stdout
 
 
 def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):

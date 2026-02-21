@@ -161,12 +161,6 @@ class TimeSeriesDbData:
     def get_series_format_id(self, series_name: str) -> Optional[int]:
         return self._series_format_ids.get(series_name)
 
-
-@dataclasses.dataclass(frozen=True)
-class NumericWithDecimals:
-    value: float
-    decimals: int
-
     def dump(self, out: Optional[TextIO] = None) -> None:
         stream = out if out is not None else sys.stdout
         stream.write(f"TimeSeriesDB dump: series={len(self._series_values)} events={len(self._events)}\n")
@@ -189,6 +183,12 @@ class NumericWithDecimals:
                 f"  [{idx}] ts_abs={timestamp_ms} ({ts_hr}) ts_rel={rel_text} series={series_name} "
                 f"format={format_text} value={value!r}\n"
             )
+
+
+@dataclasses.dataclass(frozen=True)
+class NumericWithDecimals:
+    value: float
+    decimals: int
 
 
 def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: int = 0) -> TimeSeriesDbData:
@@ -1083,13 +1083,13 @@ def collect_to_tsdb(
     quantize_timestamps_ms: int = 0,
     data_dir: str = ".",
 ) -> int:
+    if not subscriptions:
+        print("--collect requires at least one topic via --topics or config")
+        return 2
     try:
         import paho.mqtt.client as mqtt
     except Exception:
         print("paho-mqtt is required. Install with: pip install paho-mqtt")
-        return 2
-    if not subscriptions:
-        print("--collect requires at least one topic via --topics or config")
         return 2
     host, port = parse_host_port(server)
     if not hasattr(mqtt, "CallbackAPIVersion"):
@@ -1277,6 +1277,10 @@ def generateDemoData(days: int, output_dir: str = ".", data_txt_path: Optional[s
         raise ValueError(f"days must be > 0, got {days}")
     if data_txt_path is None:
         data_txt_path = os.path.join(os.path.dirname(__file__), "data.txt")
+    if not os.path.exists(data_txt_path):
+        fallback = os.path.join(os.path.dirname(__file__), "opendtu.txt")
+        if os.path.exists(fallback):
+            data_txt_path = fallback
 
     series = _load_demo_series(data_txt_path)
     if not series:
@@ -2128,7 +2132,10 @@ class CollectorUiRequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "configPath": config_path})
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        super().log_message(fmt, *args)
+        timestamp = time.strftime("%d/%b/%Y %H:%M:%S")
+        message = f'{self.address_string()} - - [{timestamp}] {fmt % args}\n'
+        sys.stdout.write(message)
+        sys.stdout.flush()
 
 
 class CollectorUiHttpServer(ThreadingHTTPServer):
