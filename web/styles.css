@@ -86,6 +86,27 @@ input[type="datetime-local"], input[type="search"], select {
 
 main { padding: 2px; }
 
+.fatal-error {
+  margin: 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  background: #2a1616;
+  color: #ffd7d7;
+}
+
+.fatal-error h2 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+}
+
+.fatal-error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 13px;
+}
+
 .grid-stack-item-content {
   background: var(--panel);
   border: 1px solid var(--border);

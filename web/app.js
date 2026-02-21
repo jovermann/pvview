@@ -1,4 +1,5 @@
 (() => {
+  const FRONTEND_API_VERSION = 2;
   const grid = GridStack.init({
     cellHeight: 102,
     margin: 2,
@@ -52,6 +53,52 @@
     '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc',
   ];
   let settingsSaveTimer = null;
+
+  function renderVersionError(details) {
+    const topbar = document.querySelector('.topbar');
+    if (topbar instanceof HTMLElement) {
+      topbar.style.display = 'none';
+    }
+    const main = document.querySelector('main');
+    if (!(main instanceof HTMLElement)) {
+      alert(details);
+      return;
+    }
+    main.innerHTML = `
+      <div class="fatal-error">
+        <h2>Server/API Version Mismatch</h2>
+        <pre>${details}</pre>
+      </div>
+    `;
+  }
+
+  async function verifyApiVersion() {
+    let res;
+    try {
+      res = await fetch('/health', { cache: 'no-store' });
+    } catch (err) {
+      throw new Error(`Cannot reach server /health endpoint: ${err}`);
+    }
+    if (!res.ok) {
+      throw new Error(`/health returned HTTP ${res.status}`);
+    }
+    let data;
+    try {
+      data = await res.json();
+    } catch (err) {
+      throw new Error(`/health did not return valid JSON: ${err}`);
+    }
+    const actual = data && Number.isInteger(data.apiVersion) ? data.apiVersion : null;
+    if (actual !== FRONTEND_API_VERSION) {
+      const serverVersion = (data && typeof data.serverVersion === 'string') ? data.serverVersion : 'unknown';
+      const actualText = actual === null ? 'missing' : String(actual);
+      throw new Error(
+        `Frontend expects API version ${FRONTEND_API_VERSION}, but server reports ${actualText}.\n`
+        + `Server version: ${serverVersion}\n`
+        + 'Please restart/update tsdb_server.py and reload the browser.'
+      );
+    }
+  }
 
   function nowMs() {
     return Date.now();
@@ -1594,9 +1641,11 @@
     });
   });
 
-  setRangeByPreset('2d');
-  configureAutoRefresh();
-  refreshDashboardNames().then(async () => {
+  async function bootstrap() {
+    await verifyApiVersion();
+    setRangeByPreset('2d');
+    configureAutoRefresh();
+    await refreshDashboardNames();
     const settings = await loadSettings();
     const range = settings && typeof settings.range === 'object' ? settings.range : {};
     const preset = typeof range.preset === 'string' ? range.preset : '2d';
@@ -1622,15 +1671,10 @@
       dashboardNameInput.value = 'Default';
       await buildDefaultCharts();
     }
-  }).catch((err) => {
+  }
+
+  bootstrap().catch((err) => {
     console.error(err);
-    dashboardSelect.value = 'Default';
-    dashboardNameInput.value = 'Default';
-    buildDefaultCharts().catch((inner) => {
-      console.error(inner);
-      if (charts.size === 0) {
-        addChart(['solar/ac/power'], { label: 'AC Power' });
-      }
-    });
+    renderVersionError(String(err && err.message ? err.message : err));
   });
 })();

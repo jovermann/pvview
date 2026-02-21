@@ -50,6 +50,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
+API_VERSION = 2  # Increment when API endpoints or payload schemas change.
+SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
 ENTRY_TYPE_TIME_REL_8 = 0xF1
@@ -680,7 +682,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             if self._handle_static(path):
                 return
             if path == "/health":
-                self._send_json(200, {"ok": True})
+                self._send_json(200, {"ok": True, "apiVersion": API_VERSION, "serverVersion": SERVER_VERSION})
                 return
             if path == "/series":
                 self._handle_series(params)
