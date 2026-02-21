@@ -80,10 +80,6 @@ input[type="datetime-local"], input[type="search"], input[type="text"], select {
   padding: 6px 8px;
 }
 
-.dashboard-name {
-  width: 5.25rem;
-}
-
 main { padding: 2px; }
 
 .fatal-error {

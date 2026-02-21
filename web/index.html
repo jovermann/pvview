@@ -15,7 +15,6 @@
         <select id="dashboardSelect">
           <option value="Default">Default</option>
         </select>
-        <input id="dashboardName" class="dashboard-name" type="text" placeholder="Name for Save" />
       </label>
       <button id="saveDashboard" class="btn">Save</button>
       <button id="manageDashboards" class="btn">Manage</button>
@@ -182,6 +181,20 @@
       <div id="dashboardManageList" class="series-list"></div>
       <menu>
         <button id="closeDashboardManage" type="button" class="btn">Close</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="saveDashboardDialog" class="modal">
+    <form method="dialog" class="modal-content" id="saveDashboardForm">
+      <h2>Save New Dashboard</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Name</div>
+        <div><input id="saveDashboardName" type="text" placeholder="Dashboard name" /></div>
+      </div>
+      <menu>
+        <button id="cancelSaveDashboard" type="button" class="btn">Cancel</button>
+        <button id="confirmSaveDashboard" value="default" class="btn accent">Save</button>
       </menu>
     </form>
   </dialog>

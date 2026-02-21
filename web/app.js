@@ -1,5 +1,6 @@
 (() => {
   const FRONTEND_API_VERSION = 3;
+  const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
     margin: 2,
@@ -16,11 +17,12 @@
   const rangePresetSelect = document.getElementById('rangePreset');
   const autoRefreshSelect = document.getElementById('autoRefresh');
   const dashboardSelect = document.getElementById('dashboardSelect');
-  const dashboardNameInput = document.getElementById('dashboardName');
   const saveDashboardBtn = document.getElementById('saveDashboard');
   const manageDashboardsBtn = document.getElementById('manageDashboards');
   const dashboardManageDialog = document.getElementById('dashboardManageDialog');
   const dashboardManageList = document.getElementById('dashboardManageList');
+  const saveDashboardDialog = document.getElementById('saveDashboardDialog');
+  const saveDashboardNameInput = document.getElementById('saveDashboardName');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
@@ -61,6 +63,7 @@
     '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc',
   ];
   let settingsSaveTimer = null;
+  let currentDashboardName = 'Default';
 
   function htmlEscape(value) {
     return String(value)
@@ -306,7 +309,7 @@
 
   function currentSettingsPayload() {
     return {
-      dashboard: String(dashboardSelect.value || 'Default'),
+      dashboard: String(currentDashboardName || 'Default'),
       range: {
         preset: activePreset || 'custom',
         start: startInput.value,
@@ -573,11 +576,16 @@
   }
 
   function updateDashboardDatalist() {
-    const options = ['Default', ...Array.from(savedDashboardNames).sort()];
-    const current = dashboardSelect.value || 'Default';
-    dashboardSelect.innerHTML = options.map((name) => `<option value="${name}">${name}</option>`).join('');
-    if (options.includes(current)) {
+    const names = ['Default', ...Array.from(savedDashboardNames).sort()];
+    const current = dashboardSelect.value || currentDashboardName || 'Default';
+    dashboardSelect.innerHTML = [
+      ...names.map((name) => `<option value="${htmlEscape(name)}">${htmlEscape(name)}</option>`),
+      `<option value="${SAVE_NEW_DASHBOARD_VALUE}">Save new dashboard ...</option>`,
+    ].join('');
+    if (current === SAVE_NEW_DASHBOARD_VALUE || names.includes(current)) {
       dashboardSelect.value = current;
+    } else if (names.includes(currentDashboardName)) {
+      dashboardSelect.value = currentDashboardName;
     } else {
       dashboardSelect.value = 'Default';
     }
@@ -1238,8 +1246,8 @@
     if (created === 0) {
       addChart(['solar/ac/power'], { label: 'AC Power' });
     }
+    currentDashboardName = 'Default';
     dashboardSelect.value = 'Default';
-    dashboardNameInput.value = 'Default';
     await refreshAllCharts('default-dashboard');
     appendConsoleLine(`build default dashboard done charts=${chartIds().length}`);
   }
@@ -1354,8 +1362,8 @@
     appendConsoleLine(`dashboard load done name="${name}"`);
   }
 
-  async function saveCurrentDashboard() {
-    const name = String(dashboardNameInput.value || '').trim();
+  async function saveCurrentDashboard(nameOverride = null) {
+    const name = String(nameOverride || currentDashboardName || '').trim();
     if (!name) {
       alert('Please enter a dashboard name.');
       return;
@@ -1371,11 +1379,18 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    currentDashboardName = name;
     await refreshDashboardNames();
     dashboardSelect.value = name;
-    dashboardNameInput.value = name;
     queueSaveSettings();
     appendConsoleLine(`dashboard save done name="${name}"`);
+  }
+
+  function openSaveNewDashboardDialog(defaultName = '') {
+    saveDashboardNameInput.value = defaultName;
+    saveDashboardDialog.showModal();
+    saveDashboardNameInput.focus();
+    saveDashboardNameInput.select();
   }
 
   function renderDashboardManageList() {
@@ -1773,8 +1788,8 @@
       if (action === 'dashboard-load') {
         appendConsoleLine(`dashboard load start name="${name}"`);
         dashboardSelect.value = name;
-        dashboardNameInput.value = name;
         await loadDashboardByName(name);
+        currentDashboardName = name;
         queueSaveSettings();
         dashboardManageDialog.close();
         appendConsoleLine(`dashboard load done name="${name}"`);
@@ -1793,9 +1808,9 @@
         });
         await refreshDashboardNames();
         renderDashboardManageList();
-        if (dashboardSelect.value === name) {
+        if (currentDashboardName === name) {
+          currentDashboardName = trimmed;
           dashboardSelect.value = trimmed;
-          dashboardNameInput.value = trimmed;
           queueSaveSettings();
         }
         appendConsoleLine(`dashboard rename done old="${name}" new="${trimmed}"`);
@@ -1807,9 +1822,9 @@
         await apiJson(`/dashboards/${encodeURIComponent(name)}`, { method: 'DELETE' });
         await refreshDashboardNames();
         renderDashboardManageList();
-        if (dashboardSelect.value === name) {
+        if (currentDashboardName === name) {
+          currentDashboardName = 'Default';
           dashboardSelect.value = 'Default';
-          dashboardNameInput.value = 'Default';
           await buildDefaultCharts();
           queueSaveSettings();
         }
@@ -1823,6 +1838,25 @@
 
   document.getElementById('closeDashboardManage').addEventListener('click', () => {
     dashboardManageDialog.close();
+  });
+
+  document.getElementById('saveDashboardForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = String(saveDashboardNameInput.value || '').trim();
+    if (!name) {
+      alert('Please enter a dashboard name.');
+      return;
+    }
+    saveCurrentDashboard(name).then(() => {
+      saveDashboardDialog.close();
+    }).catch((err) => {
+      console.error(err);
+      alert(`Failed to save dashboard: ${err.message || err}`);
+    });
+  });
+
+  document.getElementById('cancelSaveDashboard').addEventListener('click', () => {
+    saveDashboardDialog.close();
   });
 
   grid.on('resizestop', () => {
@@ -1874,15 +1908,29 @@
   dashboardSelect.addEventListener('change', () => {
     const name = String(dashboardSelect.value || '').trim();
     if (!name) return;
-    dashboardNameInput.value = name;
-    if (name === 'Default') {
-      buildDefaultCharts().then(() => queueSaveSettings()).catch((err) => console.error(err));
+    if (name === SAVE_NEW_DASHBOARD_VALUE) {
+      dashboardSelect.value = currentDashboardName;
+      openSaveNewDashboardDialog('');
       return;
     }
-    loadDashboardByName(name).then(() => queueSaveSettings()).catch((err) => console.error(err));
+    if (name === 'Default') {
+      buildDefaultCharts().then(() => {
+        currentDashboardName = 'Default';
+        queueSaveSettings();
+      }).catch((err) => console.error(err));
+      return;
+    }
+    loadDashboardByName(name).then(() => {
+      currentDashboardName = name;
+      queueSaveSettings();
+    }).catch((err) => console.error(err));
   });
 
   saveDashboardBtn.addEventListener('click', () => {
+    if (currentDashboardName === 'Default') {
+      openSaveNewDashboardDialog('');
+      return;
+    }
     saveCurrentDashboard().catch((err) => {
       console.error(err);
       alert(`Failed to save dashboard: ${err.message || err}`);
@@ -1918,12 +1966,12 @@
       ? settings.dashboard.trim()
       : 'Default';
     if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
+      currentDashboardName = desiredDashboard;
       dashboardSelect.value = desiredDashboard;
-      dashboardNameInput.value = desiredDashboard;
       await loadDashboardByName(desiredDashboard);
     } else {
+      currentDashboardName = 'Default';
       dashboardSelect.value = 'Default';
-      dashboardNameInput.value = 'Default';
       await buildDefaultCharts();
     }
   }
