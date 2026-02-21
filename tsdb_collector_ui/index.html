@@ -131,8 +131,13 @@
         <div class="form-grid">
           <label>Config File</label>
           <input id="configPathReadonly" type="text" readonly />
+          <label></label>
+          <div class="row-inline">
+            <button id="configReloadBtn" class="btn" type="button">Reload</button>
+            <button id="configSaveBtn" class="btn accent" type="button">Save Config</button>
+          </div>
           <label>Content</label>
-          <textarea id="configContentReadonly" rows="24" readonly></textarea>
+          <textarea id="configContentReadonly" rows="68"></textarea>
         </div>
       </section>
     </main>

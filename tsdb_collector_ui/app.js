@@ -16,12 +16,20 @@
     },
     selectedHttpUrlIndex: -1,
     fetchedByIndex: {},
+    rawConfig: {
+      content: "",
+      mtimeNs: 0,
+      dirty: false,
+      externalChangePending: false,
+    },
   };
 
   const statusEl = document.getElementById("status");
   const configPathEl = document.getElementById("configPath");
   const configPathReadonlyEl = document.getElementById("configPathReadonly");
   const configContentReadonlyEl = document.getElementById("configContentReadonly");
+  const configReloadBtn = document.getElementById("configReloadBtn");
+  const configSaveBtn = document.getElementById("configSaveBtn");
   const mqttServerEl = document.getElementById("mqttServer");
   const dataDirEl = document.getElementById("dataDir");
   const quantizeEl = document.getElementById("quantizeTimestamps");
@@ -54,6 +62,9 @@
     if (panel) panel.classList.add("active");
     if (updateLocation) {
       window.location.hash = `tab=${tab}`;
+    }
+    if (tab === "config") {
+      loadRawConfigView(true).catch((err) => setStatus(String(err), true));
     }
   }
 
@@ -229,7 +240,7 @@
     state.selectedHttpUrlIndex = state.config.http.urls.length > 0 ? 0 : -1;
     state.fetchedByIndex = {};
     renderAll();
-    await loadRawConfigView();
+    await loadRawConfigView(true);
     setStatus("Loaded");
   }
 
@@ -241,17 +252,44 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: state.config }),
     });
-    await loadRawConfigView();
+    await loadRawConfigView(true);
     setStatus("Saved");
   }
 
-  async function loadRawConfigView() {
+  async function loadRawConfigView(force = false) {
     const payload = await apiJson("/config/raw");
     const configPath = String(payload.configPath || "");
     const content = String(payload.content || "");
+    const mtimeNs = Number(payload.mtimeNs || 0);
+    const changed = mtimeNs !== state.rawConfig.mtimeNs || content !== state.rawConfig.content;
+    if (!force && state.rawConfig.dirty && changed) {
+      if (!state.rawConfig.externalChangePending) {
+        setStatus("Config file changed on disk; reload to discard editor changes", true);
+      }
+      state.rawConfig.externalChangePending = true;
+      return false;
+    }
     configPathEl.textContent = configPath;
     if (configPathReadonlyEl) configPathReadonlyEl.value = configPath;
     if (configContentReadonlyEl) configContentReadonlyEl.value = content;
+    state.rawConfig.content = content;
+    state.rawConfig.mtimeNs = mtimeNs;
+    state.rawConfig.dirty = false;
+    state.rawConfig.externalChangePending = false;
+    return changed;
+  }
+
+  async function saveRawConfigFromEditor() {
+    if (!configContentReadonlyEl) return;
+    setStatus("Saving config file...");
+    const content = String(configContentReadonlyEl.value || "");
+    await apiJson("/config/raw", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    await loadConfig();
+    setStatus("Config file saved");
   }
 
   async function fetchUrlValues(index) {
@@ -290,6 +328,21 @@
   document.getElementById("saveBtn").addEventListener("click", () => {
     saveConfig().catch((err) => setStatus(String(err), true));
   });
+  if (configReloadBtn) {
+    configReloadBtn.addEventListener("click", () => {
+      loadConfig().catch((err) => setStatus(String(err), true));
+    });
+  }
+  if (configSaveBtn) {
+    configSaveBtn.addEventListener("click", () => {
+      saveRawConfigFromEditor().catch((err) => setStatus(String(err), true));
+    });
+  }
+  if (configContentReadonlyEl) {
+    configContentReadonlyEl.addEventListener("input", () => {
+      state.rawConfig.dirty = true;
+    });
+  }
 
   document.getElementById("addHttpUrl").addEventListener("click", () => {
     newHttpUrlEl.value = "";

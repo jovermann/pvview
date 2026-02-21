@@ -2325,19 +2325,21 @@ class CollectorUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
+                mtime_ns = int(os.stat(config_path).st_mtime_ns)
             except FileNotFoundError:
                 content = ""
+                mtime_ns = 0
             except Exception as exc:
                 self._send_json(500, {"error": {"code": "io_error", "message": str(exc)}})
                 return
-            self._send_json(200, {"configPath": config_path, "content": content})
+            self._send_json(200, {"configPath": config_path, "content": content, "mtimeNs": mtime_ns})
             return
         self._send_json(404, {"error": {"code": "not_found", "message": f"Unknown endpoint: {path}"}})
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if path != "/config":
+        if path not in {"/config", "/config/raw"}:
             self._send_json(404, {"error": {"code": "not_found", "message": f"Unknown endpoint: {path}"}})
             return
         length_raw = self.headers.get("Content-Length", "").strip()
@@ -2357,11 +2359,28 @@ class CollectorUiRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             self._send_json(400, {"error": {"code": "bad_request", "message": "Invalid JSON body"}})
             return
+        config_path = self.server.config_path  # type: ignore[attr-defined]
+        if path == "/config/raw":
+            if not isinstance(payload, dict):
+                self._send_json(400, {"error": {"code": "bad_request", "message": "Payload must be an object"}})
+                return
+            content = payload.get("content")
+            if not isinstance(content, str):
+                self._send_json(400, {"error": {"code": "bad_request", "message": "Missing string field: content"}})
+                return
+            try:
+                os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
+                with open(config_path, "w", encoding="utf-8", newline="") as f:
+                    f.write(content)
+            except Exception as exc:
+                self._send_json(500, {"error": {"code": "io_error", "message": str(exc)}})
+                return
+            self._send_json(200, {"ok": True, "configPath": config_path})
+            return
         config = payload.get("config", payload) if isinstance(payload, dict) else None
         if not isinstance(config, dict):
             self._send_json(400, {"error": {"code": "bad_request", "message": "Config payload must be an object"}})
             return
-        config_path = self.server.config_path  # type: ignore[attr-defined]
         try:
             save_collector_config(config_path, config)
         except Exception as exc:
