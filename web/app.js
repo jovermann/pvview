@@ -27,11 +27,16 @@
   const chartSettingsArea = document.getElementById('chartSettingsArea');
   const statSettingsDialog = document.getElementById('statSettingsDialog');
   const statSettingsName = document.getElementById('statSettingsName');
+  const statColumnsDialog = document.getElementById('statColumnsDialog');
+  const columnsList = document.getElementById('columnsList');
+  const columnsSearch = document.getElementById('columnsSearch');
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
+  let activeColumnsSelection = null;
   let activeSettingsChartId = null;
   let activeSettingsStatId = null;
+  let activeColumnsStatId = null;
   let consolePanelId = null;
   let apiTraceEnabled = false;
   let lastConsoleLogMs = null;
@@ -358,6 +363,16 @@
     if (!name.startsWith(prefix)) return name;
     const trimmed = name.slice(prefix.length);
     return trimmed.length ? trimmed : name;
+  }
+
+  function splitSeriesParentSuffix(name) {
+    const s = String(name || '');
+    const p = s.lastIndexOf('/');
+    if (p < 0) return { parent: '', suffix: s };
+    return {
+      parent: s.slice(0, p + 1),
+      suffix: s.slice(p + 1),
+    };
   }
 
   function axisLabelForSuffix(suffix) {
@@ -709,6 +724,7 @@
         <div class="panel-title" id="title-${id}">Stat ${id}</div>
         <div class="panel-actions">
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
+          <button class="icon-btn" data-action="stat-columns" data-id="${id}">Columns</button>
           <button class="settings-gadget" data-action="stat-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
       </div>
@@ -963,47 +979,71 @@
       appendConsoleLine(`stat ${id} refresh done (no series)`);
       return;
     }
-    const displaySeries = cfg.series.map((s) => displaySeriesName(s));
-    const prefix = displayPrefixForSeries(displaySeries);
-    const rows = await Promise.all(cfg.series.map(async (name) => {
-      const q = new URLSearchParams({
-        series: name,
-        start: String(start),
-        end: String(end),
-      });
-      const reqT0 = performance.now();
-      appendConsoleLine(`stat ${id} request start series=${name}`);
-      const data = await apiJson(`/stats?${q}`);
-      appendConsoleLine(
-        `stat ${id} request done series=${name} count=${data.count || 0} files=${Array.isArray(data.files) ? data.files.length : 0} `
-        + `elapsed=${Math.round(performance.now() - reqT0)}ms`
-      );
-      const currentValue = data.currentValue;
-      const maxValue = data.maxValue;
-      const decimals = normalizeDecimalPlaces(data.decimalPlaces);
-      const unit = unitForSeriesName(name);
-      const currentText = (typeof currentValue === 'number')
-        ? formatValueWithUnit(roundNumeric(currentValue), unit, decimals)
-        : (currentValue === null || currentValue === undefined ? '-' : String(currentValue));
-      const maxText = (typeof maxValue === 'number')
-        ? formatValueWithUnit(roundNumeric(maxValue), unit, decimals)
-        : '-';
+    const base = splitSeriesParentSuffix(cfg.series[0]);
+    const columns = (Array.isArray(cfg.columns) && cfg.columns.length)
+      ? cfg.columns.map((s) => String(s))
+      : [base.suffix];
+    const selectedColumns = Array.from(new Set(columns));
+    const displayRowParents = cfg.series.map((s) => splitSeriesParentSuffix(displaySeriesName(s)).parent.replace(/\/$/, ''));
+    const rowPrefix = displayPrefixForSeries(displayRowParents);
+    const rows = await Promise.all(cfg.series.map(async (seriesName) => {
+      const parts = splitSeriesParentSuffix(seriesName);
+      const rowCells = await Promise.all(selectedColumns.map(async (suffix) => {
+        const siblingName = `${parts.parent}${suffix}`;
+        const q = new URLSearchParams({
+          series: siblingName,
+          start: String(start),
+          end: String(end),
+        });
+        const reqT0 = performance.now();
+        appendConsoleLine(`stat ${id} request start series=${siblingName}`);
+        const data = await apiJson(`/stats?${q}`);
+        appendConsoleLine(
+          `stat ${id} request done series=${siblingName} count=${data.count || 0} files=${Array.isArray(data.files) ? data.files.length : 0} `
+          + `elapsed=${Math.round(performance.now() - reqT0)}ms`
+        );
+        const decimals = normalizeDecimalPlaces(data.decimalPlaces);
+        const unit = unitForSeriesName(siblingName);
+        const currentValue = data.currentValue;
+        const maxValue = data.maxValue;
+        return {
+          suffix,
+          currentText: (typeof currentValue === 'number')
+            ? formatValueWithUnit(roundNumeric(currentValue), unit, decimals)
+            : (currentValue === null || currentValue === undefined ? '-' : String(currentValue)),
+          maxText: (typeof maxValue === 'number')
+            ? formatValueWithUnit(roundNumeric(maxValue), unit, decimals)
+            : '-',
+        };
+      }));
+      const displayParent = splitSeriesParentSuffix(displaySeriesName(seriesName)).parent.replace(/\/$/, '');
       return {
-        name: compactSeriesLabel(displaySeriesName(name), prefix),
-        currentText,
-        maxText,
+        name: compactSeriesLabel(displayParent, rowPrefix),
+        cells: rowCells,
       };
     }));
-    cfg.tableEl.innerHTML = rows.map((r) => `
+    const head = `
+      <thead>
+        <tr>
+          <th class="stat-col-head stat-row-head">Series</th>
+          ${selectedColumns.map((s) => `<th class="stat-col-head">${s}</th>`).join('')}
+          <th class="stat-spacer"></th>
+        </tr>
+      </thead>
+    `;
+    const body = rows.map((r) => `
       <tr>
         <td class="stat-name">${r.name}</td>
-        <td class="stat-value-cell">
-          <div class="stat-current">${r.currentText}</div>
-          <div class="stat-max">max ${r.maxText}</div>
-        </td>
+        ${r.cells.map((cell) => `
+          <td class="stat-value-cell">
+            <div class="stat-current">${cell.currentText}</div>
+            <div class="stat-max">max ${cell.maxText}</div>
+          </td>
+        `).join('')}
         <td class="stat-spacer"></td>
       </tr>
     `).join('');
+    cfg.tableEl.innerHTML = head + `<tbody>${body}</tbody>`;
     appendConsoleLine(`stat ${id} refresh done name="${panelName}" series=${rows.length}`);
   }
 
@@ -1088,6 +1128,7 @@
       node,
       tableEl,
       series: [...initialSeries],
+      columns: Array.isArray(options.columns) ? options.columns.map((s) => String(s)) : [],
       label: options.label || null,
     });
     appendConsoleLine(`stat ${id} created series=${initialSeries.length}`);
@@ -1195,6 +1236,7 @@
           w: Number(nodeInfo.w || 6),
           h: Number(nodeInfo.h || 3),
           series: Array.isArray(c.series) ? [...c.series] : [],
+          columns: Array.isArray(c.columns) ? [...c.columns] : [],
           label: c.label || null,
         });
         continue;
@@ -1240,11 +1282,13 @@
       }
       if (ch.type === 'stat') {
         const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+        const columns = Array.isArray(ch.columns) ? ch.columns.filter((s) => typeof s === 'string') : [];
         addStat(series, {
           x: Number(ch.x),
           y: Number(ch.y),
           w: Number(ch.w) || 6,
           h: Number(ch.h) || 3,
+          columns,
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -1349,6 +1393,46 @@
     statSettingsDialog.showModal();
   }
 
+  async function openStatColumnsDialog(id) {
+    const c = charts.get(id);
+    if (!c || c.kind !== 'stat') return;
+    if (!Array.isArray(c.series) || c.series.length === 0) {
+      alert('Select at least one series first.');
+      return;
+    }
+    activeColumnsStatId = id;
+    const first = splitSeriesParentSuffix(c.series[0]);
+    const catalog = await fetchSeriesCatalog();
+    const siblingSuffixes = Array.from(new Set(catalog
+      .filter((name) => {
+        if (!String(name).startsWith(first.parent)) return false;
+        const suffix = String(name).slice(first.parent.length);
+        return suffix.length > 0 && !suffix.includes('/');
+      })
+      .map((name) => String(name).slice(first.parent.length))
+    )).sort();
+    const defaults = (Array.isArray(c.columns) && c.columns.length)
+      ? c.columns
+      : [first.suffix];
+    activeColumnsSelection = new Set(defaults.map((s) => String(s)));
+
+    function renderColumns(filter = '') {
+      const f = String(filter || '').toLowerCase();
+      const filtered = siblingSuffixes.filter((s) => s.toLowerCase().includes(f));
+      columnsList.innerHTML = filtered.map((suffix) => `
+        <label class="series-item">
+          <input type="checkbox" value="${suffix}" ${activeColumnsSelection.has(suffix) ? 'checked' : ''} />
+          <span>${suffix}</span>
+        </label>
+      `).join('');
+    }
+
+    renderColumns();
+    columnsSearch.value = '';
+    columnsSearch.oninput = () => renderColumns(columnsSearch.value);
+    statColumnsDialog.showModal();
+  }
+
   document.getElementById('seriesForm').addEventListener('submit', (e) => {
     e.preventDefault();
     if (!activeChartId) {
@@ -1390,6 +1474,18 @@
       activeSeriesSelection.add(target.value);
     } else {
       activeSeriesSelection.delete(target.value);
+    }
+  });
+
+  columnsList.addEventListener('change', (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.type !== 'checkbox') return;
+    if (!activeColumnsSelection) return;
+    if (target.checked) {
+      activeColumnsSelection.add(target.value);
+    } else {
+      activeColumnsSelection.delete(target.value);
     }
   });
 
@@ -1460,6 +1556,11 @@
 
     if (target.dataset.action === 'stat-settings') {
       openStatSettingsDialog(target.dataset.id);
+      return;
+    }
+
+    if (target.dataset.action === 'stat-columns') {
+      openStatColumnsDialog(target.dataset.id).catch((err) => console.error(err));
       return;
     }
 
@@ -1575,6 +1676,36 @@
 
   statSettingsDialog.addEventListener('close', () => {
     activeSettingsStatId = null;
+  });
+
+  document.getElementById('statColumnsForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeColumnsStatId) {
+      statColumnsDialog.close();
+      return;
+    }
+    const c = charts.get(activeColumnsStatId);
+    if (!c || c.kind !== 'stat') {
+      statColumnsDialog.close();
+      return;
+    }
+    c.columns = Array.from(activeColumnsSelection || []);
+    appendConsoleLine(`stat ${activeColumnsStatId} columns updated count=${c.columns.length}`);
+    refreshStat(activeColumnsStatId).catch((err) => console.error(err));
+    activeColumnsSelection = null;
+    activeColumnsStatId = null;
+    statColumnsDialog.close();
+  });
+
+  document.getElementById('cancelStatColumns').addEventListener('click', () => {
+    activeColumnsSelection = null;
+    activeColumnsStatId = null;
+    statColumnsDialog.close();
+  });
+
+  statColumnsDialog.addEventListener('close', () => {
+    activeColumnsSelection = null;
+    activeColumnsStatId = null;
   });
 
   grid.on('resizestop', () => {

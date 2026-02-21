@@ -189,6 +189,12 @@ main { padding: 2px; }
   border-collapse: collapse;
 }
 
+.stat-table th {
+  padding: 4px 4px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
 .stat-table td {
   padding: 6px 4px;
   border-bottom: 1px solid var(--border);
@@ -201,6 +207,16 @@ main { padding: 2px; }
   font-weight: 600;
   line-height: 1.1;
   white-space: nowrap;
+}
+
+.stat-col-head {
+  color: #aebbc9;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stat-row-head {
+  color: #90a0b3;
 }
 
 .stat-current {

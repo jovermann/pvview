@@ -163,6 +163,18 @@
     </form>
   </dialog>
 
+  <dialog id="statColumnsDialog" class="modal">
+    <form method="dialog" class="modal-content" id="statColumnsForm">
+      <h2>Select Columns</h2>
+      <input id="columnsSearch" type="search" placeholder="Filter columns..." />
+      <div id="columnsList" class="series-list"></div>
+      <menu>
+        <button id="cancelStatColumns" type="button" class="btn">Cancel</button>
+        <button id="saveStatColumns" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
   <script src="https://cdn.jsdelivr.net/npm/gridstack@10.2.0/dist/gridstack-all.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/static/app.js"></script>
