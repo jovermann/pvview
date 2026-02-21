@@ -1203,8 +1203,6 @@ def collect_to_tsdb(
                     for value_cfg in values:
                         if not isinstance(value_cfg, dict):
                             continue
-                        if not bool(value_cfg.get("enabled", False)):
-                            continue
                         path = str(value_cfg.get("path", "")).strip()
                         if not path:
                             continue
@@ -2029,14 +2027,12 @@ def load_collector_config(rc_path: str) -> dict[str, Any]:
                         continue
                     path = str(value_item.get("path", "")).strip()
                     topic = str(value_item.get("topic", "")).strip()
-                    enabled = bool(value_item.get("enabled", False))
                     if not path:
                         continue
                     values.append(
                         {
                             "path": path,
                             "topic": topic,
-                            "enabled": enabled,
                         }
                     )
             urls.append(
@@ -2224,7 +2220,6 @@ def _dumps_collector_config_toml(
                         continue
                     path = str(value_item.get("path", "")).strip()
                     topic = str(value_item.get("topic", "")).strip()
-                    enabled = bool(value_item.get("enabled", False))
                     if not path:
                         continue
                     if lines and lines[-1].strip() != "" and not has_block("[[http.urls.values]]"):
@@ -2232,7 +2227,6 @@ def _dumps_collector_config_toml(
                     emit_item("[[http.urls.values]]", "[[http.urls.values]]")
                     lines.append(f'path = {_quote_toml_string(path)}')
                     lines.append(f'topic = {_quote_toml_string(topic)}')
-                    lines.append(f"enabled = {'true' if enabled else 'false'}")
     if trailing_lines:
         lines.extend(trailing_lines)
     return "\n".join(lines) + "\n"

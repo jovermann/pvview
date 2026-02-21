@@ -42,6 +42,8 @@
   const httpValueFilterEl = document.getElementById("httpValueFilter");
   const clearHttpValueFilterBtn = document.getElementById("clearHttpValueFilter");
   const stripTopicCommonBtn = document.getElementById("stripTopicCommon");
+  const enableAllTopicsBtn = document.getElementById("enableAllTopics");
+  const disableAllTopicsBtn = document.getElementById("disableAllTopics");
   const addUrlDialog = document.getElementById("addUrlDialog");
   const newHttpUrlEl = document.getElementById("newHttpUrl");
   const newHttpBaseTopicEl = document.getElementById("newHttpBaseTopic");
@@ -110,7 +112,6 @@
         .map((v) => ({
           path: String(v.path || "").trim(),
           topic: String(v.topic || "").trim(),
-          enabled: !!v.enabled,
         }))
         .filter((v) => v.path.length > 0);
       return {
@@ -145,10 +146,15 @@
     topicsEl.value = state.config.mqtt.topics.join("\n");
   }
 
-  function ensureUrlMapping(urlCfg, path) {
-    let mapping = urlCfg.values.find((v) => v.path === path);
+  function findUrlMapping(urlCfg, path) {
+    return urlCfg.values.find((v) => v.path === path) || null;
+  }
+
+  function ensureUrlMapping(urlCfg, path, topicFallback = "") {
+    let mapping = findUrlMapping(urlCfg, path);
     if (!mapping) {
-      mapping = { path, topic: path.replace(/\./g, "/"), enabled: false };
+      const topic = String(topicFallback || "").trim() || path.replace(/\./g, "/");
+      mapping = { path, topic };
       urlCfg.values.push(mapping);
     }
     return mapping;
@@ -163,7 +169,7 @@
   function renderHttpUrls() {
     const rendered = state.config.http.urls.map((u, i) => {
       const fetched = Array.isArray(state.fetchedByIndex[i]) ? state.fetchedByIndex[i] : [];
-      const selected = Array.isArray(u.values) ? u.values.filter((v) => v && v.enabled).length : 0;
+      const selected = Array.isArray(u.values) ? u.values.length : 0;
       return `
       <tr data-row="${i}" class="${i === state.selectedHttpUrlIndex ? "selected-row" : ""}">
         <td><input type="text" data-field="url" data-row="${i}" value="${escapeHtml(u.url)}" /></td>
@@ -196,14 +202,15 @@
     for (const entry of sorted) {
       const path = String(entry.path || "");
       const value = String(entry.value || "");
-      const mapping = ensureUrlMapping(urlCfg, path);
+      const mapping = findUrlMapping(urlCfg, path);
+      const defaultTopic = path.replace(/\./g, "/");
       if (filter && !path.toLowerCase().includes(filter)) continue;
       rows.push(`
         <tr>
-          <td><input type="checkbox" data-mapping-field="enabled" data-path="${escapeHtml(path)}" ${mapping.enabled ? "checked" : ""} /></td>
+          <td><input type="checkbox" data-mapping-field="enabled" data-path="${escapeHtml(path)}" ${mapping ? "checked" : ""} /></td>
           <td>${escapeHtml(path)}</td>
           <td>${escapeHtml(value)}</td>
-          <td><input type="text" data-mapping-field="topic" data-path="${escapeHtml(path)}" value="${escapeHtml(mapping.topic)}" /></td>
+          <td><input type="text" data-mapping-field="topic" data-path="${escapeHtml(path)}" value="${escapeHtml(mapping ? mapping.topic : defaultTopic)}" /></td>
         </tr>
       `);
     }
@@ -435,11 +442,22 @@
     if (!urlCfg) return;
     const path = String(target.dataset.path || "");
     if (!path) return;
-    const mapping = ensureUrlMapping(urlCfg, path);
     if (target.dataset.mappingField === "enabled") {
-      mapping.enabled = target.checked;
+      if (target.checked) {
+        const row = target.closest("tr");
+        const topicInput = row ? row.querySelector('input[data-mapping-field="topic"]') : null;
+        const topicValue = topicInput instanceof HTMLInputElement ? topicInput.value : "";
+        ensureUrlMapping(urlCfg, path, topicValue);
+      } else {
+        urlCfg.values = urlCfg.values.filter((v) => v.path !== path);
+      }
+      renderHttpUrls();
     } else if (target.dataset.mappingField === "topic") {
-      mapping.topic = target.value.trim().replace(/^\/+|\/+$/g, "");
+      const mapping = findUrlMapping(urlCfg, path);
+      const topic = target.value.trim().replace(/^\/+|\/+$/g, "");
+      if (mapping) {
+        mapping.topic = topic;
+      }
     }
   });
 
@@ -448,24 +466,62 @@
     httpValueFilterEl.value = "";
     renderHttpValues();
   });
+  if (enableAllTopicsBtn) {
+    enableAllTopicsBtn.addEventListener("click", () => {
+      const urlCfg = selectedUrlCfg();
+      if (!urlCfg) return;
+      const rows = Array.from(httpValuesTbody.querySelectorAll('tr'));
+      for (const row of rows) {
+        const checkbox = row.querySelector('input[data-mapping-field="enabled"]');
+        if (!(checkbox instanceof HTMLInputElement)) continue;
+        const path = String(checkbox.dataset.path || "");
+        if (!path || checkbox.checked) continue;
+        const topicInput = row.querySelector('input[data-mapping-field="topic"]');
+        const topicValue = topicInput instanceof HTMLInputElement ? topicInput.value : "";
+        ensureUrlMapping(urlCfg, path, topicValue);
+      }
+      renderHttpUrls();
+      renderHttpValues();
+      setStatus(`Enabled ${rows.length} visible values`);
+    });
+  }
+  if (disableAllTopicsBtn) {
+    disableAllTopicsBtn.addEventListener("click", () => {
+      const urlCfg = selectedUrlCfg();
+      if (!urlCfg) return;
+      const visiblePaths = new Set(
+        Array.from(httpValuesTbody.querySelectorAll('input[data-mapping-field="enabled"]'))
+          .map((el) => String(el.dataset.path || ""))
+          .filter((p) => p.length > 0)
+      );
+      urlCfg.values = urlCfg.values.filter((v) => !visiblePaths.has(String(v.path || "")));
+      renderHttpUrls();
+      renderHttpValues();
+      setStatus(`Disabled ${visiblePaths.size} visible values`);
+    });
+  }
   stripTopicCommonBtn.addEventListener("click", () => {
     const urlCfg = selectedUrlCfg();
     if (!urlCfg) return;
-    const topicInputs = Array.from(
-      httpValuesTbody.querySelectorAll('input[data-mapping-field="topic"]')
+    const enabledCheckboxes = Array.from(
+      httpValuesTbody.querySelectorAll('input[data-mapping-field="enabled"]:checked')
     );
-    if (topicInputs.length < 2) {
-      setStatus("Need at least two visible topic rows");
+    if (enabledCheckboxes.length < 2) {
+      setStatus("Need at least two visible enabled topic rows");
       return;
     }
 
-    const rows = topicInputs.map((input) => ({
-      input,
-      path: String(input.dataset.path || ""),
-      topic: String(input.value || "").trim(),
-    })).filter((row) => row.path && row.topic.length > 0);
+    const rows = enabledCheckboxes.map((checkbox) => {
+      const path = String(checkbox.dataset.path || "");
+      const rowEl = checkbox.closest("tr");
+      const topicInput = rowEl ? rowEl.querySelector('input[data-mapping-field="topic"]') : null;
+      const mapping = findUrlMapping(urlCfg, path);
+      const topic = topicInput instanceof HTMLInputElement ? String(topicInput.value || "").trim() : "";
+      return { input: topicInput, path, topic, mapping };
+    }).filter((row) => row.input instanceof HTMLInputElement && row.path && row.topic.length > 0 && row.mapping);
+
     if (rows.length < 2) {
-      setStatus("Need at least two non-empty visible topic rows");
+      setStatus("Need at least two non-empty visible enabled topic rows");
       return;
     }
 
@@ -508,8 +564,7 @@
       const stripped = parts.slice(start, end).join("/");
       const nextTopic = stripped || parts.join("/");
       row.input.value = nextTopic;
-      const mapping = ensureUrlMapping(urlCfg, row.path);
-      mapping.topic = nextTopic;
+      if (row.mapping) row.mapping.topic = nextTopic;
     });
     renderHttpUrls();
     setStatus(`Stripped ${prefixLen} prefix and ${suffixLen} suffix path elements`);

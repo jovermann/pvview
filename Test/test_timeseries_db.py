@@ -417,3 +417,64 @@ def test_collector_config_repeated_save_does_not_add_blank_lines_before_trailing
     second = config_path.read_text(encoding="utf-8")
 
     assert second == first
+
+
+def test_collector_config_saves_http_values_without_enabled_field(tmp_path):
+    config_path = tmp_path / "enabled_only.toml"
+    cfg = {
+        "mqtt": {"mqtt_server": "broker:1883", "data_dir": ".", "quantize_timestamps": 0, "topics": []},
+        "http": {
+            "poll_interval_ms": 5000,
+            "base_url": "",
+            "urls": [
+                {
+                    "url": "http://host/json",
+                    "base_topic": "meter",
+                    "values": [
+                        {"path": "a.p", "topic": "a/p"},
+                        {"path": "a.v", "topic": "a/v"},
+                        {"path": "a.t", "topic": "a/t"},
+                    ],
+                }
+            ],
+        },
+    }
+    save_collector_config(str(config_path), cfg)
+    text = config_path.read_text(encoding="utf-8")
+    assert "enabled =" not in text
+    assert 'path = "a.p"' in text
+    assert 'path = "a.t"' in text
+    assert 'path = "a.v"' in text
+
+
+def test_collector_config_load_ignores_enabled_field_if_present(tmp_path):
+    config_path = tmp_path / "load_values.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'mqtt_server = "broker:1883"',
+                "",
+                "[http]",
+                "poll_interval_ms = 5000",
+                "",
+                "[[http.urls]]",
+                'url = "http://host/json"',
+                'base_topic = "meter"',
+                "",
+                "[[http.urls.values]]",
+                'path = "a.p"',
+                'topic = "a/p"',
+                "",
+                "[[http.urls.values]]",
+                'path = "a.v"',
+                'topic = "a/v"',
+                "enabled = false",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg = load_collector_config(str(config_path))
+    values = cfg["http"]["urls"][0]["values"]
+    assert values == [{"path": "a.p", "topic": "a/p"}, {"path": "a.v", "topic": "a/v"}]
