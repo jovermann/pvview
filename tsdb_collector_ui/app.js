@@ -20,6 +20,8 @@
 
   const statusEl = document.getElementById("status");
   const configPathEl = document.getElementById("configPath");
+  const configPathReadonlyEl = document.getElementById("configPathReadonly");
+  const configContentReadonlyEl = document.getElementById("configContentReadonly");
   const mqttServerEl = document.getElementById("mqttServer");
   const dataDirEl = document.getElementById("dataDir");
   const quantizeEl = document.getElementById("quantizeTimestamps");
@@ -30,9 +32,30 @@
   const httpSelectedUrlLabelEl = document.getElementById("httpSelectedUrlLabel");
   const httpBaseTopicEl = document.getElementById("httpBaseTopic");
   const httpValueFilterEl = document.getElementById("httpValueFilter");
+  const clearHttpValueFilterBtn = document.getElementById("clearHttpValueFilter");
+  const stripTopicCommonBtn = document.getElementById("stripTopicCommon");
   const addUrlDialog = document.getElementById("addUrlDialog");
   const newHttpUrlEl = document.getElementById("newHttpUrl");
   const newHttpBaseTopicEl = document.getElementById("newHttpBaseTopic");
+
+  function currentTabFromLocation() {
+    const raw = String(window.location.hash || "");
+    const m = raw.match(/^#tab=(mqtt|http|config)$/);
+    return m ? m[1] : "mqtt";
+  }
+
+  function setActiveTab(tabName, updateLocation = true) {
+    const tab = (tabName === "http" || tabName === "config") ? tabName : "mqtt";
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+    const tabBtn = document.querySelector(`.tab[data-tab="${tab}"]`);
+    const panel = document.getElementById(`tab-${tab}`);
+    if (tabBtn) tabBtn.classList.add("active");
+    if (panel) panel.classList.add("active");
+    if (updateLocation) {
+      window.location.hash = `tab=${tab}`;
+    }
+  }
 
   function setStatus(text, isError = false) {
     statusEl.textContent = text;
@@ -206,6 +229,7 @@
     state.selectedHttpUrlIndex = state.config.http.urls.length > 0 ? 0 : -1;
     state.fetchedByIndex = {};
     renderAll();
+    await loadRawConfigView();
     setStatus("Loaded");
   }
 
@@ -217,7 +241,17 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: state.config }),
     });
+    await loadRawConfigView();
     setStatus("Saved");
+  }
+
+  async function loadRawConfigView() {
+    const payload = await apiJson("/config/raw");
+    const configPath = String(payload.configPath || "");
+    const content = String(payload.content || "");
+    configPathEl.textContent = configPath;
+    if (configPathReadonlyEl) configPathReadonlyEl.value = configPath;
+    if (configContentReadonlyEl) configContentReadonlyEl.value = content;
   }
 
   async function fetchUrlValues(index) {
@@ -242,11 +276,12 @@
 
   document.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
-      document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
-      btn.classList.add("active");
-      document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
+      setActiveTab(btn.dataset.tab || "mqtt", true);
     });
+  });
+
+  window.addEventListener("hashchange", () => {
+    setActiveTab(currentTabFromLocation(), false);
   });
 
   document.getElementById("reloadBtn").addEventListener("click", () => {
@@ -356,6 +391,76 @@
   });
 
   httpValueFilterEl.addEventListener("input", () => renderHttpValues());
+  clearHttpValueFilterBtn.addEventListener("click", () => {
+    httpValueFilterEl.value = "";
+    renderHttpValues();
+  });
+  stripTopicCommonBtn.addEventListener("click", () => {
+    const urlCfg = selectedUrlCfg();
+    if (!urlCfg) return;
+    const topicInputs = Array.from(
+      httpValuesTbody.querySelectorAll('input[data-mapping-field="topic"]')
+    );
+    if (topicInputs.length < 2) {
+      setStatus("Need at least two visible topic rows");
+      return;
+    }
+
+    const rows = topicInputs.map((input) => ({
+      input,
+      path: String(input.dataset.path || ""),
+      topic: String(input.value || "").trim(),
+    })).filter((row) => row.path && row.topic.length > 0);
+    if (rows.length < 2) {
+      setStatus("Need at least two non-empty visible topic rows");
+      return;
+    }
+
+    const split = rows.map((r) => r.topic.split("/").filter((p) => p.length > 0));
+    const minLen = Math.min(...split.map((parts) => parts.length));
+    if (minLen <= 0) {
+      setStatus("No path elements to strip");
+      return;
+    }
+
+    let prefixLen = 0;
+    while (prefixLen < minLen) {
+      const token = split[0][prefixLen];
+      if (split.every((parts) => parts[prefixLen] === token)) {
+        prefixLen += 1;
+      } else {
+        break;
+      }
+    }
+
+    let suffixLen = 0;
+    while (suffixLen < (minLen - prefixLen - 1)) {
+      const token = split[0][split[0].length - 1 - suffixLen];
+      if (split.every((parts) => parts[parts.length - 1 - suffixLen] === token)) {
+        suffixLen += 1;
+      } else {
+        break;
+      }
+    }
+
+    if (prefixLen === 0 && suffixLen === 0) {
+      setStatus("No common path prefix/suffix found");
+      return;
+    }
+
+    rows.forEach((row, idx) => {
+      const parts = split[idx];
+      const start = prefixLen;
+      const end = parts.length - suffixLen;
+      const stripped = parts.slice(start, end).join("/");
+      const nextTopic = stripped || parts.join("/");
+      row.input.value = nextTopic;
+      const mapping = ensureUrlMapping(urlCfg, row.path);
+      mapping.topic = nextTopic;
+    });
+    renderHttpUrls();
+    setStatus(`Stripped ${prefixLen} prefix and ${suffixLen} suffix path elements`);
+  });
   httpPollIntervalEl.addEventListener("input", () => {
     state.config.http.poll_interval_ms = Math.max(100, Number(httpPollIntervalEl.value || 5000) || 5000);
   });
@@ -368,6 +473,7 @@
 
   (async () => {
     try {
+      setActiveTab(currentTabFromLocation(), false);
       await verifyApi();
       await loadConfig();
     } catch (err) {

@@ -20,6 +20,7 @@
       <div class="tabs">
         <button class="tab active" data-tab="mqtt">MQTT</button>
         <button class="tab" data-tab="http">HTTP</button>
+        <button class="tab" data-tab="config">Config</button>
       </div>
 
       <section id="tab-mqtt" class="panel active">
@@ -89,7 +90,16 @@
                   </tr>
                   <tr>
                     <td><label for="httpValueFilter">Filter</label></td>
-                    <td><input id="httpValueFilter" type="text" placeholder="substring" /></td>
+                    <td>
+                      <div class="row-inline">
+                        <input id="httpValueFilter" type="text" placeholder="substring" />
+                        <button id="clearHttpValueFilter" type="button" class="btn">Clear</button>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td></td>
+                    <td><button id="stripTopicCommon" type="button" class="btn">Strip common topic prefix and suffix</button></td>
                   </tr>
                 </tbody>
               </table>
@@ -114,6 +124,15 @@
               </table>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section id="tab-config" class="panel">
+        <div class="form-grid">
+          <label>Config File</label>
+          <input id="configPathReadonly" type="text" readonly />
+          <label>Content</label>
+          <textarea id="configContentReadonly" rows="24" readonly></textarea>
         </div>
       </section>
     </main>

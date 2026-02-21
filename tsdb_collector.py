@@ -2320,6 +2320,18 @@ class CollectorUiRequestHandler(BaseHTTPRequestHandler):
             config_path = self.server.config_path  # type: ignore[attr-defined]
             self._send_json(200, {"configPath": config_path, "config": load_collector_config(config_path)})
             return
+        if path == "/config/raw":
+            config_path = self.server.config_path  # type: ignore[attr-defined]
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except FileNotFoundError:
+                content = ""
+            except Exception as exc:
+                self._send_json(500, {"error": {"code": "io_error", "message": str(exc)}})
+                return
+            self._send_json(200, {"configPath": config_path, "content": content})
+            return
         self._send_json(404, {"error": {"code": "not_found", "message": f"Unknown endpoint: {path}"}})
 
     def do_PUT(self) -> None:

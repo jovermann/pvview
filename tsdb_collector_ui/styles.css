@@ -119,6 +119,10 @@ input[type="text"], input[type="number"], textarea, select {
   font-size: 13px;
 }
 
+input[readonly], textarea[readonly] {
+  cursor: default;
+}
+
 textarea {
   resize: vertical;
 }
