@@ -304,6 +304,9 @@ def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):
                 "interval_ms = 3000",
                 "enabled = false",
                 "",
+                "# c_trailing_end_1",
+                "# c_trailing_end_2",
+                "",
             ]
         )
         + "\n",
@@ -322,6 +325,7 @@ def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):
     assert text.index("# c_http_block_1") < first_http
     second_http = text.index("[[http.sources]]", first_http + 1)
     assert text.index("# c_http_block_2") < second_http
+    assert text.strip().endswith("# c_trailing_end_2")
 
 
 def test_collector_config_preserves_comment_blocks_after_modify_write(tmp_path):

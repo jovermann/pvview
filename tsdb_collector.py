@@ -1888,13 +1888,14 @@ def _toml_top_level_item_id(stripped_line: str) -> Optional[str]:
     return None
 
 
-def _extract_toml_comment_blocks_by_item(path: str) -> tuple[dict[str, list[list[str]]], list[str]]:
+def _extract_toml_comment_blocks_by_item(path: str) -> tuple[dict[str, list[list[str]]], list[str], list[str]]:
     """Preserve comment/blank blocks and associate each with the next top-level TOML item."""
     if not os.path.exists(path):
         return {}, []
     blocks_by_item: dict[str, list[list[str]]] = {}
     pending_block: list[str] = []
     orphan_lines: list[str] = []
+    trailing_lines: list[str] = []
     seen_any_item = False
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -1918,15 +1919,19 @@ def _extract_toml_comment_blocks_by_item(path: str) -> tuple[dict[str, list[list
     except Exception:
         return {}, []
 
-    if pending_block and not seen_any_item:
-        orphan_lines = pending_block
-    return blocks_by_item, orphan_lines
+    if pending_block:
+        if seen_any_item:
+            trailing_lines = pending_block
+        else:
+            orphan_lines = pending_block
+    return blocks_by_item, orphan_lines, trailing_lines
 
 
 def _dumps_collector_config_toml(
     config: dict[str, Any],
     comment_blocks_by_item: Optional[dict[str, list[list[str]]]] = None,
     orphan_preamble_lines: Optional[list[str]] = None,
+    trailing_lines: Optional[list[str]] = None,
 ) -> str:
     mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
     http = config.get("http", {}) if isinstance(config.get("http"), dict) else {}
@@ -1977,15 +1982,20 @@ def _dumps_collector_config_toml(
             lines.append(f'topic_prefix = {_quote_toml_string(topic_prefix)}')
             lines.append(f"interval_ms = {interval_ms}")
             lines.append(f"enabled = {'true' if enabled else 'false'}")
+    if trailing_lines:
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.extend(trailing_lines)
     return "\n".join(lines) + "\n"
 
 
 def save_collector_config(rc_path: str, config: dict[str, Any]) -> None:
-    comment_blocks_by_item, orphan_preamble_lines = _extract_toml_comment_blocks_by_item(rc_path)
+    comment_blocks_by_item, orphan_preamble_lines, trailing_lines = _extract_toml_comment_blocks_by_item(rc_path)
     text = _dumps_collector_config_toml(
         config,
         comment_blocks_by_item=comment_blocks_by_item,
         orphan_preamble_lines=orphan_preamble_lines,
+        trailing_lines=trailing_lines,
     )
     parent = os.path.dirname(os.path.abspath(rc_path))
     os.makedirs(parent, exist_ok=True)
