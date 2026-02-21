@@ -717,6 +717,24 @@
         curTsByLegendName.set(s.displayName, curTs);
       }
     }
+    const displayNameToSeries = new Map();
+    for (const s of seriesResponses) {
+      const bucket = displayNameToSeries.get(s.displayName) || [];
+      bucket.push(s.name);
+      displayNameToSeries.set(s.displayName, bucket);
+    }
+    cfg.displayNameToSeries = displayNameToSeries;
+    const legendSelected = {};
+    for (const [legendName, rawSeriesList] of displayNameToSeries.entries()) {
+      let enabled = true;
+      for (const rawName of rawSeriesList) {
+        if (cfg.legendEnabledBySeries && cfg.legendEnabledBySeries[rawName] === false) {
+          enabled = false;
+          break;
+        }
+      }
+      legendSelected[legendName] = enabled;
+    }
 
     const axisSlot = 36;
     const yAxes = axisOrder.map((axisKey, i) => ({
@@ -747,6 +765,7 @@
         orient: 'vertical',
         left: gridLeft,
         top: gridTop,
+        selected: legendSelected,
         textStyle: { color: '#c6d2e0' },
         formatter: (name) => {
           const maxValue = maxByLegendName.get(name);
@@ -838,7 +857,25 @@
       series: [...initialSeries],
       dotStyle: initialDotStyle,
       areaOpacity: initialAreaOpacity,
+      legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
+      displayNameToSeries: new Map(),
       label: options.label || null,
+    });
+    instance.on('legendselectchanged', (ev) => {
+      const c = charts.get(id);
+      if (!c || c.kind !== 'chart') return;
+      const displayName = ev && typeof ev.name === 'string' ? ev.name : '';
+      if (!displayName) return;
+      const list = c.displayNameToSeries instanceof Map ? c.displayNameToSeries.get(displayName) : null;
+      if (!Array.isArray(list) || list.length === 0) return;
+      const selected = !!(ev && ev.selected && ev.selected[displayName]);
+      if (!c.legendEnabledBySeries || typeof c.legendEnabledBySeries !== 'object') {
+        c.legendEnabledBySeries = {};
+      }
+      for (const rawName of list) {
+        c.legendEnabledBySeries[rawName] = selected;
+      }
+      appendConsoleLine(`chart ${id} legend ${selected ? 'enabled' : 'disabled'} name=${displayName}`);
     });
     appendConsoleLine(`chart ${id} created series=${initialSeries.length}`);
 
@@ -947,6 +984,7 @@
         series: Array.isArray(c.series) ? [...c.series] : [],
         dotStyle: normalizeDotStyle(c.dotStyle),
         areaOpacity: normalizeAreaOpacity(c.areaOpacity),
+        legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
         label: c.label || null,
       });
     }
@@ -984,6 +1022,9 @@
         h: Number(ch.h) || 3,
         dotStyle: ch.dotStyle !== undefined ? normalizeDotStyle(ch.dotStyle) : (ch.showSymbols ? 1 : 0),
         areaOpacity: ch.areaOpacity !== undefined ? normalizeAreaOpacity(ch.areaOpacity) : 0.3,
+        legendEnabledBySeries: (ch.legendEnabledBySeries && typeof ch.legendEnabledBySeries === 'object')
+          ? { ...ch.legendEnabledBySeries }
+          : {},
         label: typeof ch.label === 'string' ? ch.label : null,
         deferRefresh: true,
       });
