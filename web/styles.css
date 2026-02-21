@@ -23,7 +23,7 @@ body {
   display: flex;
   gap: 10px;
   align-items: center;
-  padding: 7px 12px;
+  padding: 4px 12px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, #171d28 0%, #121821 100%);
   position: sticky;
@@ -84,7 +84,7 @@ input[type="datetime-local"], input[type="search"], select {
   width: 4.25rem;
 }
 
-main { padding: 4px; }
+main { padding: 2px; }
 
 .grid-stack-item-content {
   background: var(--panel);
