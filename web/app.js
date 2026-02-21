@@ -24,10 +24,13 @@
   const chartSettingsName = document.getElementById('chartSettingsName');
   const chartSettingsDots = document.getElementById('chartSettingsDots');
   const chartSettingsArea = document.getElementById('chartSettingsArea');
+  const statSettingsDialog = document.getElementById('statSettingsDialog');
+  const statSettingsName = document.getElementById('statSettingsName');
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
   let activeSettingsChartId = null;
+  let activeSettingsStatId = null;
   let consolePanelId = null;
   let apiTraceEnabled = false;
   let lastConsoleLogMs = null;
@@ -355,17 +358,25 @@
     return Math.round(value * 1_000_000) / 1_000_000;
   }
 
-  function formatTooltipValue(value) {
+  function normalizeDecimalPlaces(decimals) {
+    const n = Number(decimals);
+    if (!Number.isFinite(n) || n < 0) return 3;
+    if (n > 12) return 12;
+    return Math.floor(n);
+  }
+
+  function formatTooltipValue(value, decimals = 3) {
     if (value === null || value === undefined) return '-';
     if (typeof value === 'number' && Number.isFinite(value)) {
+      const places = normalizeDecimalPlaces(decimals);
       const rounded = roundNumeric(value);
-      return Number(rounded).toString();
+      return rounded.toFixed(places);
     }
     return String(value);
   }
 
-  function formatValueWithUnit(value, unit) {
-    const base = formatTooltipValue(value);
+  function formatValueWithUnit(value, unit, decimals = 3) {
+    const base = formatTooltipValue(value, decimals);
     if (!unit) return base;
     if (base === '-' || base === '') return base;
     return `${base} ${unit}`;
@@ -651,7 +662,7 @@
         <div class="panel-title" id="title-${id}">Stat ${id}</div>
         <div class="panel-actions">
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
-          <button class="icon-btn danger" data-action="remove-stat" data-id="${id}">Remove</button>
+          <button class="settings-gadget" data-action="stat-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
       </div>
       <div class="stat-wrap">
@@ -732,6 +743,7 @@
         axisKey: String(name).split('/').pop() || String(name),
         points: breakLongGaps(points, 3600000),
         legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
+        decimalPlaces: normalizeDecimalPlaces(data.decimalPlaces),
         downsampled: !!data.downsampled,
       };
     }));
@@ -748,6 +760,7 @@
     const curByLegendName = new Map();
     const curTsByLegendName = new Map();
     const unitByLegendName = new Map();
+    const decimalsByLegendName = new Map();
     for (const s of seriesResponses) {
       let maxValue = s.legendMax;
       let curValue;
@@ -772,6 +785,13 @@
       }
       if (!unitByLegendName.has(s.displayName)) {
         unitByLegendName.set(s.displayName, unitForSuffix(s.axisKey));
+      }
+      if (!decimalsByLegendName.has(s.displayName)) {
+        decimalsByLegendName.set(s.displayName, normalizeDecimalPlaces(s.decimalPlaces));
+      } else {
+        const prev = decimalsByLegendName.get(s.displayName);
+        const next = normalizeDecimalPlaces(s.decimalPlaces);
+        decimalsByLegendName.set(s.displayName, Math.max(prev, next));
       }
     }
     const displayNameToSeries = new Map();
@@ -829,10 +849,11 @@
           const curValue = curByLegendName.get(name);
           const curTs = curTsByLegendName.get(name);
           const unit = unitByLegendName.get(name);
+          const decimals = decimalsByLegendName.get(name);
           const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
           if (maxValue === undefined) return name;
-          if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit)})`;
-          return `${name} (cur ${formatValueWithUnit(curValue, unit)}, max ${formatValueWithUnit(maxValue, unit)})`;
+          if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit, decimals)})`;
+          return `${name} (cur ${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)})`;
         },
       },
       tooltip: { trigger: 'axis' },
@@ -871,7 +892,7 @@
           itemStyle: { color: lineColor },
           lineStyle: { width: 1, color: lineColor },
           areaStyle: seriesAreaStyle,
-          tooltip: { valueFormatter: formatTooltipValue },
+          tooltip: { valueFormatter: (value) => formatTooltipValue(value, s.decimalPlaces) },
           emphasis: { focus: 'series' },
           data: s.points,
         };
@@ -912,12 +933,13 @@
       );
       const currentValue = data.currentValue;
       const maxValue = data.maxValue;
+      const decimals = normalizeDecimalPlaces(data.decimalPlaces);
       const unit = unitForSeriesName(name);
       const currentText = (typeof currentValue === 'number')
-        ? formatValueWithUnit(roundNumeric(currentValue), unit)
+        ? formatValueWithUnit(roundNumeric(currentValue), unit, decimals)
         : (currentValue === null || currentValue === undefined ? '-' : String(currentValue));
       const maxText = (typeof maxValue === 'number')
-        ? formatValueWithUnit(roundNumeric(maxValue), unit)
+        ? formatValueWithUnit(roundNumeric(maxValue), unit, decimals)
         : '-';
       return {
         name: compactSeriesLabel(displaySeriesName(name), prefix),
@@ -1272,6 +1294,14 @@
     chartSettingsDialog.showModal();
   }
 
+  function openStatSettingsDialog(id) {
+    const c = charts.get(id);
+    if (!c || c.kind !== 'stat') return;
+    activeSettingsStatId = id;
+    statSettingsName.value = c.label || '';
+    statSettingsDialog.showModal();
+  }
+
   document.getElementById('seriesForm').addEventListener('submit', (e) => {
     e.preventDefault();
     if (!activeChartId) {
@@ -1381,13 +1411,13 @@
       return;
     }
 
-    if (target.dataset.action === 'remove-console') {
-      appendConsoleLine('console removed');
-      removePanel(target.dataset.id);
+    if (target.dataset.action === 'stat-settings') {
+      openStatSettingsDialog(target.dataset.id);
       return;
     }
 
-    if (target.dataset.action === 'remove-stat') {
+    if (target.dataset.action === 'remove-console') {
+      appendConsoleLine('console removed');
       removePanel(target.dataset.id);
       return;
     }
@@ -1460,6 +1490,44 @@
 
   chartSettingsDialog.addEventListener('close', () => {
     activeSettingsChartId = null;
+  });
+
+  document.getElementById('statSettingsForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeSettingsStatId) {
+      statSettingsDialog.close();
+      return;
+    }
+    const c = charts.get(activeSettingsStatId);
+    if (!c || c.kind !== 'stat') {
+      statSettingsDialog.close();
+      return;
+    }
+    c.label = String(statSettingsName.value || '').trim() || null;
+    appendConsoleLine(`stat ${activeSettingsStatId} settings updated`);
+    updateTitle(activeSettingsStatId);
+    activeSettingsStatId = null;
+    statSettingsDialog.close();
+  });
+
+  document.getElementById('cancelStatSettings').addEventListener('click', () => {
+    activeSettingsStatId = null;
+    statSettingsDialog.close();
+  });
+
+  document.getElementById('removeStatSettings').addEventListener('click', () => {
+    if (!activeSettingsStatId) {
+      statSettingsDialog.close();
+      return;
+    }
+    const removeId = activeSettingsStatId;
+    activeSettingsStatId = null;
+    statSettingsDialog.close();
+    removePanel(removeId);
+  });
+
+  statSettingsDialog.addEventListener('close', () => {
+    activeSettingsStatId = null;
   });
 
   grid.on('resizestop', () => {

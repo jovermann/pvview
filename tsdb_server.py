@@ -400,6 +400,25 @@ def decimal_places_from_format_id(format_id: Optional[int]) -> int:
     return 3
 
 
+def is_numeric_format_id(format_id: Optional[int]) -> bool:
+    if format_id is None:
+        return False
+    if format_id in {
+        FORMAT_FLOAT,
+        FORMAT_DOUBLE,
+        FORMAT_DOUBLE_DEC1,
+        FORMAT_DOUBLE_DEC2,
+        FORMAT_DOUBLE_DEC3,
+        FORMAT_DOUBLE_DEC4,
+        FORMAT_DOUBLE_DEC5,
+        FORMAT_DOUBLE_DEC6PLUS,
+    }:
+        return True
+    hi = (format_id >> 4) & 0xF
+    lo = format_id & 0xF
+    return hi in {0x1, 0x2, 0x3, 0x4, 0x5, 0x9, 0xA, 0xB, 0xC, 0xD} and 0 <= lo <= 3
+
+
 def read_tsdb_events_for_series(path: str, target_series: str, start_ms: int, end_ms: int) -> List[Event]:
     cache = _get_cached_tsdb_file(path)
     events = cache.series_events.get(target_series, [])
@@ -766,11 +785,13 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
-        max_decimal_places = 0
+        max_decimal_places: Optional[int] = None
         for path in files:
             events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
             fmt = get_series_format_id_in_file(path, series)
-            max_decimal_places = max(max_decimal_places, decimal_places_from_format_id(fmt))
+            if is_numeric_format_id(fmt):
+                d = decimal_places_from_format_id(fmt)
+                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
 
         events.sort(key=lambda e: e.timestamp_ms)
 
@@ -781,7 +802,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 max_events,
                 start_ms=start_ms,
                 end_ms=end_ms,
-                decimal_places=max_decimal_places,
+                decimal_places=max_decimal_places if max_decimal_places is not None else 3,
             )
         else:
             # Non-numeric series cannot be aggregated with min/avg/max.
@@ -798,6 +819,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             "files": [os.path.basename(p) for p in files],
             "points": points,
         }
+        if max_decimal_places is not None:
+            response["decimalPlaces"] = max_decimal_places
 
         if not all_numeric and len(events) > max_events:
             response["note"] = "Series is non-numeric; returned first maxEvents without min/avg/max aggregation."
@@ -819,8 +842,13 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
+        max_decimal_places: Optional[int] = None
         for path in files:
             events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
+            fmt = get_series_format_id_in_file(path, series)
+            if is_numeric_format_id(fmt):
+                d = decimal_places_from_format_id(fmt)
+                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
         events.sort(key=lambda e: e.timestamp_ms)
 
         current_ts: Optional[int] = None
@@ -848,6 +876,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 "currentTimestamp": current_ts,
                 "currentValue": current_value,
                 "maxValue": max_value,
+                "decimalPlaces": max_decimal_places,
                 "files": [os.path.basename(p) for p in files],
             },
         )

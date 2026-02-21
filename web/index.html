@@ -148,6 +148,21 @@
     </form>
   </dialog>
 
+  <dialog id="statSettingsDialog" class="modal">
+    <form method="dialog" class="modal-content" id="statSettingsForm">
+      <h2>Stat Settings</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Name</div>
+        <div><input id="statSettingsName" type="text" placeholder="Window name" /></div>
+      </div>
+      <menu>
+        <button id="removeStatSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="cancelStatSettings" type="button" class="btn">Cancel</button>
+        <button id="saveStatSettings" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
   <script src="https://cdn.jsdelivr.net/npm/gridstack@10.2.0/dist/gridstack-all.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="/static/app.js"></script>
