@@ -381,6 +381,8 @@ def get_series_format_id_in_file(path: str, series_name: str) -> Optional[int]:
 def decimal_places_from_format_id(format_id: Optional[int]) -> int:
     if format_id is None:
         return 3
+    if format_id == FORMAT_DOUBLE:
+        return 0
     if format_id == FORMAT_DOUBLE_DEC1:
         return 1
     if format_id == FORMAT_DOUBLE_DEC2:
@@ -393,7 +395,7 @@ def decimal_places_from_format_id(format_id: Optional[int]) -> int:
         return 5
     if format_id == FORMAT_DOUBLE_DEC6PLUS:
         return 6
-    if format_id in (FORMAT_FLOAT, FORMAT_DOUBLE):
+    if format_id == FORMAT_FLOAT:
         return 3
     lo = format_id & 0xF
     hi = (format_id >> 4) & 0xF

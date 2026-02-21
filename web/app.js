@@ -1021,15 +1021,18 @@
         const unit = unitForSeriesName(siblingName);
         const currentValue = data.currentValue;
         const maxValue = data.maxValue;
+        const missing = (currentValue === null || currentValue === undefined);
         return {
           suffix,
-          currentText: (typeof currentValue === 'number')
+          currentText: missing
+            ? ''
+            : (typeof currentValue === 'number')
             ? formatValueWithUnit(roundNumeric(currentValue), unit, decimals)
-            : (currentValue === null || currentValue === undefined ? '-' : String(currentValue)),
+            : String(currentValue),
           maxText: (typeof maxValue === 'number')
             ? formatValueWithUnit(roundNumeric(maxValue), unit, decimals)
             : '-',
-          hideMax: isYieldSuffix(suffix),
+          hideMax: missing || isYieldSuffix(suffix),
         };
       }));
       const displayParent = splitSeriesParentSuffix(displaySeriesName(seriesName)).parent.replace(/\/$/, '');
@@ -1042,7 +1045,7 @@
       <thead>
         <tr>
           <th class="stat-col-head stat-row-head">Series</th>
-          ${selectedColumns.map((s) => `<th class="stat-col-head">${s}</th>`).join('')}
+          ${selectedColumns.map((s) => `<th class="stat-col-head">${String(s).charAt(0).toUpperCase()}${String(s).slice(1)}</th>`).join('')}
           <th class="stat-spacer"></th>
         </tr>
       </thead>

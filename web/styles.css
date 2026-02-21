@@ -219,6 +219,14 @@ main { padding: 2px; }
   color: #90a0b3;
 }
 
+.stat-table th.stat-col-head {
+  text-align: center;
+}
+
+.stat-table th.stat-row-head {
+  text-align: left;
+}
+
 .stat-current {
   color: #e5effc;
   font-size: 26px;
