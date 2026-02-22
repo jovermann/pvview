@@ -1208,7 +1208,9 @@ def collect_to_tsdb(
                             continue
                         if path not in flat:
                             continue
-                        topic_leaf = str(value_cfg.get("topic", "")).strip() or path.replace(".", "/")
+                        topic_leaf = str(value_cfg.get("topic", "")).strip()
+                        if not topic_leaf:
+                            continue
                         full_topic = f"{base_topic}/{topic_leaf}" if base_topic else topic_leaf
                         http_events.append((ts_ms, full_topic, _value_from_http_text(flat[path])))
                         emitted += 1

@@ -40,10 +40,11 @@
   const httpSelectedUrlLabelEl = document.getElementById("httpSelectedUrlLabel");
   const httpBaseTopicEl = document.getElementById("httpBaseTopic");
   const httpValueFilterEl = document.getElementById("httpValueFilter");
+  const showOnlyEnabledValuesEl = document.getElementById("showOnlyEnabledValues");
   const clearHttpValueFilterBtn = document.getElementById("clearHttpValueFilter");
-  const stripTopicCommonBtn = document.getElementById("stripTopicCommon");
   const enableAllTopicsBtn = document.getElementById("enableAllTopics");
   const disableAllTopicsBtn = document.getElementById("disableAllTopics");
+  const fetchAllHttpUrlsBtn = document.getElementById("fetchAllHttpUrls");
   const addUrlDialog = document.getElementById("addUrlDialog");
   const newHttpUrlEl = document.getElementById("newHttpUrl");
   const newHttpBaseTopicEl = document.getElementById("newHttpBaseTopic");
@@ -153,7 +154,7 @@
   function ensureUrlMapping(urlCfg, path, topicFallback = "") {
     let mapping = findUrlMapping(urlCfg, path);
     if (!mapping) {
-      const topic = String(topicFallback || "").trim() || path.replace(/\./g, "/");
+      const topic = String(topicFallback || "").trim();
       mapping = { path, topic };
       urlCfg.values.push(mapping);
     }
@@ -197,20 +198,21 @@
       ? state.fetchedByIndex[state.selectedHttpUrlIndex]
       : [];
     const filter = String(httpValueFilterEl.value || "").toLowerCase();
+    const showOnlyEnabled = !!(showOnlyEnabledValuesEl && showOnlyEnabledValuesEl.checked);
     const sorted = [...fetched].sort((a, b) => String(a.path).localeCompare(String(b.path)));
     const rows = [];
     for (const entry of sorted) {
       const path = String(entry.path || "");
       const value = String(entry.value || "");
       const mapping = findUrlMapping(urlCfg, path);
-      const defaultTopic = path.replace(/\./g, "/");
       if (filter && !path.toLowerCase().includes(filter)) continue;
+      if (showOnlyEnabled && !mapping) continue;
       rows.push(`
         <tr>
           <td><input type="checkbox" data-mapping-field="enabled" data-path="${escapeHtml(path)}" ${mapping ? "checked" : ""} /></td>
           <td>${escapeHtml(path)}</td>
           <td>${escapeHtml(value)}</td>
-          <td><input type="text" data-mapping-field="topic" data-path="${escapeHtml(path)}" value="${escapeHtml(mapping ? mapping.topic : defaultTopic)}" /></td>
+          <td><input type="text" data-mapping-field="topic" data-path="${escapeHtml(path)}" value="${escapeHtml(mapping ? mapping.topic : "")}" /></td>
         </tr>
       `);
     }
@@ -357,6 +359,19 @@
     addUrlDialog.showModal();
     newHttpUrlEl.focus();
   });
+  if (fetchAllHttpUrlsBtn) {
+    fetchAllHttpUrlsBtn.addEventListener("click", async () => {
+      const total = state.config.http.urls.length;
+      if (total <= 0) {
+        setStatus("No URLs configured");
+        return;
+      }
+      for (let i = 0; i < total; i += 1) {
+        await fetchUrlValues(i);
+      }
+      setStatus(`Fetched all URLs (${total})`);
+    });
+  }
   document.getElementById("addFroniusUrls").addEventListener("click", () => {
     const existing = new Set(state.config.http.urls.map((u) => String(u.url || "").trim()));
     let added = 0;
@@ -453,15 +468,20 @@
       }
       renderHttpUrls();
     } else if (target.dataset.mappingField === "topic") {
-      const mapping = findUrlMapping(urlCfg, path);
       const topic = target.value.trim().replace(/^\/+|\/+$/g, "");
-      if (mapping) {
-        mapping.topic = topic;
-      }
+      const mapping = ensureUrlMapping(urlCfg, path, topic);
+      mapping.topic = topic;
+      const row = target.closest("tr");
+      const checkbox = row ? row.querySelector('input[data-mapping-field="enabled"]') : null;
+      if (checkbox instanceof HTMLInputElement && !checkbox.checked) checkbox.checked = true;
+      renderHttpUrls();
     }
   });
 
   httpValueFilterEl.addEventListener("input", () => renderHttpValues());
+  if (showOnlyEnabledValuesEl) {
+    showOnlyEnabledValuesEl.addEventListener("change", () => renderHttpValues());
+  }
   clearHttpValueFilterBtn.addEventListener("click", () => {
     httpValueFilterEl.value = "";
     renderHttpValues();
@@ -500,75 +520,6 @@
       setStatus(`Disabled ${visiblePaths.size} visible values`);
     });
   }
-  stripTopicCommonBtn.addEventListener("click", () => {
-    const urlCfg = selectedUrlCfg();
-    if (!urlCfg) return;
-    const enabledCheckboxes = Array.from(
-      httpValuesTbody.querySelectorAll('input[data-mapping-field="enabled"]:checked')
-    );
-    if (enabledCheckboxes.length < 2) {
-      setStatus("Need at least two visible enabled topic rows");
-      return;
-    }
-
-    const rows = enabledCheckboxes.map((checkbox) => {
-      const path = String(checkbox.dataset.path || "");
-      const rowEl = checkbox.closest("tr");
-      const topicInput = rowEl ? rowEl.querySelector('input[data-mapping-field="topic"]') : null;
-      const mapping = findUrlMapping(urlCfg, path);
-      const topic = topicInput instanceof HTMLInputElement ? String(topicInput.value || "").trim() : "";
-      return { input: topicInput, path, topic, mapping };
-    }).filter((row) => row.input instanceof HTMLInputElement && row.path && row.topic.length > 0 && row.mapping);
-
-    if (rows.length < 2) {
-      setStatus("Need at least two non-empty visible enabled topic rows");
-      return;
-    }
-
-    const split = rows.map((r) => r.topic.split("/").filter((p) => p.length > 0));
-    const minLen = Math.min(...split.map((parts) => parts.length));
-    if (minLen <= 0) {
-      setStatus("No path elements to strip");
-      return;
-    }
-
-    let prefixLen = 0;
-    while (prefixLen < minLen) {
-      const token = split[0][prefixLen];
-      if (split.every((parts) => parts[prefixLen] === token)) {
-        prefixLen += 1;
-      } else {
-        break;
-      }
-    }
-
-    let suffixLen = 0;
-    while (suffixLen < (minLen - prefixLen - 1)) {
-      const token = split[0][split[0].length - 1 - suffixLen];
-      if (split.every((parts) => parts[parts.length - 1 - suffixLen] === token)) {
-        suffixLen += 1;
-      } else {
-        break;
-      }
-    }
-
-    if (prefixLen === 0 && suffixLen === 0) {
-      setStatus("No common path prefix/suffix found");
-      return;
-    }
-
-    rows.forEach((row, idx) => {
-      const parts = split[idx];
-      const start = prefixLen;
-      const end = parts.length - suffixLen;
-      const stripped = parts.slice(start, end).join("/");
-      const nextTopic = stripped || parts.join("/");
-      row.input.value = nextTopic;
-      if (row.mapping) row.mapping.topic = nextTopic;
-    });
-    renderHttpUrls();
-    setStatus(`Stripped ${prefixLen} prefix and ${suffixLen} suffix path elements`);
-  });
   httpPollIntervalEl.addEventListener("input", () => {
     state.config.http.poll_interval_ms = Math.max(100, Number(httpPollIntervalEl.value || 5000) || 5000);
   });

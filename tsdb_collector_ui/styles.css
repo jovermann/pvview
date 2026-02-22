@@ -137,9 +137,21 @@ textarea {
   gap: 8px;
 }
 
+.spacer {
+  flex: 1 1 auto;
+}
+
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
 .http-layout {
   display: grid;
-  grid-template-columns: 36% 64%;
+  grid-template-columns: minmax(0, 40%) minmax(0, 60%);
   gap: 10px;
 }
 
@@ -174,6 +186,10 @@ table {
   padding-right: 8px;
 }
 
+.http-left-form td:first-child {
+  width: 130px;
+}
+
 .form-value {
   word-break: break-all;
 }
@@ -183,10 +199,6 @@ th, td {
   padding: 6px 6px;
   text-align: left;
   vertical-align: middle;
-}
-
-#httpValuesTable {
-  table-layout: fixed;
 }
 
 #httpUrlsTable {
@@ -210,6 +222,27 @@ th, td {
 #httpValuesTable th:nth-child(2),
 #httpValuesTable th:nth-child(3) {
   white-space: nowrap;
+}
+
+#httpValuesTable td:nth-child(2) {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#httpValuesTable td:nth-child(3),
+#httpValuesTable th:nth-child(3) {
+  max-width: 200px;
+}
+
+#httpValuesTable td:nth-child(3) {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#httpValuesTable td:nth-child(4),
+#httpValuesTable th:nth-child(4) {
+  width: 99%;
+  min-width: 200px;
 }
 
 #httpValuesTable td:nth-child(4) input {

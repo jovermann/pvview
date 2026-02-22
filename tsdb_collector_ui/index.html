@@ -42,17 +42,25 @@
       <section id="tab-http" class="panel">
         <div class="http-layout">
           <div class="http-left">
-            <div class="row row-inline">
-              <label>Poll Interval (ms)</label>
-              <input id="httpPollInterval" type="number" min="100" step="100" />
-            </div>
-            <div class="row row-inline">
-              <label>Base URL</label>
-              <input id="httpBaseUrl" type="text" placeholder="http://server:port" />
-            </div>
             <div class="row">
+              <table class="inline-form-table http-left-form">
+                <tbody>
+                  <tr>
+                    <td><label for="httpPollInterval">Poll Interval (ms)</label></td>
+                    <td><input id="httpPollInterval" type="number" min="100" step="100" /></td>
+                  </tr>
+                  <tr>
+                    <td><label for="httpBaseUrl">Base URL</label></td>
+                    <td><input id="httpBaseUrl" type="text" placeholder="http://server:port" /></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="row row-inline">
               <button id="addHttpUrl" class="btn">Add URL</button>
               <button id="addFroniusUrls" class="btn">Add Fronius JSON API URLs</button>
+              <span class="spacer"></span>
+              <button id="fetchAllHttpUrls" class="btn">Fetch all</button>
             </div>
             <div class="table-wrap">
               <table id="httpUrlsTable">
@@ -93,6 +101,7 @@
                     <td>
                       <div class="row-inline">
                         <input id="httpValueFilter" type="text" placeholder="substring" />
+                        <label class="checkbox-inline"><input id="showOnlyEnabledValues" type="checkbox" /> Show only enabled</label>
                         <button id="clearHttpValueFilter" type="button" class="btn">Clear</button>
                       </div>
                     </td>
@@ -103,7 +112,6 @@
                       <div class="row-inline">
                         <button id="enableAllTopics" type="button" class="btn">Enable all</button>
                         <button id="disableAllTopics" type="button" class="btn">Disable all</button>
-                        <button id="stripTopicCommon" type="button" class="btn">Strip common topic prefix and suffix</button>
                       </div>
                     </td>
                   </tr>
@@ -114,8 +122,8 @@
               <table id="httpValuesTable">
                 <colgroup>
                   <col style="width: 52px" />
-                  <col style="width: 30%" />
-                  <col style="width: 22%" />
+                  <col style="width: 1%" />
+                  <col style="width: 1%" />
                   <col />
                 </colgroup>
                 <thead>
