@@ -22,6 +22,10 @@
       dirty: false,
       externalChangePending: false,
     },
+    httpTopicsSort: {
+      key: "url",
+      desc: false,
+    },
   };
 
   const statusEl = document.getElementById("status");
@@ -37,6 +41,9 @@
   const httpPollIntervalEl = document.getElementById("httpPollInterval");
   const httpUrlsTbody = document.querySelector("#httpUrlsTable tbody");
   const httpValuesTbody = document.querySelector("#httpValuesTable tbody");
+  const httpTopicsTbody = document.querySelector("#httpTopicsTable tbody");
+  const httpTopicsCountEl = document.getElementById("httpTopicsCount");
+  const httpTopicsTableEl = document.getElementById("httpTopicsTable");
   const httpSelectedUrlLabelEl = document.getElementById("httpSelectedUrlLabel");
   const httpBaseTopicEl = document.getElementById("httpBaseTopic");
   const httpValueFilterEl = document.getElementById("httpValueFilter");
@@ -51,12 +58,12 @@
 
   function currentTabFromLocation() {
     const raw = String(window.location.hash || "");
-    const m = raw.match(/^#tab=(mqtt|http|config)$/);
+    const m = raw.match(/^#tab=(mqtt|http|http-topics|config)$/);
     return m ? m[1] : "mqtt";
   }
 
   function setActiveTab(tabName, updateLocation = true) {
-    const tab = (tabName === "http" || tabName === "config") ? tabName : "mqtt";
+    const tab = (tabName === "http" || tabName === "http-topics" || tabName === "config") ? tabName : "mqtt";
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
     document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
     const tabBtn = document.querySelector(`.tab[data-tab="${tab}"]`);
@@ -199,11 +206,22 @@
       : [];
     const filter = String(httpValueFilterEl.value || "").toLowerCase();
     const showOnlyEnabled = !!(showOnlyEnabledValuesEl && showOnlyEnabledValuesEl.checked);
-    const sorted = [...fetched].sort((a, b) => String(a.path).localeCompare(String(b.path)));
+    const fetchedByPath = new Map();
+    for (const entry of fetched) {
+      const path = String(entry && entry.path || "");
+      if (!path) continue;
+      fetchedByPath.set(path, String(entry && entry.value || ""));
+    }
+    const pathSet = new Set();
+    for (const path of fetchedByPath.keys()) pathSet.add(path);
+    for (const mapping of (Array.isArray(urlCfg.values) ? urlCfg.values : [])) {
+      const path = String(mapping && mapping.path || "");
+      if (path) pathSet.add(path);
+    }
+    const sortedPaths = Array.from(pathSet).sort((a, b) => String(a).localeCompare(String(b)));
     const rows = [];
-    for (const entry of sorted) {
-      const path = String(entry.path || "");
-      const value = String(entry.value || "");
+    for (const path of sortedPaths) {
+      const value = fetchedByPath.get(path) || "";
       const mapping = findUrlMapping(urlCfg, path);
       if (filter && !path.toLowerCase().includes(filter)) continue;
       if (showOnlyEnabled && !mapping) continue;
@@ -219,6 +237,59 @@
     httpValuesTbody.innerHTML = rows.join("");
   }
 
+  function renderHttpTopics() {
+    if (!httpTopicsTbody) return;
+    const rows = [];
+    state.config.http.urls.forEach((urlCfg, index) => {
+      const url = String(urlCfg && urlCfg.url || "");
+      const baseTopic = String(urlCfg && urlCfg.base_topic || "").trim().replace(/^\/+|\/+$/g, "");
+      const fetched = Array.isArray(state.fetchedByIndex[index]) ? state.fetchedByIndex[index] : [];
+      const jsonNameSet = new Set();
+      for (const entry of fetched) {
+        const path = String(entry && entry.path || "");
+        if (path) jsonNameSet.add(path);
+      }
+      for (const mapping of (Array.isArray(urlCfg.values) ? urlCfg.values : [])) {
+        const path = String(mapping && mapping.path || "");
+        if (path) jsonNameSet.add(path);
+      }
+      const sortedNames = Array.from(jsonNameSet).sort((a, b) => String(a).localeCompare(String(b)));
+      for (const jsonName of sortedNames) {
+        const mapping = findUrlMapping(urlCfg, jsonName);
+        if (!mapping) continue;
+        const topicLeaf = String(mapping.topic || "").trim().replace(/^\/+|\/+$/g, "");
+        const fullTopic = topicLeaf ? (baseTopic ? `${baseTopic}/${topicLeaf}` : topicLeaf) : "";
+        rows.push({ url, jsonName, topicName: fullTopic });
+      }
+    });
+    const sortKey = state.httpTopicsSort && state.httpTopicsSort.key ? state.httpTopicsSort.key : "url";
+    const desc = !!(state.httpTopicsSort && state.httpTopicsSort.desc);
+    rows.sort((a, b) => {
+      const av = String(a && a[sortKey] || "");
+      const bv = String(b && b[sortKey] || "");
+      const cmp = av.localeCompare(bv);
+      return desc ? -cmp : cmp;
+    });
+    httpTopicsTbody.innerHTML = rows.map((row) => `
+      <tr>
+        <td>${escapeHtml(row.url)}</td>
+        <td>${escapeHtml(row.jsonName)}</td>
+        <td>${escapeHtml(row.topicName)}</td>
+      </tr>
+    `).join("");
+    if (httpTopicsCountEl) {
+      httpTopicsCountEl.textContent = `${rows.length} topic${rows.length === 1 ? "" : "s"}`;
+    }
+    if (httpTopicsTableEl) {
+      httpTopicsTableEl.querySelectorAll("th[data-sort-key]").forEach((th) => {
+        const key = String(th.getAttribute("data-sort-key") || "");
+        const label = String(th.textContent || "").replace(/\s*[▲▼]$/, "");
+        th.textContent = key === sortKey ? `${label} ${desc ? "▼" : "▲"}` : label;
+        th.style.cursor = "pointer";
+      });
+    }
+  }
+
   function renderAll() {
     renderMqtt();
     httpPollIntervalEl.value = String(state.config.http.poll_interval_ms);
@@ -226,6 +297,7 @@
     if (baseUrlEl) baseUrlEl.value = state.config.http.base_url || "";
     renderHttpUrls();
     renderHttpValues();
+    renderHttpTopics();
   }
 
   function collectFromUi() {
@@ -318,6 +390,7 @@
     state.fetchedByIndex[index] = Array.isArray(data.values) ? data.values : [];
     renderHttpUrls();
     renderHttpValues();
+    renderHttpTopics();
     setStatus(`Fetched ${url}: ${state.fetchedByIndex[index].length} values`);
   }
 
@@ -326,6 +399,21 @@
       setActiveTab(btn.dataset.tab || "mqtt", true);
     });
   });
+  if (httpTopicsTableEl) {
+    httpTopicsTableEl.querySelectorAll("th[data-sort-key]").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = String(th.getAttribute("data-sort-key") || "");
+        if (!key) return;
+        if (state.httpTopicsSort.key === key) {
+          state.httpTopicsSort.desc = !state.httpTopicsSort.desc;
+        } else {
+          state.httpTopicsSort.key = key;
+          state.httpTopicsSort.desc = false;
+        }
+        renderHttpTopics();
+      });
+    });
+  }
 
   window.addEventListener("hashchange", () => {
     setActiveTab(currentTabFromLocation(), false);
@@ -384,9 +472,10 @@
     if (state.selectedHttpUrlIndex < 0 && state.config.http.urls.length > 0) {
       state.selectedHttpUrlIndex = 0;
     }
-    renderHttpUrls();
-    renderHttpValues();
-    setStatus(added > 0 ? `Added ${added} Fronius URLs` : "All Fronius URLs already present");
+      renderHttpUrls();
+      renderHttpValues();
+      renderHttpTopics();
+      setStatus(added > 0 ? `Added ${added} Fronius URLs` : "All Fronius URLs already present");
   });
   document.getElementById("cancelAddUrl").addEventListener("click", () => addUrlDialog.close());
   document.getElementById("addUrlForm").addEventListener("submit", (ev) => {
@@ -401,6 +490,7 @@
     state.selectedHttpUrlIndex = state.config.http.urls.length - 1;
     renderHttpUrls();
     renderHttpValues();
+    renderHttpTopics();
     addUrlDialog.close();
   });
 
@@ -424,6 +514,7 @@
       }
       renderHttpUrls();
       renderHttpValues();
+      renderHttpTopics();
       return;
     }
     if (target.dataset.action === "fetch-url") {
@@ -433,6 +524,7 @@
     state.selectedHttpUrlIndex = row;
     renderHttpUrls();
     renderHttpValues();
+    renderHttpTopics();
   });
 
   httpUrlsTbody.addEventListener("input", (ev) => {
@@ -467,6 +559,7 @@
         urlCfg.values = urlCfg.values.filter((v) => v.path !== path);
       }
       renderHttpUrls();
+      renderHttpTopics();
     } else if (target.dataset.mappingField === "topic") {
       const topic = target.value.trim().replace(/^\/+|\/+$/g, "");
       const mapping = ensureUrlMapping(urlCfg, path, topic);
@@ -475,6 +568,7 @@
       const checkbox = row ? row.querySelector('input[data-mapping-field="enabled"]') : null;
       if (checkbox instanceof HTMLInputElement && !checkbox.checked) checkbox.checked = true;
       renderHttpUrls();
+      renderHttpTopics();
     }
   });
 
@@ -502,6 +596,7 @@
       }
       renderHttpUrls();
       renderHttpValues();
+      renderHttpTopics();
       setStatus(`Enabled ${rows.length} visible values`);
     });
   }
@@ -517,6 +612,7 @@
       urlCfg.values = urlCfg.values.filter((v) => !visiblePaths.has(String(v.path || "")));
       renderHttpUrls();
       renderHttpValues();
+      renderHttpTopics();
       setStatus(`Disabled ${visiblePaths.size} visible values`);
     });
   }

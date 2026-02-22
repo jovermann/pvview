@@ -245,6 +245,17 @@ th, td {
   min-width: 200px;
 }
 
+#httpTopicsTable td {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+#httpTopicsTable th:nth-child(3),
+#httpTopicsTable td:nth-child(3) {
+  width: 99%;
+}
+
 #httpValuesTable td:nth-child(4) input {
   width: 100%;
 }
