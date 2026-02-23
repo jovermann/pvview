@@ -1504,6 +1504,27 @@
     const c = charts.get(id);
     if (!c) return;
     const catalog = await fetchSeriesCatalog();
+    const catalogSet = new Set(catalog.map((s) => String(s)));
+    if (Array.isArray(c.series)) {
+      const before = c.series.length;
+      c.series = c.series.filter((s) => catalogSet.has(String(s)));
+      const removed = before - c.series.length;
+      if (removed > 0) {
+        appendConsoleLine(`panel ${id} pruned orphaned series removed=${removed}`);
+        if (c.legendEnabledBySeries && typeof c.legendEnabledBySeries === 'object') {
+          for (const key of Object.keys(c.legendEnabledBySeries)) {
+            if (!catalogSet.has(String(key))) {
+              delete c.legendEnabledBySeries[key];
+            }
+          }
+        }
+        if (c.kind === 'stat') {
+          refreshStat(id).catch((err) => console.error(err));
+        } else {
+          refreshChart(id).catch((err) => console.error(err));
+        }
+      }
+    }
     await ensureInverterNames(catalog);
     activeSeriesSelection = new Set(c.series);
 
