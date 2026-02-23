@@ -34,6 +34,7 @@
   const chartSettingsName = document.getElementById('chartSettingsName');
   const chartSettingsDots = document.getElementById('chartSettingsDots');
   const chartSettingsArea = document.getElementById('chartSettingsArea');
+  const chartSettingsSeriesList = document.getElementById('chartSettingsSeriesList');
   const statSettingsDialog = document.getElementById('statSettingsDialog');
   const statSettingsName = document.getElementById('statSettingsName');
   const statColumnsDialog = document.getElementById('statColumnsDialog');
@@ -44,6 +45,7 @@
   let activeSeriesSelection = null;
   let activeColumnsSelection = null;
   let activeSettingsChartId = null;
+  let chartSettingsSeriesDraft = [];
   let activeSettingsStatId = null;
   let activeColumnsStatId = null;
   let consolePanelId = null;
@@ -1555,7 +1557,28 @@
     chartSettingsName.value = c.label || '';
     chartSettingsDots.value = String(normalizeDotStyle(c.dotStyle));
     chartSettingsArea.value = String(normalizeAreaOpacity(c.areaOpacity));
+    chartSettingsSeriesDraft = Array.isArray(c.series) ? [...c.series] : [];
+    renderChartSettingsSeriesList();
     chartSettingsDialog.showModal();
+  }
+
+  function renderChartSettingsSeriesList() {
+    if (!(chartSettingsSeriesList instanceof HTMLElement)) return;
+    if (!Array.isArray(chartSettingsSeriesDraft) || chartSettingsSeriesDraft.length === 0) {
+      chartSettingsSeriesList.innerHTML = '<div class="series-item"><span>No series selected</span></div>';
+      return;
+    }
+    chartSettingsSeriesList.innerHTML = chartSettingsSeriesDraft.map((name, i) => `
+      <div class="series-item">
+        <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
+        <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
+        <span style="color:#6f7f93">${htmlEscape(String(name))}</span>
+        <span style="margin-left:auto;display:inline-flex;gap:6px">
+          <button type="button" class="icon-btn" data-action="chart-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button type="button" class="icon-btn" data-action="chart-series-down" data-index="${i}" ${i === chartSettingsSeriesDraft.length - 1 ? 'disabled' : ''}>↓</button>
+        </span>
+      </div>
+    `).join('');
   }
 
   function openStatSettingsDialog(id) {
@@ -1737,6 +1760,19 @@
       return;
     }
 
+    if (target.dataset.action === 'chart-series-up' || target.dataset.action === 'chart-series-down') {
+      const idx = Number(target.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= chartSettingsSeriesDraft.length) return;
+      const delta = target.dataset.action === 'chart-series-up' ? -1 : 1;
+      const other = idx + delta;
+      if (other < 0 || other >= chartSettingsSeriesDraft.length) return;
+      const tmp = chartSettingsSeriesDraft[idx];
+      chartSettingsSeriesDraft[idx] = chartSettingsSeriesDraft[other];
+      chartSettingsSeriesDraft[other] = tmp;
+      renderChartSettingsSeriesList();
+      return;
+    }
+
     if (target.dataset.action === 'remove-console') {
       appendConsoleLine('console removed');
       removePanel(target.dataset.id);
@@ -1784,17 +1820,20 @@
     c.label = String(chartSettingsName.value || '').trim() || null;
     c.dotStyle = normalizeDotStyle(chartSettingsDots.value);
     c.areaOpacity = normalizeAreaOpacity(chartSettingsArea.value);
+    c.series = Array.isArray(chartSettingsSeriesDraft) ? [...chartSettingsSeriesDraft] : [];
     appendConsoleLine(
       `chart ${activeSettingsChartId} settings updated dotStyle=${c.dotStyle} areaOpacity=${c.areaOpacity}`
     );
     updateTitle(activeSettingsChartId);
     refreshChart(activeSettingsChartId).catch((err) => console.error(err));
     activeSettingsChartId = null;
+    chartSettingsSeriesDraft = [];
     chartSettingsDialog.close();
   });
 
   document.getElementById('cancelChartSettings').addEventListener('click', () => {
     activeSettingsChartId = null;
+    chartSettingsSeriesDraft = [];
     chartSettingsDialog.close();
   });
 
@@ -1805,12 +1844,14 @@
     }
     const removeId = activeSettingsChartId;
     activeSettingsChartId = null;
+    chartSettingsSeriesDraft = [];
     chartSettingsDialog.close();
     removeChart(removeId);
   });
 
   chartSettingsDialog.addEventListener('close', () => {
     activeSettingsChartId = null;
+    chartSettingsSeriesDraft = [];
   });
 
   document.getElementById('statSettingsForm').addEventListener('submit', (e) => {
