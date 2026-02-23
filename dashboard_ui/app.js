@@ -1839,6 +1839,11 @@
   document.getElementById('closeDashboardManage').addEventListener('click', () => {
     dashboardManageDialog.close();
   });
+  document.getElementById('clearCurrentDashboard').addEventListener('click', () => {
+    appendConsoleLine(`clear dashboard requested panels=${charts.size}`);
+    clearAllCharts();
+    dashboardManageDialog.close();
+  });
 
   document.getElementById('saveDashboardForm').addEventListener('submit', (e) => {
     e.preventDefault();
