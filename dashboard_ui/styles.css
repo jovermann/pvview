@@ -339,6 +339,14 @@ main { padding: 2px; }
   justify-self: end;
 }
 
+.decimal-override-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 96px auto;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 2px;
+}
+
 menu {
   display: flex;
   justify-content: flex-end;
