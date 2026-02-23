@@ -1016,7 +1016,10 @@ class TimeSeriesDbAppender:
                     raise ValueError(f"Cannot encode value for series={series_name!r}")
 
                 channel_id = self._ensure_series_definition(f, series_name, format_id)
-                self.current_timestamp_ms = _append_timestamp_entry(f, self.current_timestamp_ms, int(timestamp_ms))
+                ts_int = int(timestamp_ms)
+                if self.current_timestamp_ms is not None and ts_int < self.current_timestamp_ms:
+                    ts_int = self.current_timestamp_ms
+                self.current_timestamp_ms = _append_timestamp_entry(f, self.current_timestamp_ms, ts_int)
                 if channel_id <= 0xEF:
                     f.write(bytes([channel_id]))
                 else:
@@ -1157,6 +1160,9 @@ def collect_to_tsdb(
             return 2
 
     def flush_batch(batch: list[tuple[int, str, Any]]) -> None:
+        if batch:
+            # MQTT callbacks and HTTP poll completion can race when enqueuing; sort to preserve timestamp order.
+            batch.sort(key=lambda item: int(item[0]))
         by_day: dict[datetime.date, list[tuple[int, str, Any]]] = {}
         for ts_ms, topic, value in batch:
             day = datetime.datetime.fromtimestamp(ts_ms / 1000.0, tz=datetime.timezone.utc).date()
@@ -1180,7 +1186,7 @@ def collect_to_tsdb(
         while True:
             now = time.monotonic()
             if http_urls and now >= next_http_poll:
-                http_events: list[tuple[int, str, Any]] = []
+                http_pending_values: list[tuple[str, Any]] = []
                 emitted = 0
                 for url_cfg in http_urls:
                     url_raw = str(url_cfg.get("url", "")).strip()
@@ -1197,7 +1203,6 @@ def collect_to_tsdb(
                         if verbose:
                             print(f"http fetch returned non-object JSON: {url}")
                         continue
-                    ts_ms = _quantize_timestamp_ms(int(time.time() * 1000), quantize_timestamps_ms)
                     values_raw = url_cfg.get("values", [])
                     values = values_raw if isinstance(values_raw, list) else []
                     for value_cfg in values:
@@ -1212,11 +1217,13 @@ def collect_to_tsdb(
                         if not topic_leaf:
                             continue
                         full_topic = f"{base_topic}/{topic_leaf}" if base_topic else topic_leaf
-                        http_events.append((ts_ms, full_topic, _value_from_http_text(flat[path])))
+                        http_pending_values.append((full_topic, _value_from_http_text(flat[path])))
                         emitted += 1
                     if verbose >= 2:
                         print(f"http fetched: {url} keys={len(flat)}")
-                if http_events:
+                if http_pending_values:
+                    ts_ms = _quantize_timestamp_ms(int(time.time() * 1000), quantize_timestamps_ms)
+                    http_events = [(ts_ms, topic, value) for topic, value in http_pending_values]
                     with lock:
                         queue.extend(http_events)
                 if verbose and http_urls:
@@ -2209,13 +2216,8 @@ def _dumps_collector_config_toml(
                 continue
             url = str(url_item.get("url", "")).strip()
             base_topic = str(url_item.get("base_topic", "")).strip()
-            if lines and lines[-1].strip() != "" and not has_block("[[http.urls]]", aliases=["[[http.sources]]"]):
-                lines.append("")
-            emit_item("[[http.urls]]", "[[http.urls]]", aliases=["[[http.sources]]"])
-            lines.append(f'url = {_quote_toml_string(url)}')
-            emit_item("base_topic", f'base_topic = {_quote_toml_string(base_topic)}', aliases=["topic_prefix"])
-
             values = url_item.get("values", [])
+            valid_values: list[tuple[str, str]] = []
             if isinstance(values, list):
                 for value_item in values:
                     if not isinstance(value_item, dict):
@@ -2224,6 +2226,15 @@ def _dumps_collector_config_toml(
                     topic = str(value_item.get("topic", "")).strip()
                     if not path:
                         continue
+                    valid_values.append((path, topic))
+            if not valid_values:
+                continue
+            if lines and lines[-1].strip() != "" and not has_block("[[http.urls]]", aliases=["[[http.sources]]"]):
+                lines.append("")
+            emit_item("[[http.urls]]", "[[http.urls]]", aliases=["[[http.sources]]"])
+            lines.append(f'url = {_quote_toml_string(url)}')
+            emit_item("base_topic", f'base_topic = {_quote_toml_string(base_topic)}', aliases=["topic_prefix"])
+            for path, topic in valid_values:
                     if lines and lines[-1].strip() != "" and not has_block("[[http.urls.values]]"):
                         lines.append("")
                     emit_item("[[http.urls.values]]", "[[http.urls.values]]")

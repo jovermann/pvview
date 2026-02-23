@@ -278,7 +278,29 @@
       </tr>
     `).join("");
     if (httpTopicsCountEl) {
-      httpTopicsCountEl.textContent = `${rows.length} topic${rows.length === 1 ? "" : "s"}`;
+      let emptyNames = 0;
+      const topicNameCounts = new Map();
+      for (const row of rows) {
+        const topicName = String(row.topicName || "").trim();
+        if (!topicName) {
+          emptyNames += 1;
+          continue;
+        }
+        topicNameCounts.set(topicName, (topicNameCounts.get(topicName) || 0) + 1);
+      }
+      let duplicateNames = 0;
+      const duplicateNameList = [];
+      for (const count of topicNameCounts.values()) {
+        if (count > 1) duplicateNames += 1;
+      }
+      for (const [name, count] of topicNameCounts.entries()) {
+        if (count > 1) duplicateNameList.push(name);
+      }
+      duplicateNameList.sort((a, b) => a.localeCompare(b));
+      httpTopicsCountEl.textContent =
+        `${rows.length} topic${rows.length === 1 ? "" : "s"}, ` +
+        `${emptyNames} empty, ${duplicateNames} duplicate name${duplicateNames === 1 ? "" : "s"}` +
+        (duplicateNameList.length ? `: ${duplicateNameList.join(", ")}` : "");
     }
     if (httpTopicsTableEl) {
       httpTopicsTableEl.querySelectorAll("th[data-sort-key]").forEach((th) => {

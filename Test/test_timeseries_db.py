@@ -335,10 +335,7 @@ def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):
     assert text.index("# c_data_dir") < text.index("data_dir = ")
     assert text.index("# c_quantize") < text.index("quantize_timestamps = ")
     assert text.index("# c_topics") < text.index("topics = ")
-    first_http = text.index("[[http.urls]]")
-    assert text.index("# c_http_block_1") < first_http
-    second_http = text.index("[[http.urls]]", first_http + 1)
-    assert text.index("# c_http_block_2") < second_http
+    assert "[[http.urls]]" not in text
     assert text.strip().endswith("# c_trailing_end_2")
 
 
@@ -386,7 +383,7 @@ def test_collector_config_preserves_comment_blocks_after_modify_write(tmp_path):
     assert text.index("# c_topics") < text.index("topics = [")
     assert '    "solar/ac/#",' in text
     assert '    "solar/dtu/#",' in text
-    assert text.index("# c_http_block_1") < text.index("[[http.urls]]")
+    assert "[[http.urls]]" not in text
     assert "poll_interval_ms = 5000" in text
 
 
