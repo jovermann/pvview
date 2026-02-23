@@ -406,6 +406,15 @@
     return unitForSuffix(parts[parts.length - 1]);
   }
 
+  function axisGroupKeyForSuffix(suffix) {
+    const raw = String(suffix || '');
+    const lower = raw.toLowerCase();
+    if (lower === 'power' || lower === 'p1' || lower === 'p2' || lower === 'p3') {
+      return 'power';
+    }
+    return raw;
+  }
+
   function isYieldSuffix(suffix) {
     return String(suffix || '').toLowerCase().startsWith('yield');
   }
@@ -827,7 +836,7 @@
       return {
         name,
         displayName: compactSeriesLabel(displaySeriesName(name), prefix),
-        axisKey: String(name).split('/').pop() || String(name),
+        axisKey: axisGroupKeyForSuffix(String(name).split('/').pop() || String(name)),
         points: breakLongGaps(points, 3600000),
         legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
         decimalPlaces: normalizeDecimalPlaces(data.decimalPlaces),
