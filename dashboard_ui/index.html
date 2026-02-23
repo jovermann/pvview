@@ -18,6 +18,7 @@
       </label>
       <button id="saveDashboard" class="btn">Save</button>
       <button id="manageDashboards" class="icon-gadget" title="Manage dashboards">⚙️</button>
+      <button id="manageVirtualSeries" class="btn">Virtual</button>
       <div class="range-controls">
         <button id="pageBack" class="btn" title="Shift window left by half range">&lt;</button>
         <button id="zoomIn" class="btn" title="Zoom in (2x)">+</button>
@@ -195,6 +196,19 @@
       <menu>
         <button id="cancelSaveDashboard" type="button" class="btn">Cancel</button>
         <button id="confirmSaveDashboard" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="virtualSeriesDialog" class="modal">
+    <form method="dialog" class="modal-content" id="virtualSeriesForm">
+      <h2>Virtual Series</h2>
+      <div id="virtualSeriesRows" class="series-list"></div>
+      <button id="addVirtualSeriesRow" type="button" class="btn">Add Virtual Series</button>
+      <datalist id="virtualSeriesCandidates"></datalist>
+      <menu>
+        <button id="cancelVirtualSeries" type="button" class="btn">Cancel</button>
+        <button id="saveVirtualSeries" value="default" class="btn accent">Save</button>
       </menu>
     </form>
   </dialog>

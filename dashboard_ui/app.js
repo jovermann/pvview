@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 3;
+  const FRONTEND_API_VERSION = 4;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -19,10 +19,14 @@
   const dashboardSelect = document.getElementById('dashboardSelect');
   const saveDashboardBtn = document.getElementById('saveDashboard');
   const manageDashboardsBtn = document.getElementById('manageDashboards');
+  const manageVirtualSeriesBtn = document.getElementById('manageVirtualSeries');
   const dashboardManageDialog = document.getElementById('dashboardManageDialog');
   const dashboardManageList = document.getElementById('dashboardManageList');
   const saveDashboardDialog = document.getElementById('saveDashboardDialog');
   const saveDashboardNameInput = document.getElementById('saveDashboardName');
+  const virtualSeriesDialog = document.getElementById('virtualSeriesDialog');
+  const virtualSeriesRows = document.getElementById('virtualSeriesRows');
+  const virtualSeriesCandidates = document.getElementById('virtualSeriesCandidates');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
@@ -64,6 +68,8 @@
   ];
   let settingsSaveTimer = null;
   let currentDashboardName = 'Default';
+  let virtualSeriesDefs = [];
+  let virtualSeriesDialogDraft = [];
 
   function htmlEscape(value) {
     return String(value)
@@ -582,6 +588,73 @@
       + `files=${Array.isArray(data.files) ? data.files.length : 0} elapsed=${Math.round(performance.now() - t0)}ms`
     );
     return data.series || [];
+  }
+
+  async function loadVirtualSeriesDefs() {
+    appendConsoleLine('virtual series load start');
+    const data = await apiJson('/virtual-series');
+    const defs = Array.isArray(data.virtualSeries) ? data.virtualSeries : [];
+    virtualSeriesDefs = defs
+      .filter((d) => d && typeof d === 'object')
+      .map((d) => ({
+        name: String(d.name || '').trim(),
+        left: String(d.left || '').trim(),
+        op: String(d.op || '').trim(),
+        right: String(d.right || '').trim(),
+      }))
+      .filter((d) => d.name && d.left && d.right && ['+', '-', '*', '/'].includes(d.op));
+    appendConsoleLine(`virtual series load done count=${virtualSeriesDefs.length}`);
+    return virtualSeriesDefs;
+  }
+
+  async function saveVirtualSeriesDefs(defs) {
+    appendConsoleLine(`virtual series save start count=${defs.length}`);
+    await apiJson('/virtual-series', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ virtualSeries: defs }),
+    });
+    virtualSeriesDefs = defs.map((d) => ({ ...d }));
+    appendConsoleLine(`virtual series save done count=${virtualSeriesDefs.length}`);
+  }
+
+  function renderVirtualSeriesRows() {
+    if (!(virtualSeriesRows instanceof HTMLElement)) return;
+    if (!virtualSeriesDialogDraft.length) {
+      virtualSeriesRows.innerHTML = '<div class="series-item"><span>No virtual series defined</span></div>';
+      return;
+    }
+    virtualSeriesRows.innerHTML = virtualSeriesDialogDraft.map((d, i) => `
+      <div class="virtual-row" data-index="${i}">
+        <input type="text" data-field="name" placeholder="name" value="${htmlEscape(d.name || '')}" />
+        <input type="text" data-field="left" placeholder="left series" list="virtualSeriesCandidates" value="${htmlEscape(d.left || '')}" />
+        <select data-field="op">
+          ${['+', '-', '*', '/'].map((op) => `<option value="${op}" ${d.op === op ? 'selected' : ''}>${op}</option>`).join('')}
+        </select>
+        <input type="text" data-field="right" placeholder="right series" list="virtualSeriesCandidates" value="${htmlEscape(d.right || '')}" />
+        <button type="button" class="icon-btn danger" data-action="delete-virtual-row" data-index="${i}">✕</button>
+      </div>
+    `).join('');
+  }
+
+  function addVirtualSeriesDraftRow() {
+    virtualSeriesDialogDraft.push({ name: '', left: '', op: '+', right: '' });
+    renderVirtualSeriesRows();
+  }
+
+  async function openVirtualSeriesDialog() {
+    await loadVirtualSeriesDefs();
+    const allNames = await fetchSeriesCatalog();
+    const virtualNames = new Set(virtualSeriesDefs.map((d) => d.name));
+    if (virtualSeriesCandidates) {
+      virtualSeriesCandidates.innerHTML = allNames
+        .filter((name) => typeof name === 'string' && !virtualNames.has(name))
+        .map((name) => `<option value="${htmlEscape(name)}"></option>`)
+        .join('');
+    }
+    virtualSeriesDialogDraft = virtualSeriesDefs.map((d) => ({ ...d }));
+    renderVirtualSeriesRows();
+    virtualSeriesDialog.showModal();
   }
 
   function updateDashboardDatalist() {
@@ -1873,6 +1946,79 @@
     saveDashboardDialog.close();
   });
 
+  if (virtualSeriesRows) {
+    virtualSeriesRows.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest('.virtual-row');
+      if (!(row instanceof HTMLElement)) return;
+      const idx = Number(row.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= virtualSeriesDialogDraft.length) return;
+      const field = target.dataset.field;
+      if (!field) return;
+      if (target instanceof HTMLInputElement) {
+        virtualSeriesDialogDraft[idx][field] = target.value;
+      } else if (target instanceof HTMLSelectElement) {
+        virtualSeriesDialogDraft[idx][field] = target.value;
+      }
+    });
+    virtualSeriesRows.addEventListener('click', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.dataset.action !== 'delete-virtual-row') return;
+      const idx = Number(target.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= virtualSeriesDialogDraft.length) return;
+      virtualSeriesDialogDraft.splice(idx, 1);
+      renderVirtualSeriesRows();
+    });
+  }
+
+  document.getElementById('addVirtualSeriesRow').addEventListener('click', () => {
+    addVirtualSeriesDraftRow();
+  });
+
+  document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
+    virtualSeriesDialog.close();
+  });
+
+  document.getElementById('virtualSeriesForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const defs = virtualSeriesDialogDraft
+      .map((d) => ({
+        name: String(d.name || '').trim(),
+        left: String(d.left || '').trim(),
+        op: String(d.op || '').trim(),
+        right: String(d.right || '').trim(),
+      }))
+      .filter((d) => d.name || d.left || d.right);
+    const seen = new Set();
+    for (const d of defs) {
+      if (!d.name || !d.left || !d.right || !['+', '-', '*', '/'].includes(d.op)) {
+        alert('Each virtual series row must have name, left series, operator, and right series.');
+        return;
+      }
+      if (seen.has(d.name)) {
+        alert(`Duplicate virtual series name: ${d.name}`);
+        return;
+      }
+      seen.add(d.name);
+    }
+    saveVirtualSeriesDefs(defs).then(() => {
+      virtualSeriesDialog.close();
+      refreshAllCharts('virtual-series-update').catch((err) => console.error(err));
+    }).catch((err) => {
+      console.error(err);
+      alert(`Failed to save virtual series: ${err.message || err}`);
+    });
+  });
+
+  manageVirtualSeriesBtn.addEventListener('click', () => {
+    openVirtualSeriesDialog().catch((err) => {
+      console.error(err);
+      alert(`Failed to open virtual series dialog: ${err.message || err}`);
+    });
+  });
+
   grid.on('resizestop', () => {
     charts.forEach((c) => {
       if (c.kind === 'chart' && c.instance) {
@@ -1960,6 +2106,7 @@
 
   async function bootstrap() {
     await verifyApiVersion();
+    await loadVirtualSeriesDefs();
     setRangeByPreset('2d');
     configureAutoRefresh();
     await refreshDashboardNames();

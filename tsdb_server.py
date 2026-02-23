@@ -6,6 +6,8 @@ API:
 - GET /series?start=<ts>&end=<ts>
 - GET /events?series=<name>&start=<ts>&end=<ts>&maxEvents=<n>
 - GET /stats?series=<name>&start=<ts>&end=<ts>
+- GET /virtual-series
+- PUT /virtual-series
 - GET /dashboards
 - GET /dashboards/<name>
 - PUT /dashboards/<name>
@@ -52,7 +54,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 3  # Increment when API endpoints or payload schemas change.
+API_VERSION = 4  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -103,6 +105,28 @@ class CachedTsdbFile:
 
 _TSDB_CACHE_LOCK = threading.Lock()
 _TSDB_FILE_CACHE: Dict[str, CachedTsdbFile] = {}
+
+
+@dataclass
+class VirtualSeriesDef:
+    name: str
+    left: str
+    op: str
+    right: str
+
+
+@dataclass
+class VirtualSeriesCacheEntry:
+    definition: Tuple[str, str, str, str]
+    left_sig: Tuple[Any, ...]
+    right_sig: Tuple[Any, ...]
+    events: List[Event]
+    decimal_places: int
+    files: List[str]
+
+
+_VIRTUAL_SERIES_CACHE_LOCK = threading.Lock()
+_VIRTUAL_SERIES_RESULT_CACHE: Dict[Tuple[str, str], VirtualSeriesCacheEntry] = {}
 
 
 def _ensure_available(data: bytes, offset: int, size: int, what: str) -> None:
@@ -607,6 +631,177 @@ def save_settings(data_dir: str, settings: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _virtual_series_file_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "virtual_series.json")
+
+
+def _normalize_virtual_series_def(obj: Any) -> Optional[VirtualSeriesDef]:
+    if not isinstance(obj, dict):
+        return None
+    name = str(obj.get("name", "")).strip()
+    left = str(obj.get("left", "")).strip()
+    op = str(obj.get("op", "")).strip()
+    right = str(obj.get("right", "")).strip()
+    if not name or not left or not right or op not in {"+", "-", "*", "/"}:
+        return None
+    return VirtualSeriesDef(name=name, left=left, op=op, right=right)
+
+
+def load_virtual_series_defs(data_dir: str) -> List[VirtualSeriesDef]:
+    path = _virtual_series_file_path(data_dir)
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    items = raw.get("virtualSeries", raw) if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+    defs: List[VirtualSeriesDef] = []
+    seen: set[str] = set()
+    for item in items:
+        d = _normalize_virtual_series_def(item)
+        if d is None or d.name in seen:
+            continue
+        seen.add(d.name)
+        defs.append(d)
+    return defs
+
+
+def save_virtual_series_defs(data_dir: str, defs: List[VirtualSeriesDef]) -> None:
+    path = _virtual_series_file_path(data_dir)
+    tmp = f"{path}.tmp"
+    payload = {
+        "virtualSeries": [
+            {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
+            for d in defs
+        ]
+    }
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    with _VIRTUAL_SERIES_CACHE_LOCK:
+        _VIRTUAL_SERIES_RESULT_CACHE.clear()
+
+
+def _all_tsdb_files(data_dir: str) -> List[str]:
+    try:
+        names = os.listdir(data_dir)
+    except OSError:
+        return []
+    files: List[str] = []
+    for name in names:
+        if name == "data.tsdb" or (name.startswith("data_") and name.endswith(".tsdb")):
+            path = os.path.join(data_dir, name)
+            if os.path.isfile(path):
+                files.append(path)
+    files.sort()
+    return files
+
+
+def _read_series_all_files(data_dir: str, series_name: str) -> Tuple[List[Event], int, List[str], Tuple[Any, ...]]:
+    events: List[Event] = []
+    max_decimal_places = 3
+    files_used: List[str] = []
+    signature_parts: List[Any] = []
+    for path in _all_tsdb_files(data_dir):
+        part = read_tsdb_events_for_series(path, series_name, 0, 2**63 - 1)
+        if part:
+            events.extend(part)
+            base = os.path.basename(path)
+            files_used.append(base)
+            signature_parts.append((base, len(part), part[-1].timestamp_ms))
+        fmt = get_series_format_id_in_file(path, series_name)
+        if is_numeric_format_id(fmt):
+            max_decimal_places = max(max_decimal_places, decimal_places_from_format_id(fmt))
+    events.sort(key=lambda e: e.timestamp_ms)
+    return events, max_decimal_places, files_used, tuple(signature_parts)
+
+
+def _compute_virtual_events(left_events: List[Event], right_events: List[Event], op: str) -> List[Event]:
+    result: List[Event] = []
+    i = 0
+    j = 0
+    while i < len(left_events) and j < len(right_events):
+        lt = left_events[i].timestamp_ms
+        rt = right_events[j].timestamp_ms
+        if lt < rt:
+            i += 1
+            continue
+        if rt < lt:
+            j += 1
+            continue
+        lv = left_events[i].value
+        rv = right_events[j].value
+        if isinstance(lv, (int, float)) and not isinstance(lv, bool) and isinstance(rv, (int, float)) and not isinstance(rv, bool):
+            a = float(lv)
+            b = float(rv)
+            out: Optional[float]
+            if op == "+":
+                out = a + b
+            elif op == "-":
+                out = a - b
+            elif op == "*":
+                out = a * b
+            elif op == "/":
+                out = None if b == 0 else (a / b)
+            else:
+                out = None
+            if out is not None and out == out and abs(out) != float("inf"):
+                result.append(Event(lt, out))
+        i += 1
+        j += 1
+    return result
+
+
+def _virtual_decimal_places(op: str, left_dp: int, right_dp: int) -> int:
+    if op in {"+", "-"}:
+        return max(left_dp, right_dp)
+    if op == "*":
+        return min(6, max(3, left_dp + right_dp))
+    if op == "/":
+        return max(3, left_dp)
+    return 3
+
+
+def _virtual_defs_map(data_dir: str) -> Dict[str, VirtualSeriesDef]:
+    return {d.name: d for d in load_virtual_series_defs(data_dir)}
+
+
+def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optional[Tuple[List[Event], int, List[str]]]:
+    defs = _virtual_defs_map(data_dir)
+    d = defs.get(series_name)
+    if d is None:
+        return None
+    left_events, left_dp, left_files, left_sig = _read_series_all_files(data_dir, d.left)
+    right_events, right_dp, right_files, right_sig = _read_series_all_files(data_dir, d.right)
+    cache_key = (os.path.abspath(data_dir), d.name)
+    definition = (d.name, d.left, d.op, d.right)
+    with _VIRTUAL_SERIES_CACHE_LOCK:
+        entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
+        if (
+            entry is not None
+            and entry.definition == definition
+            and entry.left_sig == left_sig
+            and entry.right_sig == right_sig
+        ):
+            return list(entry.events), entry.decimal_places, list(entry.files)
+    events = _compute_virtual_events(left_events, right_events, d.op)
+    decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
+    files = sorted(set(left_files + right_files))
+    cache_entry = VirtualSeriesCacheEntry(
+        definition=definition,
+        left_sig=left_sig,
+        right_sig=right_sig,
+        events=list(events),
+        decimal_places=decimal_places,
+        files=list(files),
+    )
+    with _VIRTUAL_SERIES_CACHE_LOCK:
+        _VIRTUAL_SERIES_RESULT_CACHE[cache_key] = cache_entry
+    return list(events), decimal_places, list(files)
+
+
 class TsdbRequestHandler(BaseHTTPRequestHandler):
     server_version = "TSDBServer/1.0"
 
@@ -697,6 +892,9 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             if path == "/stats":
                 self._handle_stats(params)
                 return
+            if path == "/virtual-series":
+                self._handle_virtual_series_get()
+                return
             if path == "/dashboards":
                 self._handle_dashboards_list()
                 return
@@ -731,6 +929,9 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/settings":
                 self._handle_settings_put()
+                return
+            if path == "/virtual-series":
+                self._handle_virtual_series_put()
                 return
             status, payload = build_error(404, "not_found", f"Unknown endpoint: {path}")
             self._send_json(status, payload)
@@ -797,6 +998,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         for path in files:
             for name in list_series_in_file(path):
                 names.add(name)
+        for d in load_virtual_series_defs(data_dir):
+            names.add(d.name)
 
         self._send_json(
             200,
@@ -830,12 +1033,18 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
-        for path in files:
-            events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
-            fmt = get_series_format_id_in_file(path, series)
-            if is_numeric_format_id(fmt):
-                d = decimal_places_from_format_id(fmt)
-                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+        virtual = get_virtual_series_events_cached(data_dir, series)
+        if virtual is not None:
+            all_events, max_decimal_places, virtual_files = virtual
+            events = [e for e in all_events if start_ms <= e.timestamp_ms <= end_ms]
+            files = [os.path.join(data_dir, f) for f in virtual_files]
+        else:
+            for path in files:
+                events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
+                fmt = get_series_format_id_in_file(path, series)
+                if is_numeric_format_id(fmt):
+                    d = decimal_places_from_format_id(fmt)
+                    max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
 
         events.sort(key=lambda e: e.timestamp_ms)
 
@@ -887,12 +1096,18 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
-        for path in files:
-            events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
-            fmt = get_series_format_id_in_file(path, series)
-            if is_numeric_format_id(fmt):
-                d = decimal_places_from_format_id(fmt)
-                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+        virtual = get_virtual_series_events_cached(data_dir, series)
+        if virtual is not None:
+            all_events, max_decimal_places, virtual_files = virtual
+            events = [e for e in all_events if start_ms <= e.timestamp_ms <= end_ms]
+            files = [os.path.join(data_dir, f) for f in virtual_files]
+        else:
+            for path in files:
+                events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
+                fmt = get_series_format_id_in_file(path, series)
+                if is_numeric_format_id(fmt):
+                    d = decimal_places_from_format_id(fmt)
+                    max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
         events.sort(key=lambda e: e.timestamp_ms)
 
         current_ts: Optional[int] = None
@@ -924,6 +1139,51 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 "files": [os.path.basename(p) for p in files],
             },
         )
+
+    def _handle_virtual_series_get(self) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+        defs = load_virtual_series_defs(data_dir)
+        self._send_json(
+            200,
+            {
+                "virtualSeries": [
+                    {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
+                    for d in defs
+                ]
+            },
+        )
+
+    def _handle_virtual_series_put(self) -> None:
+        data_dir = self.server.data_dir  # type: ignore[attr-defined]
+        length_raw = self.headers.get("Content-Length", "").strip()
+        if not length_raw:
+            raise ValueError("Missing Content-Length")
+        try:
+            length = int(length_raw)
+        except ValueError:
+            raise ValueError("Invalid Content-Length")
+        if length <= 0:
+            raise ValueError("Empty request body")
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            raise ValueError("Invalid JSON body")
+        items = payload.get("virtualSeries", payload) if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("virtualSeries payload must be a list")
+        defs: List[VirtualSeriesDef] = []
+        seen: set[str] = set()
+        for item in items:
+            d = _normalize_virtual_series_def(item)
+            if d is None:
+                raise ValueError("Each virtual series must include name,left,op,right with op in + - * /")
+            if d.name in seen:
+                raise ValueError(f"Duplicate virtual series name: {d.name}")
+            seen.add(d.name)
+            defs.append(d)
+        save_virtual_series_defs(data_dir, defs)
+        self._send_json(200, {"ok": True, "count": len(defs)})
 
     def _dashboard_name_from_path(self, path: str) -> str:
         raw = path[len("/dashboards/"):]

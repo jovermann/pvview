@@ -327,6 +327,18 @@ main { padding: 2px; }
   font-size: 13px;
 }
 
+.virtual-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.3fr) 64px minmax(180px, 1.3fr) auto;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 2px;
+}
+
+.virtual-row .icon-btn {
+  justify-self: end;
+}
+
 menu {
   display: flex;
   justify-content: flex-end;
