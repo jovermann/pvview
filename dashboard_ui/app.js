@@ -973,7 +973,14 @@
       appendConsoleLine(`chart ${id} request start series=${name}`);
       const data = await apiJson(`/events?${q}`);
       const displayRule = effectiveDisplayRuleForSeries(name, unitForSeriesName(name), data.decimalPlaces);
+      let latestTimestampMs;
       const points = (data.points || []).map((p) => {
+        const tsCandidate = Number(
+          Object.prototype.hasOwnProperty.call(p, 'end') ? p.end : p.timestamp
+        );
+        if (Number.isFinite(tsCandidate)) {
+          latestTimestampMs = tsCandidate;
+        }
         if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, roundNumeric(applyDisplayScale(p.value, displayRule))];
         return [p.timestamp, roundNumeric(applyDisplayScale(p.avg, displayRule))];
       });
@@ -1003,6 +1010,7 @@
         points: breakLongGaps(points, 3600000),
         legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
         displayRule,
+        latestTimestampMs: Number.isFinite(latestTimestampMs) ? latestTimestampMs : undefined,
         downsampled: !!data.downsampled,
       };
     }));
@@ -1033,6 +1041,9 @@
         if (maxValue === undefined || v > maxValue) maxValue = v;
         curValue = v;
         curTs = ts;
+      }
+      if (Number.isFinite(s.latestTimestampMs)) {
+        curTs = s.latestTimestampMs;
       }
       if (maxValue !== undefined) {
         maxByLegendName.set(s.displayName, maxValue);
