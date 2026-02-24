@@ -49,6 +49,7 @@
   let activeColumnsSelection = null;
   let activeSettingsChartId = null;
   let chartSettingsSeriesDraft = [];
+  let chartSettingsSeriesColorDraft = {};
   let activeSettingsStatId = null;
   let activeColumnsStatId = null;
   let consolePanelId = null;
@@ -68,8 +69,15 @@
     ['yieldtotal', 'kWh'],
   ]);
   const seriesPalette = [
-    '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
-    '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc',
+    '#71ac55',
+    '#ffd838',
+    '#5470e6',
+    '#ff6666',
+    '#73c0de',
+    '#3ba272',
+    '#fc8452',
+    '#9a60b4',
+    '#ea7ccc',
   ];
   let settingsSaveTimer = null;
   let currentDashboardName = 'Default';
@@ -1171,7 +1179,10 @@
       },
       yAxis: yAxes,
       series: seriesResponses.map((s, i) => {
-        const lineColor = seriesPalette[i % seriesPalette.length];
+        const overrideColor = (cfg.seriesColorByName && typeof cfg.seriesColorByName[s.name] === 'string')
+          ? String(cfg.seriesColorByName[s.name]).trim()
+          : '';
+        const lineColor = overrideColor || seriesPalette[i % seriesPalette.length];
         const seriesAreaStyle = areaOpacity > 0 ? {
           origin: 'auto',
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -1321,6 +1332,9 @@
       areaOpacity: initialAreaOpacity,
       yMin: optionalFiniteNumber(options.yMin),
       yMax: optionalFiniteNumber(options.yMax),
+      seriesColorByName: (options.seriesColorByName && typeof options.seriesColorByName === 'object')
+        ? { ...options.seriesColorByName }
+        : {},
       legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
       displayNameToSeries: new Map(),
       label: options.label || null,
@@ -1494,6 +1508,9 @@
         areaOpacity: normalizeAreaOpacity(c.areaOpacity),
         yMin: Number.isFinite(c.yMin) ? c.yMin : null,
         yMax: Number.isFinite(c.yMax) ? c.yMax : null,
+        seriesColorByName: (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+          ? { ...c.seriesColorByName }
+          : {},
         legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
         label: c.label || null,
       });
@@ -1548,6 +1565,9 @@
         areaOpacity: ch.areaOpacity !== undefined ? normalizeAreaOpacity(ch.areaOpacity) : 0.3,
         yMin: optionalFiniteNumber(ch.yMin),
         yMax: optionalFiniteNumber(ch.yMax),
+        seriesColorByName: (ch.seriesColorByName && typeof ch.seriesColorByName === 'object')
+          ? { ...ch.seriesColorByName }
+          : {},
         legendEnabledBySeries: (ch.legendEnabledBySeries && typeof ch.legendEnabledBySeries === 'object')
           ? { ...ch.legendEnabledBySeries }
           : {},
@@ -1643,6 +1663,13 @@
             }
           }
         }
+        if (c.seriesColorByName && typeof c.seriesColorByName === 'object') {
+          for (const key of Object.keys(c.seriesColorByName)) {
+            if (!catalogSet.has(String(key))) {
+              delete c.seriesColorByName[key];
+            }
+          }
+        }
         if (c.kind === 'stat') {
           refreshStat(id).catch((err) => console.error(err));
         } else {
@@ -1683,6 +1710,9 @@
     if (chartSettingsMin) chartSettingsMin.value = Number.isFinite(c.yMin) ? String(c.yMin) : '';
     if (chartSettingsMax) chartSettingsMax.value = Number.isFinite(c.yMax) ? String(c.yMax) : '';
     chartSettingsSeriesDraft = Array.isArray(c.series) ? [...c.series] : [];
+    chartSettingsSeriesColorDraft = (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+      ? { ...c.seriesColorByName }
+      : {};
     renderChartSettingsSeriesList();
     chartSettingsDialog.showModal();
   }
@@ -1697,6 +1727,20 @@
       <div class="series-item">
         <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
         <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
+        <span class="chart-color-row" title="Series color">
+          <button type="button" class="chart-color-box ${!String(chartSettingsSeriesColorDraft[String(name)] || '').trim() ? 'active auto' : 'auto'}" data-action="chart-series-color-set" data-series="${htmlEscape(String(name))}" data-color="" title="Auto"></button>
+          ${seriesPalette.map((color) => `
+            <button
+              type="button"
+              class="chart-color-box ${String(chartSettingsSeriesColorDraft[String(name)] || '').trim() === color ? 'active' : ''}"
+              data-action="chart-series-color-set"
+              data-series="${htmlEscape(String(name))}"
+              data-color="${htmlEscape(color)}"
+              title="${htmlEscape(color)}"
+              style="border-color:${htmlEscape(color)};background:${htmlEscape(rgbaFromHex(color, 0.3))}"
+            ></button>
+          `).join('')}
+        </span>
         <span style="margin-left:auto;display:inline-flex;gap:6px">
           <button type="button" class="icon-btn danger" data-action="chart-series-delete" data-index="${i}" title="Remove series">🗑️</button>
           <button type="button" class="icon-btn" data-action="chart-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
@@ -1824,6 +1868,17 @@
   document.addEventListener('click', (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
+    const colorActionEl = target.closest('[data-action="chart-series-color-set"]');
+    if (colorActionEl instanceof HTMLElement) {
+      const seriesName = String(colorActionEl.dataset.series || '');
+      const value = String(colorActionEl.dataset.color || '').trim();
+      if (seriesName) {
+        if (value) chartSettingsSeriesColorDraft[seriesName] = value;
+        else delete chartSettingsSeriesColorDraft[seriesName];
+      }
+      renderChartSettingsSeriesList();
+      return;
+    }
 
     if (target.matches('.preset')) {
       activePreset = target.dataset.range || null;
@@ -1973,6 +2028,11 @@
       ? parsedMax
       : null;
     c.series = Array.isArray(chartSettingsSeriesDraft) ? [...chartSettingsSeriesDraft] : [];
+    c.seriesColorByName = {};
+    for (const seriesName of c.series) {
+      const color = String(chartSettingsSeriesColorDraft[String(seriesName)] || '').trim();
+      if (color) c.seriesColorByName[String(seriesName)] = color;
+    }
     appendConsoleLine(
       `chart ${activeSettingsChartId} settings updated dotStyle=${c.dotStyle} areaOpacity=${c.areaOpacity}`
       + ` yMin=${c.yMin === null ? 'auto' : c.yMin} yMax=${c.yMax === null ? 'auto' : c.yMax}`
@@ -1981,12 +2041,14 @@
     refreshChart(activeSettingsChartId).catch((err) => console.error(err));
     activeSettingsChartId = null;
     chartSettingsSeriesDraft = [];
+    chartSettingsSeriesColorDraft = {};
     chartSettingsDialog.close();
   });
 
   document.getElementById('cancelChartSettings').addEventListener('click', () => {
     activeSettingsChartId = null;
     chartSettingsSeriesDraft = [];
+    chartSettingsSeriesColorDraft = {};
     chartSettingsDialog.close();
   });
 
@@ -1998,6 +2060,7 @@
     const removeId = activeSettingsChartId;
     activeSettingsChartId = null;
     chartSettingsSeriesDraft = [];
+    chartSettingsSeriesColorDraft = {};
     chartSettingsDialog.close();
     removeChart(removeId);
   });
@@ -2005,6 +2068,7 @@
   chartSettingsDialog.addEventListener('close', () => {
     activeSettingsChartId = null;
     chartSettingsSeriesDraft = [];
+    chartSettingsSeriesColorDraft = {};
   });
 
   document.getElementById('statSettingsForm').addEventListener('submit', (e) => {
