@@ -1661,13 +1661,24 @@
     activeColumnsStatId = id;
     const first = splitSeriesParentSuffix(c.series[0]);
     const catalog = await fetchSeriesCatalog();
+    const parents = new Set(
+      c.series
+        .map((name) => splitSeriesParentSuffix(name).parent)
+        .filter((p) => typeof p === 'string')
+    );
     const siblingSuffixes = Array.from(new Set(catalog
-      .filter((name) => {
-        if (!String(name).startsWith(first.parent)) return false;
-        const suffix = String(name).slice(first.parent.length);
-        return suffix.length > 0 && !suffix.includes('/');
+      .flatMap((name) => {
+        const s = String(name);
+        const matches = [];
+        for (const parent of parents) {
+          if (!s.startsWith(parent)) continue;
+          const suffix = s.slice(parent.length);
+          if (suffix.length > 0 && !suffix.includes('/')) {
+            matches.push(suffix);
+          }
+        }
+        return matches;
       })
-      .map((name) => String(name).slice(first.parent.length))
     )).sort();
     const defaults = (Array.isArray(c.columns) && c.columns.length)
       ? c.columns
