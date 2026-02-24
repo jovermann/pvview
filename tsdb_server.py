@@ -54,7 +54,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 6  # Increment when API endpoints or payload schemas change.
+API_VERSION = 7  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -1205,17 +1205,32 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_stats(self, params: Dict[str, List[str]]) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]
-
-        series = self._query_param(params, "series", required=True)
         start_raw = self._query_param(params, "start", required=True)
         end_raw = self._query_param(params, "end", required=True)
-        assert series is not None and start_raw is not None and end_raw is not None
+        series_values = [str(s) for s in params.get("series", []) if str(s)]
+        if not series_values:
+            raise ValueError("Missing required query parameter: series")
+        assert start_raw is not None and end_raw is not None
 
         start_ms = parse_timestamp(start_raw)
         end_ms = parse_timestamp(end_raw)
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
+        if len(series_values) == 1:
+            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms))
+            return
+        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms) for s in series_values]
+        self._send_json(
+            200,
+            {
+                "start": start_ms,
+                "end": end_ms,
+                "requestedSeries": series_values,
+                "stats": stats_list,
+            },
+        )
 
+    def _stats_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int) -> Dict[str, Any]:
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
@@ -1246,22 +1261,19 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 if max_value is None or v > max_value:
                     max_value = v
 
-        self._send_json(
-            200,
-            {
-                "series": series,
-                "start": start_ms,
-                "end": end_ms,
-                "count": len(events),
-                "numericCount": numeric_count,
-                "isNumeric": numeric_count == len(events) and len(events) > 0,
-                "currentTimestamp": current_ts,
-                "currentValue": current_value,
-                "maxValue": max_value,
-                "decimalPlaces": max_decimal_places,
-                "files": [os.path.basename(p) for p in files],
-            },
-        )
+        return {
+            "series": series,
+            "start": start_ms,
+            "end": end_ms,
+            "count": len(events),
+            "numericCount": numeric_count,
+            "isNumeric": numeric_count == len(events) and len(events) > 0,
+            "currentTimestamp": current_ts,
+            "currentValue": current_value,
+            "maxValue": max_value,
+            "decimalPlaces": max_decimal_places,
+            "files": [os.path.basename(p) for p in files],
+        }
 
     def _handle_virtual_series_get(self) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]

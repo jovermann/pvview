@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 6;
+  const FRONTEND_API_VERSION = 7;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -88,6 +88,7 @@
   let unitOverrideDefs = [];
   let unitOverrideDialogDraft = [];
   let lastForegroundRefreshMs = 0;
+  let refreshGetCallCount = 0;
 
   function htmlEscape(value) {
     return String(value)
@@ -325,6 +326,7 @@
     const ids = chartIds();
     const statPanelIds = statIds();
     const t0 = performance.now();
+    refreshGetCallCount = 0;
     appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} stats=${statPanelIds.length}`);
     const chartResults = await Promise.allSettled(ids.map((id) => refreshChart(id)));
     const statResults = await Promise.allSettled(statPanelIds.map((id) => refreshStat(id)));
@@ -337,7 +339,7 @@
       }
     });
     const elapsed = Math.round(performance.now() - t0);
-    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} stats=${statPanelIds.length} failed=${failed} elapsed=${elapsed}ms`);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -607,6 +609,7 @@
 
   async function apiJson(path, options = {}) {
     const method = String(options.method || 'GET').toUpperCase();
+    if (method === 'GET') refreshGetCallCount += 1;
     const t0 = performance.now();
     if (isApiTraceEnabled()) {
       appendConsoleLine(`api start ${method} ${path}`);
@@ -1239,22 +1242,40 @@
     const selectedColumns = Array.from(new Set(columns));
     const displayRowParents = cfg.series.map((s) => splitSeriesParentSuffix(displaySeriesName(s)).parent.replace(/\/$/, ''));
     const rowPrefix = displayPrefixForSeries(displayRowParents);
+    const allSiblingNames = [];
+    for (const seriesName of cfg.series) {
+      const parts = splitSeriesParentSuffix(seriesName);
+      for (const suffix of selectedColumns) {
+        allSiblingNames.push(`${parts.parent}${suffix}`);
+      }
+    }
+    const uniqueSiblingNames = Array.from(new Set(allSiblingNames));
+    const statsQ = new URLSearchParams({ start: String(start), end: String(end) });
+    for (const s of uniqueSiblingNames) statsQ.append('series', s);
+    const statsReqT0 = performance.now();
+    appendConsoleLine(`stat ${id} request start batch series=${uniqueSiblingNames.length}`);
+    const statsResp = await apiJson(`/stats?${statsQ}`);
+    const statsItems = Array.isArray(statsResp && statsResp.stats)
+      ? statsResp.stats
+      : ((statsResp && typeof statsResp.series === 'string') ? [statsResp] : []);
+    const statsBySeries = new Map(statsItems.filter((x) => x && typeof x === 'object' && typeof x.series === 'string').map((x) => [x.series, x]));
+    appendConsoleLine(
+      `stat ${id} request done batch series=${uniqueSiblingNames.length} returned=${statsItems.length} `
+      + `elapsed=${Math.round(performance.now() - statsReqT0)}ms`
+    );
+
     const rows = await Promise.all(cfg.series.map(async (seriesName) => {
       const parts = splitSeriesParentSuffix(seriesName);
       const rowCells = await Promise.all(selectedColumns.map(async (suffix) => {
         const siblingName = `${parts.parent}${suffix}`;
-        const q = new URLSearchParams({
+        const data = statsBySeries.get(siblingName) || {
           series: siblingName,
-          start: String(start),
-          end: String(end),
-        });
-        const reqT0 = performance.now();
-        appendConsoleLine(`stat ${id} request start series=${siblingName}`);
-        const data = await apiJson(`/stats?${q}`);
-        appendConsoleLine(
-          `stat ${id} request done series=${siblingName} count=${data.count || 0} files=${Array.isArray(data.files) ? data.files.length : 0} `
-          + `elapsed=${Math.round(performance.now() - reqT0)}ms`
-        );
+          count: 0,
+          files: [],
+          currentValue: null,
+          maxValue: null,
+          decimalPlaces: undefined,
+        };
         const displayRule = effectiveDisplayRuleForSeries(siblingName, unitForSeriesName(siblingName), data.decimalPlaces);
         const decimals = displayRule.decimals;
         const unit = displayRule.unit;
