@@ -339,9 +339,9 @@ main { padding: 2px; }
   justify-self: end;
 }
 
-.decimal-override-row {
+.unit-override-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 96px auto;
+  grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px auto auto auto;
   gap: 6px;
   align-items: center;
   padding: 4px 2px;

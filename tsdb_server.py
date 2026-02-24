@@ -54,7 +54,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 5  # Increment when API endpoints or payload schemas change.
+API_VERSION = 6  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -647,17 +647,20 @@ def _normalize_virtual_series_def(obj: Any) -> Optional[VirtualSeriesDef]:
     return VirtualSeriesDef(name=name, left=left, op=op, right=right)
 
 
-def _normalize_decimal_override_def(obj: Any) -> Optional[Dict[str, Any]]:
+def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(obj, dict):
         return None
     suffix = str(obj.get("suffix", "")).strip().strip("/")
+    unit = str(obj.get("unit", "")).strip()
+    scale_op = str(obj.get("scaleOp", obj.get("op", "*"))).strip()
     try:
+        scale = float(obj.get("scale", 1))
         decimals = int(obj.get("decimals"))
     except Exception:
         return None
-    if not suffix or decimals < 0 or decimals > 6:
+    if not suffix or decimals < 0 or decimals > 6 or scale <= 0 or scale_op not in {"*", "/"}:
         return None
-    return {"suffix": suffix, "decimals": decimals}
+    return {"suffix": suffix, "unit": unit, "scale": scale, "scaleOp": scale_op, "decimals": decimals}
 
 
 def load_virtual_series_config(data_dir: str) -> Tuple[List[VirtualSeriesDef], List[Dict[str, Any]]]:
@@ -671,7 +674,7 @@ def load_virtual_series_config(data_dir: str) -> Tuple[List[VirtualSeriesDef], L
         overrides_raw = []
     elif isinstance(raw, dict):
         items = raw.get("virtualSeries", [])
-        overrides_raw = raw.get("decimalOverrides", [])
+        overrides_raw = raw.get("unitOverrides", raw.get("decimalOverrides", []))
     else:
         return [], []
     if not isinstance(items, list):
@@ -689,7 +692,7 @@ def load_virtual_series_config(data_dir: str) -> Tuple[List[VirtualSeriesDef], L
     overrides: List[Dict[str, Any]] = []
     seen_suffixes: set[str] = set()
     for item in overrides_raw:
-        d = _normalize_decimal_override_def(item)
+        d = _normalize_unit_override_def(item)
         if d is None:
             continue
         key = str(d["suffix"]).lower()
@@ -705,7 +708,7 @@ def load_virtual_series_defs(data_dir: str) -> List[VirtualSeriesDef]:
     return defs
 
 
-def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], decimal_overrides: List[Dict[str, Any]]) -> None:
+def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit_overrides: List[Dict[str, Any]]) -> None:
     path = _virtual_series_file_path(data_dir)
     tmp = f"{path}.tmp"
     payload = {
@@ -713,9 +716,15 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], deci
             {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
             for d in defs
         ],
-        "decimalOverrides": [
-            {"suffix": str(d["suffix"]), "decimals": int(d["decimals"])}
-            for d in decimal_overrides
+        "unitOverrides": [
+            {
+                "suffix": str(d["suffix"]),
+                "unit": str(d.get("unit", "")),
+                "scale": float(d.get("scale", 1)),
+                "scaleOp": str(d.get("scaleOp", "*")),
+                "decimals": int(d["decimals"]),
+            }
+            for d in unit_overrides
         ],
     }
     with open(tmp, "w", encoding="utf-8") as f:
@@ -1197,7 +1206,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                     {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
                     for d in defs
                 ],
-                "decimalOverrides": overrides,
+                "unitOverrides": overrides,
             },
         )
 
@@ -1220,11 +1229,11 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("virtual-series payload must be an object")
         items = payload.get("virtualSeries", [])
-        overrides_raw = payload.get("decimalOverrides", [])
+        overrides_raw = payload.get("unitOverrides", payload.get("decimalOverrides", []))
         if not isinstance(items, list):
             raise ValueError("virtualSeries payload must be a list")
         if not isinstance(overrides_raw, list):
-            raise ValueError("decimalOverrides payload must be a list")
+            raise ValueError("unitOverrides payload must be a list")
         defs: List[VirtualSeriesDef] = []
         seen: set[str] = set()
         for item in items:
@@ -1238,16 +1247,16 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         overrides: List[Dict[str, Any]] = []
         seen_suffixes: set[str] = set()
         for item in overrides_raw:
-            d = _normalize_decimal_override_def(item)
+            d = _normalize_unit_override_def(item)
             if d is None:
-                raise ValueError("Each decimal override must include suffix and decimals (0..6)")
+                raise ValueError("Each unit override must include suffix, unit, scale, scaleOp, decimals")
             key = str(d["suffix"]).lower()
             if key in seen_suffixes:
-                raise ValueError(f"Duplicate decimal override suffix: {d['suffix']}")
+                raise ValueError(f"Duplicate unit override suffix: {d['suffix']}")
             seen_suffixes.add(key)
             overrides.append(d)
         save_virtual_series_config(data_dir, defs, overrides)
-        self._send_json(200, {"ok": True, "count": len(defs), "decimalOverrideCount": len(overrides)})
+        self._send_json(200, {"ok": True, "count": len(defs), "unitOverrideCount": len(overrides)})
 
     def _dashboard_name_from_path(self, path: str) -> str:
         raw = path[len("/dashboards/"):]

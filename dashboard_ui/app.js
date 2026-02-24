@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 5;
+  const FRONTEND_API_VERSION = 6;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -27,7 +27,7 @@
   const virtualSeriesDialog = document.getElementById('virtualSeriesDialog');
   const virtualSeriesRows = document.getElementById('virtualSeriesRows');
   const virtualSeriesCandidates = document.getElementById('virtualSeriesCandidates');
-  const decimalOverrideRows = document.getElementById('decimalOverrideRows');
+  const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
   const seriesSearch = document.getElementById('seriesSearch');
@@ -73,8 +73,8 @@
   let currentDashboardName = 'Default';
   let virtualSeriesDefs = [];
   let virtualSeriesDialogDraft = [];
-  let decimalOverrideDefs = [];
-  let decimalOverrideDialogDraft = [];
+  let unitOverrideDefs = [];
+  let unitOverrideDialogDraft = [];
   let lastForegroundRefreshMs = 0;
 
   function htmlEscape(value) {
@@ -476,29 +476,32 @@
     return Math.floor(n);
   }
 
-  function decimalOverrideForSeries(seriesName) {
+  function unitRuleForSeries(seriesName) {
     const raw = String(seriesName || '').replace(/^\/+|\/+$/g, '');
-    let best = null;
-    let bestLen = -1;
-    for (const item of (decimalOverrideDefs || [])) {
+    for (const item of (unitOverrideDefs || [])) {
       if (!item || typeof item !== 'object') continue;
       const suffix = String(item.suffix || '').replace(/^\/+|\/+$/g, '');
       if (!suffix) continue;
-      if (raw === suffix || raw.endsWith(`/${suffix}`)) {
-        if (suffix.length > bestLen) {
-          bestLen = suffix.length;
-          best = item;
-        }
-      }
+      if (raw === suffix || raw.endsWith(`/${suffix}`)) return item; // first rule from top wins
     }
-    if (!best) return null;
-    return normalizeDecimalPlaces(best.decimals);
+    return null;
   }
 
-  function effectiveDecimalPlacesForSeries(seriesName, defaultDecimals) {
-    const override = decimalOverrideForSeries(seriesName);
-    if (override !== null && override !== undefined) return override;
-    return normalizeDecimalPlaces(defaultDecimals);
+  function effectiveDisplayRuleForSeries(seriesName, defaultUnit, defaultDecimals) {
+    const r = unitRuleForSeries(seriesName);
+    return {
+      unit: (r && typeof r.unit === 'string' && r.unit) ? r.unit : defaultUnit,
+      scale: (r && Number.isFinite(Number(r.scale)) && Number(r.scale) > 0) ? Number(r.scale) : 1,
+      scaleOp: (r && String(r.scaleOp || '*') === '/') ? '/' : '*',
+      decimals: r ? normalizeDecimalPlaces(r.decimals) : normalizeDecimalPlaces(defaultDecimals),
+    };
+  }
+
+  function applyDisplayScale(value, rule) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return value;
+    const scale = Number(rule && rule.scale);
+    if (!Number.isFinite(scale) || scale <= 0) return value;
+    return (rule && rule.scaleOp === '/') ? (value / scale) : (value * scale);
   }
 
   function formatTooltipValue(value, decimals = 3) {
@@ -634,7 +637,7 @@
     appendConsoleLine('virtual series load start');
     const data = await apiJson('/virtual-series');
     const defs = Array.isArray(data.virtualSeries) ? data.virtualSeries : [];
-    const decs = Array.isArray(data.decimalOverrides) ? data.decimalOverrides : [];
+    const unitRules = Array.isArray(data.unitOverrides) ? data.unitOverrides : [];
     virtualSeriesDefs = defs
       .filter((d) => d && typeof d === 'object')
       .map((d) => ({
@@ -644,27 +647,30 @@
         right: String(d.right || '').trim(),
       }))
       .filter((d) => d.name && d.left && d.right && ['+', '-', '*', '/'].includes(d.op));
-    decimalOverrideDefs = decs
+    unitOverrideDefs = unitRules
       .filter((d) => d && typeof d === 'object')
       .map((d) => ({
         suffix: String(d.suffix || '').trim().replace(/^\/+|\/+$/g, ''),
+        unit: String(d.unit || '').trim(),
+        scale: Number.isFinite(Number(d.scale)) ? Number(d.scale) : 1,
+        scaleOp: (String(d.scaleOp || '*') === '/') ? '/' : '*',
         decimals: normalizeDecimalPlaces(d.decimals),
       }))
-      .filter((d) => d.suffix.length > 0 && d.decimals >= 0 && d.decimals <= 6);
-    appendConsoleLine(`virtual series load done count=${virtualSeriesDefs.length} decimalOverrides=${decimalOverrideDefs.length}`);
+      .filter((d) => d.suffix.length > 0 && d.decimals >= 0 && d.decimals <= 6 && d.scale > 0);
+    appendConsoleLine(`virtual series load done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length}`);
     return virtualSeriesDefs;
   }
 
-  async function saveVirtualSeriesDefs(defs, decimalOverrides) {
-    appendConsoleLine(`virtual series save start count=${defs.length} decimalOverrides=${decimalOverrides.length}`);
+  async function saveVirtualSeriesDefs(defs, unitOverrides) {
+    appendConsoleLine(`virtual series save start count=${defs.length} unitOverrides=${unitOverrides.length}`);
     await apiJson('/virtual-series', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ virtualSeries: defs, decimalOverrides }),
+      body: JSON.stringify({ virtualSeries: defs, unitOverrides }),
     });
     virtualSeriesDefs = defs.map((d) => ({ ...d }));
-    decimalOverrideDefs = decimalOverrides.map((d) => ({ ...d }));
-    appendConsoleLine(`virtual series save done count=${virtualSeriesDefs.length} decimalOverrides=${decimalOverrideDefs.length}`);
+    unitOverrideDefs = unitOverrides.map((d) => ({ ...d }));
+    appendConsoleLine(`virtual series save done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length}`);
   }
 
   function renderVirtualSeriesRows() {
@@ -691,26 +697,36 @@
     renderVirtualSeriesRows();
   }
 
-  function renderDecimalOverrideRows() {
-    if (!(decimalOverrideRows instanceof HTMLElement)) return;
-    if (!decimalOverrideDialogDraft.length) {
-      decimalOverrideRows.innerHTML = '<div class="series-item"><span>No decimal overrides defined</span></div>';
+  function renderUnitOverrideRows() {
+    if (!(unitOverrideRows instanceof HTMLElement)) return;
+    if (!unitOverrideDialogDraft.length) {
+      unitOverrideRows.innerHTML = '<div class="series-item"><span>No unit rules defined</span></div>';
       return;
     }
-    decimalOverrideRows.innerHTML = decimalOverrideDialogDraft.map((d, i) => `
-      <div class="decimal-override-row" data-index="${i}">
+    const unitOptions = ['', 'W', 'kW', 'Wh', 'kWh', 'MWh', 'V', 'A', '°C', 'm', '%'];
+    unitOverrideRows.innerHTML = unitOverrideDialogDraft.map((d, i) => `
+      <div class="unit-override-row" data-index="${i}">
         <input type="text" data-field="suffix" placeholder="series suffix (e.g. power or inv/power)" value="${htmlEscape(d.suffix || '')}" />
+        <select data-field="unit">
+          ${unitOptions.map((u) => `<option value="${htmlEscape(u)}" ${String(d.unit || '') === u ? 'selected' : ''}>${u || '(default)'}</option>`).join('')}
+        </select>
+        <input type="number" data-field="scale" min="0.000001" step="any" value="${htmlEscape(String(d.scale ?? 1))}" />
+        <select data-field="scaleOp">
+          ${['*', '/'].map((op) => `<option value="${op}" ${String(d.scaleOp || '*') === op ? 'selected' : ''}>${op}</option>`).join('')}
+        </select>
         <select data-field="decimals">
           ${[0,1,2,3,4,5,6].map((n) => `<option value="${n}" ${Number(d.decimals) === n ? 'selected' : ''}>${n}</option>`).join('')}
         </select>
-        <button type="button" class="icon-btn danger" data-action="delete-decimal-override-row" data-index="${i}">🗑️</button>
+        <button type="button" class="icon-btn" data-action="unit-override-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button type="button" class="icon-btn" data-action="unit-override-down" data-index="${i}" ${i === unitOverrideDialogDraft.length - 1 ? 'disabled' : ''}>↓</button>
+        <button type="button" class="icon-btn danger" data-action="delete-unit-override-row" data-index="${i}">🗑️</button>
       </div>
     `).join('');
   }
 
-  function addDecimalOverrideDraftRow() {
-    decimalOverrideDialogDraft.push({ suffix: '', decimals: 3 });
-    renderDecimalOverrideRows();
+  function addUnitOverrideDraftRow() {
+    unitOverrideDialogDraft.push({ suffix: '', unit: '', scale: 1, scaleOp: '*', decimals: 3 });
+    renderUnitOverrideRows();
   }
 
   async function openVirtualSeriesDialog() {
@@ -724,9 +740,9 @@
         .join('');
     }
     virtualSeriesDialogDraft = virtualSeriesDefs.map((d) => ({ ...d }));
-    decimalOverrideDialogDraft = decimalOverrideDefs.map((d) => ({ ...d }));
+    unitOverrideDialogDraft = unitOverrideDefs.map((d) => ({ ...d }));
     renderVirtualSeriesRows();
-    renderDecimalOverrideRows();
+    renderUnitOverrideRows();
     virtualSeriesDialog.showModal();
   }
 
@@ -956,19 +972,20 @@
       const reqT0 = performance.now();
       appendConsoleLine(`chart ${id} request start series=${name}`);
       const data = await apiJson(`/events?${q}`);
+      const displayRule = effectiveDisplayRuleForSeries(name, unitForSeriesName(name), data.decimalPlaces);
       const points = (data.points || []).map((p) => {
-        if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, roundNumeric(p.value)];
-        return [p.timestamp, roundNumeric(p.avg)];
+        if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, roundNumeric(applyDisplayScale(p.value, displayRule))];
+        return [p.timestamp, roundNumeric(applyDisplayScale(p.avg, displayRule))];
       });
       let legendMax;
       for (const p of (data.points || [])) {
         let candidate;
         if (Object.prototype.hasOwnProperty.call(p, 'max')) {
-          candidate = p.max;
+          candidate = applyDisplayScale(p.max, displayRule);
         } else if (Object.prototype.hasOwnProperty.call(p, 'value')) {
-          candidate = p.value;
+          candidate = applyDisplayScale(p.value, displayRule);
         } else if (Object.prototype.hasOwnProperty.call(p, 'avg')) {
-          candidate = p.avg;
+          candidate = applyDisplayScale(p.avg, displayRule);
         }
         if (typeof candidate !== 'number' || !Number.isFinite(candidate)) continue;
         if (legendMax === undefined || candidate > legendMax) {
@@ -985,7 +1002,7 @@
         axisKey: axisGroupKeyForSuffix(String(name).split('/').pop() || String(name)),
         points: breakLongGaps(points, 3600000),
         legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
-        decimalPlaces: effectiveDecimalPlacesForSeries(name, data.decimalPlaces),
+        displayRule,
         downsampled: !!data.downsampled,
       };
     }));
@@ -1027,7 +1044,7 @@
         curTsByLegendName.set(s.displayName, curTs);
       }
       if (!unitByLegendName.has(s.displayName)) {
-        unitByLegendName.set(s.displayName, unitForSuffix(s.axisKey));
+        unitByLegendName.set(s.displayName, s.displayRule.unit || unitForSuffix(s.axisKey));
       }
       if (!hideMaxByLegendName.has(s.displayName)) {
         hideMaxByLegendName.set(s.displayName, isYieldSuffix(s.axisKey));
@@ -1035,10 +1052,10 @@
         hideMaxByLegendName.set(s.displayName, true);
       }
       if (!decimalsByLegendName.has(s.displayName)) {
-        decimalsByLegendName.set(s.displayName, normalizeDecimalPlaces(s.decimalPlaces));
+        decimalsByLegendName.set(s.displayName, normalizeDecimalPlaces(s.displayRule.decimals));
       } else {
         const prev = decimalsByLegendName.get(s.displayName);
-        const next = normalizeDecimalPlaces(s.decimalPlaces);
+        const next = normalizeDecimalPlaces(s.displayRule.decimals);
         decimalsByLegendName.set(s.displayName, Math.max(prev, next));
       }
     }
@@ -1062,9 +1079,15 @@
     }
 
     const axisSlot = 36;
+    const axisUnitByKey = new Map();
+    for (const s of seriesResponses) {
+      if (!axisUnitByKey.has(s.axisKey) && s.displayRule && s.displayRule.unit) {
+        axisUnitByKey.set(s.axisKey, s.displayRule.unit);
+      }
+    }
     const yAxes = axisOrder.map((axisKey, i) => ({
       type: 'value',
-      name: axisLabelForSuffix(axisKey),
+      name: axisUnitByKey.has(axisKey) ? `${String(axisKey)} / ${axisUnitByKey.get(axisKey)}` : axisLabelForSuffix(axisKey),
       position: (i % 2 === 0) ? 'left' : 'right',
       offset: Math.floor(i / 2) * axisSlot,
       alignTicks: true,
@@ -1145,7 +1168,7 @@
           itemStyle: { color: lineColor },
           lineStyle: { width: 1, color: lineColor },
           areaStyle: seriesAreaStyle,
-          tooltip: { valueFormatter: (value) => formatTooltipValue(value, s.decimalPlaces) },
+          tooltip: { valueFormatter: (value) => formatTooltipValue(value, s.displayRule.decimals) },
           emphasis: { focus: 'series' },
           data: s.points,
         };
@@ -1192,8 +1215,9 @@
           `stat ${id} request done series=${siblingName} count=${data.count || 0} files=${Array.isArray(data.files) ? data.files.length : 0} `
           + `elapsed=${Math.round(performance.now() - reqT0)}ms`
         );
-        const decimals = effectiveDecimalPlacesForSeries(siblingName, data.decimalPlaces);
-        const unit = unitForSeriesName(siblingName);
+        const displayRule = effectiveDisplayRuleForSeries(siblingName, unitForSeriesName(siblingName), data.decimalPlaces);
+        const decimals = displayRule.decimals;
+        const unit = displayRule.unit;
         const currentValue = data.currentValue;
         const maxValue = data.maxValue;
         const missing = (currentValue === null || currentValue === undefined);
@@ -1202,10 +1226,10 @@
           currentText: missing
             ? ''
             : (typeof currentValue === 'number')
-            ? formatValueWithUnit(roundNumeric(currentValue), unit, decimals)
+            ? formatValueWithUnit(roundNumeric(applyDisplayScale(currentValue, displayRule)), unit, decimals)
             : String(currentValue),
           maxText: (typeof maxValue === 'number')
-            ? formatValueWithUnit(roundNumeric(maxValue), unit, decimals)
+            ? formatValueWithUnit(roundNumeric(applyDisplayScale(maxValue, displayRule)), unit, decimals)
             : '-',
           hideMax: missing || isYieldSuffix(suffix),
         };
@@ -2125,38 +2149,48 @@
       renderVirtualSeriesRows();
     });
   }
-  if (decimalOverrideRows) {
-    decimalOverrideRows.addEventListener('input', (ev) => {
+  if (unitOverrideRows) {
+    unitOverrideRows.addEventListener('input', (ev) => {
       const target = ev.target;
       if (!(target instanceof HTMLElement)) return;
-      const row = target.closest('.decimal-override-row');
+      const row = target.closest('.unit-override-row');
       if (!(row instanceof HTMLElement)) return;
       const idx = Number(row.dataset.index);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= decimalOverrideDialogDraft.length) return;
+      if (!Number.isInteger(idx) || idx < 0 || idx >= unitOverrideDialogDraft.length) return;
       const field = target.dataset.field;
       if (!field) return;
       if (target instanceof HTMLInputElement) {
-        decimalOverrideDialogDraft[idx][field] = target.value;
+        unitOverrideDialogDraft[idx][field] = (field === 'scale') ? Number(target.value) : target.value;
       } else if (target instanceof HTMLSelectElement) {
-        decimalOverrideDialogDraft[idx][field] = Number(target.value);
+        unitOverrideDialogDraft[idx][field] = (field === 'decimals') ? Number(target.value) : target.value;
       }
     });
-    decimalOverrideRows.addEventListener('click', (ev) => {
+    unitOverrideRows.addEventListener('click', (ev) => {
       const target = ev.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.dataset.action !== 'delete-decimal-override-row') return;
       const idx = Number(target.dataset.index);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= decimalOverrideDialogDraft.length) return;
-      decimalOverrideDialogDraft.splice(idx, 1);
-      renderDecimalOverrideRows();
+      if (!Number.isInteger(idx) || idx < 0 || idx >= unitOverrideDialogDraft.length) return;
+      if (target.dataset.action === 'delete-unit-override-row') {
+        unitOverrideDialogDraft.splice(idx, 1);
+        renderUnitOverrideRows();
+        return;
+      }
+      if (target.dataset.action === 'unit-override-up' || target.dataset.action === 'unit-override-down') {
+        const other = idx + (target.dataset.action === 'unit-override-up' ? -1 : 1);
+        if (other < 0 || other >= unitOverrideDialogDraft.length) return;
+        const tmp = unitOverrideDialogDraft[idx];
+        unitOverrideDialogDraft[idx] = unitOverrideDialogDraft[other];
+        unitOverrideDialogDraft[other] = tmp;
+        renderUnitOverrideRows();
+      }
     });
   }
 
   document.getElementById('addVirtualSeriesRow').addEventListener('click', () => {
     addVirtualSeriesDraftRow();
   });
-  document.getElementById('addDecimalOverrideRow').addEventListener('click', () => {
-    addDecimalOverrideDraftRow();
+  document.getElementById('addUnitOverrideRow').addEventListener('click', () => {
+    addUnitOverrideDraftRow();
   });
 
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
@@ -2185,9 +2219,12 @@
       }
       seen.add(d.name);
     }
-    const overrides = decimalOverrideDialogDraft
+    const overrides = unitOverrideDialogDraft
       .map((d) => ({
         suffix: String(d.suffix || '').trim().replace(/^\/+|\/+$/g, ''),
+        unit: String(d.unit || '').trim(),
+        scale: Number(d.scale),
+        scaleOp: String(d.scaleOp || '*') === '/' ? '/' : '*',
         decimals: normalizeDecimalPlaces(d.decimals),
       }))
       .filter((d) => d.suffix);
@@ -2195,11 +2232,15 @@
     for (const d of overrides) {
       const key = d.suffix.toLowerCase();
       if (seenSuffixes.has(key)) {
-        alert(`Duplicate decimal override suffix: ${d.suffix}`);
+        alert(`Duplicate unit rule suffix: ${d.suffix}`);
+        return;
+      }
+      if (!Number.isFinite(d.scale) || d.scale <= 0) {
+        alert(`Invalid scale for ${d.suffix}`);
         return;
       }
       if (d.decimals < 0 || d.decimals > 6) {
-        alert(`Invalid decimal override digits for ${d.suffix}: ${d.decimals}`);
+        alert(`Invalid decimals for ${d.suffix}: ${d.decimals}`);
         return;
       }
       seenSuffixes.add(key);
@@ -2221,7 +2262,7 @@
   });
   virtualSeriesDialog.addEventListener('close', () => {
     virtualSeriesDialogDraft = [];
-    decimalOverrideDialogDraft = [];
+    unitOverrideDialogDraft = [];
   });
 
   grid.on('resizestop', () => {
