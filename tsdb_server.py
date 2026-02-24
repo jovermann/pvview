@@ -810,6 +810,43 @@ def _compute_virtual_events(left_events: List[Event], right_events: List[Event],
     return result
 
 
+def _parse_virtual_constant(value: str) -> Optional[float]:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    try:
+        n = float(s)
+    except (TypeError, ValueError):
+        return None
+    if n != n or abs(n) == float("inf"):
+        return None
+    return n
+
+
+def _compute_virtual_events_with_constant(events: List[Event], constant: float, op: str, constant_on_left: bool) -> List[Event]:
+    result: List[Event] = []
+    for ev in events:
+        v = ev.value
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        a = constant if constant_on_left else float(v)
+        b = float(v) if constant_on_left else constant
+        out: Optional[float]
+        if op == "+":
+            out = a + b
+        elif op == "-":
+            out = a - b
+        elif op == "*":
+            out = a * b
+        elif op == "/":
+            out = None if b == 0 else (a / b)
+        else:
+            out = None
+        if out is not None and out == out and abs(out) != float("inf"):
+            result.append(Event(ev.timestamp_ms, out))
+    return result
+
+
 def _virtual_decimal_places(op: str, left_dp: int, right_dp: int) -> int:
     if op in {"+", "-"}:
         return max(left_dp, right_dp)
@@ -829,8 +866,27 @@ def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optiona
     d = defs.get(series_name)
     if d is None:
         return None
-    left_events, left_dp, left_files, left_sig = _read_series_all_files(data_dir, d.left)
-    right_events, right_dp, right_files, right_sig = _read_series_all_files(data_dir, d.right)
+    left_const = _parse_virtual_constant(d.left)
+    right_const = _parse_virtual_constant(d.right)
+    left_is_const = left_const is not None
+    right_is_const = right_const is not None
+    if left_is_const and right_is_const:
+        return [], 3, []
+    if left_is_const:
+        right_events, right_dp, right_files, right_sig = _read_series_all_files(data_dir, d.right)
+        left_events = []
+        left_dp = 3
+        left_files = []
+        left_sig = ("const", left_const)
+    else:
+        left_events, left_dp, left_files, left_sig = _read_series_all_files(data_dir, d.left)
+    if right_is_const:
+        right_events = []
+        right_dp = 3
+        right_files = []
+        right_sig = ("const", right_const)
+    elif not left_is_const:
+        right_events, right_dp, right_files, right_sig = _read_series_all_files(data_dir, d.right)
     cache_key = (os.path.abspath(data_dir), d.name)
     definition = (d.name, d.left, d.op, d.right)
     with _VIRTUAL_SERIES_CACHE_LOCK:
@@ -842,7 +898,12 @@ def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optiona
             and entry.right_sig == right_sig
         ):
             return list(entry.events), entry.decimal_places, list(entry.files)
-    events = _compute_virtual_events(left_events, right_events, d.op)
+    if left_is_const:
+        events = _compute_virtual_events_with_constant(right_events, float(left_const), d.op, True)
+    elif right_is_const:
+        events = _compute_virtual_events_with_constant(left_events, float(right_const), d.op, False)
+    else:
+        events = _compute_virtual_events(left_events, right_events, d.op)
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     files = sorted(set(left_files + right_files))
     cache_entry = VirtualSeriesCacheEntry(

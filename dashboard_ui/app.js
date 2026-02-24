@@ -753,8 +753,13 @@
     const allNames = await fetchSeriesCatalog();
     const virtualNames = new Set(virtualSeriesDefs.map((d) => d.name));
     if (virtualSeriesCandidates) {
-      virtualSeriesCandidates.innerHTML = allNames
-        .filter((name) => typeof name === 'string' && !virtualNames.has(name))
+      virtualSeriesCandidates.innerHTML = [
+        ...allNames.filter((name) => typeof name === 'string' && !virtualNames.has(name)),
+        '0',
+        '1',
+      ]
+        .map((name) => String(name))
+        .filter((name, idx, arr) => arr.indexOf(name) === idx)
         .map((name) => `<option value="${htmlEscape(name)}"></option>`)
         .join('');
     }
