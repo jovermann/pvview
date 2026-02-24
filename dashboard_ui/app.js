@@ -75,6 +75,7 @@
   let virtualSeriesDialogDraft = [];
   let decimalOverrideDefs = [];
   let decimalOverrideDialogDraft = [];
+  let lastForegroundRefreshMs = 0;
 
   function htmlEscape(value) {
     return String(value)
@@ -133,6 +134,15 @@
 
   function nowMs() {
     return Date.now();
+  }
+
+  function refreshOnForeground(reason) {
+    if (document.hidden) return;
+    const t = nowMs();
+    if ((t - lastForegroundRefreshMs) < 1500) return;
+    lastForegroundRefreshMs = t;
+    appendConsoleLine(`foreground refresh trigger reason=${reason}`);
+    refreshAllCharts(`foreground-${reason}`).catch((err) => console.error(err));
   }
 
   function alignedNowMs(stepMs) {
@@ -2228,6 +2238,18 @@
         c.instance.resize();
       }
     });
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      refreshOnForeground('visibility');
+    }
+  });
+  window.addEventListener('focus', () => {
+    refreshOnForeground('focus');
+  });
+  window.addEventListener('pageshow', () => {
+    refreshOnForeground('pageshow');
   });
 
   startInput.addEventListener('change', () => {
