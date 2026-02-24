@@ -40,6 +40,7 @@
   const chartSettingsSeriesList = document.getElementById('chartSettingsSeriesList');
   const statSettingsDialog = document.getElementById('statSettingsDialog');
   const statSettingsName = document.getElementById('statSettingsName');
+  const statSettingsSeriesList = document.getElementById('statSettingsSeriesList');
   const statColumnsDialog = document.getElementById('statColumnsDialog');
   const columnsList = document.getElementById('columnsList');
   const columnsSearch = document.getElementById('columnsSearch');
@@ -50,6 +51,7 @@
   let activeSettingsChartId = null;
   let chartSettingsSeriesDraft = [];
   let chartSettingsSeriesColorDraft = {};
+  let statSettingsSeriesDraft = [];
   let activeSettingsStatId = null;
   let activeColumnsStatId = null;
   let consolePanelId = null;
@@ -1755,7 +1757,28 @@
     if (!c || c.kind !== 'stat') return;
     activeSettingsStatId = id;
     statSettingsName.value = c.label || '';
+    statSettingsSeriesDraft = Array.isArray(c.series) ? [...c.series] : [];
+    renderStatSettingsSeriesList();
     statSettingsDialog.showModal();
+  }
+
+  function renderStatSettingsSeriesList() {
+    if (!(statSettingsSeriesList instanceof HTMLElement)) return;
+    if (!Array.isArray(statSettingsSeriesDraft) || statSettingsSeriesDraft.length === 0) {
+      statSettingsSeriesList.innerHTML = '<div class="series-item"><span>No series selected</span></div>';
+      return;
+    }
+    statSettingsSeriesList.innerHTML = statSettingsSeriesDraft.map((name, i) => `
+      <div class="series-item">
+        <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
+        <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
+        <span style="margin-left:auto;display:inline-flex;gap:6px">
+          <button type="button" class="icon-btn danger" data-action="stat-series-delete" data-index="${i}" title="Remove row">🗑️</button>
+          <button type="button" class="icon-btn" data-action="stat-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button type="button" class="icon-btn" data-action="stat-series-down" data-index="${i}" ${i === statSettingsSeriesDraft.length - 1 ? 'disabled' : ''}>↓</button>
+        </span>
+      </div>
+    `).join('');
   }
 
   async function openStatColumnsDialog(id) {
@@ -1972,6 +1995,27 @@
       return;
     }
 
+    if (target.dataset.action === 'stat-series-up' || target.dataset.action === 'stat-series-down') {
+      const idx = Number(target.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= statSettingsSeriesDraft.length) return;
+      const delta = target.dataset.action === 'stat-series-up' ? -1 : 1;
+      const other = idx + delta;
+      if (other < 0 || other >= statSettingsSeriesDraft.length) return;
+      const tmp = statSettingsSeriesDraft[idx];
+      statSettingsSeriesDraft[idx] = statSettingsSeriesDraft[other];
+      statSettingsSeriesDraft[other] = tmp;
+      renderStatSettingsSeriesList();
+      return;
+    }
+
+    if (target.dataset.action === 'stat-series-delete') {
+      const idx = Number(target.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= statSettingsSeriesDraft.length) return;
+      statSettingsSeriesDraft.splice(idx, 1);
+      renderStatSettingsSeriesList();
+      return;
+    }
+
     if (target.dataset.action === 'remove-console') {
       appendConsoleLine('console removed');
       removePanel(target.dataset.id);
@@ -2083,14 +2127,18 @@
       return;
     }
     c.label = String(statSettingsName.value || '').trim() || null;
-    appendConsoleLine(`stat ${activeSettingsStatId} settings updated`);
+    c.series = Array.isArray(statSettingsSeriesDraft) ? [...statSettingsSeriesDraft] : [];
+    appendConsoleLine(`stat ${activeSettingsStatId} settings updated rows=${c.series.length}`);
     updateTitle(activeSettingsStatId);
+    refreshStat(activeSettingsStatId).catch((err) => console.error(err));
     activeSettingsStatId = null;
+    statSettingsSeriesDraft = [];
     statSettingsDialog.close();
   });
 
   document.getElementById('cancelStatSettings').addEventListener('click', () => {
     activeSettingsStatId = null;
+    statSettingsSeriesDraft = [];
     statSettingsDialog.close();
   });
 
@@ -2101,12 +2149,14 @@
     }
     const removeId = activeSettingsStatId;
     activeSettingsStatId = null;
+    statSettingsSeriesDraft = [];
     statSettingsDialog.close();
     removePanel(removeId);
   });
 
   statSettingsDialog.addEventListener('close', () => {
     activeSettingsStatId = null;
+    statSettingsSeriesDraft = [];
   });
 
   document.getElementById('statColumnsForm').addEventListener('submit', (e) => {
