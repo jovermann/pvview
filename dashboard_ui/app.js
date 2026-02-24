@@ -1697,7 +1697,6 @@
       <div class="series-item">
         <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
         <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
-        <span style="color:#6f7f93">${htmlEscape(String(name))}</span>
         <span style="margin-left:auto;display:inline-flex;gap:6px">
           <button type="button" class="icon-btn danger" data-action="chart-series-delete" data-index="${i}" title="Remove series">🗑️</button>
           <button type="button" class="icon-btn" data-action="chart-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
