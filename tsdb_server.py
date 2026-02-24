@@ -5,6 +5,7 @@ API:
 - GET /health
 - GET /series?start=<ts>&end=<ts>
 - GET /events?series=<name>&start=<ts>&end=<ts>&maxEvents=<n>
+  (or repeated series params for batched response)
 - GET /stats?series=<name>&start=<ts>&end=<ts>
 - GET /virtual-series
 - PUT /virtual-series
@@ -54,7 +55,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 7  # Increment when API endpoints or payload schemas change.
+API_VERSION = 8  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -1136,13 +1137,13 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_events(self, params: Dict[str, List[str]]) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]
-
-        series = self._query_param(params, "series", required=True)
+        series_values = [str(s) for s in params.get("series", []) if str(s)]
+        if not series_values:
+            raise ValueError("Missing required query parameter: series")
         start_raw = self._query_param(params, "start", required=True)
         end_raw = self._query_param(params, "end", required=True)
         max_events_raw = self._query_param(params, "maxEvents", required=True)
-
-        assert series is not None and start_raw is not None and end_raw is not None and max_events_raw is not None
+        assert start_raw is not None and end_raw is not None and max_events_raw is not None
 
         start_ms = parse_timestamp(start_raw)
         end_ms = parse_timestamp(end_raw)
@@ -1153,6 +1154,22 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if max_events <= 0:
             raise ValueError("maxEvents must be > 0")
 
+        if len(series_values) == 1:
+            self._send_json(200, self._events_for_series(data_dir, series_values[0], start_ms, end_ms, max_events))
+            return
+        items = [self._events_for_series(data_dir, s, start_ms, end_ms, max_events) for s in series_values]
+        self._send_json(
+            200,
+            {
+                "start": start_ms,
+                "end": end_ms,
+                "requestedMaxEvents": max_events,
+                "requestedSeries": series_values,
+                "events": items,
+            },
+        )
+
+    def _events_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int, max_events: int) -> Dict[str, Any]:
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
@@ -1181,11 +1198,10 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 decimal_places=max_decimal_places if max_decimal_places is not None else 3,
             )
         else:
-            # Non-numeric series cannot be aggregated with min/avg/max.
             downsampled = False
             points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events[:max_events]]
 
-        response = {
+        response: Dict[str, Any] = {
             "series": series,
             "start": start_ms,
             "end": end_ms,
@@ -1197,11 +1213,9 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         }
         if max_decimal_places is not None:
             response["decimalPlaces"] = max_decimal_places
-
         if not all_numeric and len(events) > max_events:
             response["note"] = "Series is non-numeric; returned first maxEvents without min/avg/max aggregation."
-
-        self._send_json(200, response)
+        return response
 
     def _handle_stats(self, params: Dict[str, List[str]]) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]

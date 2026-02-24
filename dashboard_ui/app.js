@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 7;
+  const FRONTEND_API_VERSION = 8;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -989,16 +989,30 @@
     const maxEvents = 1200;
     const displaySeries = cfg.series.map((s) => displaySeriesName(s));
     const prefix = displayPrefixForSeries(displaySeries);
+    const batchQ = new URLSearchParams({
+      start: String(start),
+      end: String(end),
+      maxEvents: String(maxEvents),
+    });
+    for (const name of cfg.series) batchQ.append('series', name);
+    const batchReqT0 = performance.now();
+    appendConsoleLine(`chart ${id} request start batch series=${cfg.series.length}`);
+    const batchResp = await apiJson(`/events?${batchQ}`);
+    const eventItems = Array.isArray(batchResp && batchResp.events)
+      ? batchResp.events
+      : ((batchResp && typeof batchResp.series === 'string') ? [batchResp] : []);
+    const eventsBySeries = new Map(eventItems.filter((x) => x && typeof x === 'object' && typeof x.series === 'string').map((x) => [x.series, x]));
+    appendConsoleLine(
+      `chart ${id} request done batch series=${cfg.series.length} returned=${eventItems.length} `
+      + `elapsed=${Math.round(performance.now() - batchReqT0)}ms`
+    );
     const seriesResponses = await Promise.all(cfg.series.map(async (name) => {
-      const q = new URLSearchParams({
+      const data = eventsBySeries.get(name) || {
         series: name,
-        start: String(start),
-        end: String(end),
-        maxEvents: String(maxEvents),
-      });
-      const reqT0 = performance.now();
-      appendConsoleLine(`chart ${id} request start series=${name}`);
-      const data = await apiJson(`/events?${q}`);
+        points: [],
+        downsampled: false,
+        files: [],
+      };
       const displayRule = effectiveDisplayRuleForSeries(name, unitForSeriesName(name), data.decimalPlaces);
       let latestTimestampMs;
       const points = (data.points || []).map((p) => {
@@ -1027,8 +1041,8 @@
         }
       }
       appendConsoleLine(
-        `chart ${id} request done series=${name} points=${points.length} downsampled=${!!data.downsampled} `
-        + `files=${Array.isArray(data.files) ? data.files.length : 0} elapsed=${Math.round(performance.now() - reqT0)}ms`
+        `chart ${id} batch item series=${name} points=${points.length} downsampled=${!!data.downsampled} `
+        + `files=${Array.isArray(data.files) ? data.files.length : 0}`
       );
       return {
         name,
