@@ -35,6 +35,8 @@
   const chartSettingsName = document.getElementById('chartSettingsName');
   const chartSettingsDots = document.getElementById('chartSettingsDots');
   const chartSettingsArea = document.getElementById('chartSettingsArea');
+  const chartSettingsMin = document.getElementById('chartSettingsMin');
+  const chartSettingsMax = document.getElementById('chartSettingsMax');
   const chartSettingsSeriesList = document.getElementById('chartSettingsSeriesList');
   const statSettingsDialog = document.getElementById('statSettingsDialog');
   const statSettingsName = document.getElementById('statSettingsName');
@@ -464,6 +466,13 @@
     return Math.round(n * 10) / 10;
   }
 
+  function optionalFiniteNumber(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string' && value.trim() === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
   function roundNumeric(value) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return value;
     return Math.round(value * 1_000_000) / 1_000_000;
@@ -703,7 +712,7 @@
       unitOverrideRows.innerHTML = '<div class="series-item"><span>No unit rules defined</span></div>';
       return;
     }
-    const unitOptions = ['', 'W', 'kW', 'Wh', 'kWh', 'MWh', 'V', 'A', '°C', 'm', '%'];
+    const unitOptions = ['', 'W', 'kW', 'Wh', 'kWh', 'MWh', 'V', 'A', 'Hz', '°C', 'm', '%'];
     unitOverrideRows.innerHTML = unitOverrideDialogDraft.map((d, i) => `
       <div class="unit-override-row" data-index="${i}">
         <input type="text" data-field="suffix" placeholder="series suffix (e.g. power or inv/power)" value="${htmlEscape(d.suffix || '')}" />
@@ -1101,6 +1110,8 @@
       name: axisUnitByKey.has(axisKey) ? `${String(axisKey)} / ${axisUnitByKey.get(axisKey)}` : axisLabelForSuffix(axisKey),
       position: (i % 2 === 0) ? 'left' : 'right',
       offset: Math.floor(i / 2) * axisSlot,
+      min: Number.isFinite(cfg.yMin) ? cfg.yMin : null,
+      max: Number.isFinite(cfg.yMax) ? cfg.yMax : null,
       alignTicks: true,
       axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
       axisLabel: { color: '#aebbc9' },
@@ -1308,6 +1319,8 @@
       series: [...initialSeries],
       dotStyle: initialDotStyle,
       areaOpacity: initialAreaOpacity,
+      yMin: optionalFiniteNumber(options.yMin),
+      yMax: optionalFiniteNumber(options.yMax),
       legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
       displayNameToSeries: new Map(),
       label: options.label || null,
@@ -1479,6 +1492,8 @@
         series: Array.isArray(c.series) ? [...c.series] : [],
         dotStyle: normalizeDotStyle(c.dotStyle),
         areaOpacity: normalizeAreaOpacity(c.areaOpacity),
+        yMin: Number.isFinite(c.yMin) ? c.yMin : null,
+        yMax: Number.isFinite(c.yMax) ? c.yMax : null,
         legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
         label: c.label || null,
       });
@@ -1531,6 +1546,8 @@
         h: Number(ch.h) || 3,
         dotStyle: ch.dotStyle !== undefined ? normalizeDotStyle(ch.dotStyle) : (ch.showSymbols ? 1 : 0),
         areaOpacity: ch.areaOpacity !== undefined ? normalizeAreaOpacity(ch.areaOpacity) : 0.3,
+        yMin: optionalFiniteNumber(ch.yMin),
+        yMax: optionalFiniteNumber(ch.yMax),
         legendEnabledBySeries: (ch.legendEnabledBySeries && typeof ch.legendEnabledBySeries === 'object')
           ? { ...ch.legendEnabledBySeries }
           : {},
@@ -1663,6 +1680,8 @@
     chartSettingsName.value = c.label || '';
     chartSettingsDots.value = String(normalizeDotStyle(c.dotStyle));
     chartSettingsArea.value = String(normalizeAreaOpacity(c.areaOpacity));
+    if (chartSettingsMin) chartSettingsMin.value = Number.isFinite(c.yMin) ? String(c.yMin) : '';
+    if (chartSettingsMax) chartSettingsMax.value = Number.isFinite(c.yMax) ? String(c.yMax) : '';
     chartSettingsSeriesDraft = Array.isArray(c.series) ? [...c.series] : [];
     renderChartSettingsSeriesList();
     chartSettingsDialog.showModal();
@@ -1946,9 +1965,18 @@
     c.label = String(chartSettingsName.value || '').trim() || null;
     c.dotStyle = normalizeDotStyle(chartSettingsDots.value);
     c.areaOpacity = normalizeAreaOpacity(chartSettingsArea.value);
+    const parsedMin = Number(chartSettingsMin ? chartSettingsMin.value : '');
+    const parsedMax = Number(chartSettingsMax ? chartSettingsMax.value : '');
+    c.yMin = (chartSettingsMin && String(chartSettingsMin.value).trim() !== '' && Number.isFinite(parsedMin))
+      ? parsedMin
+      : null;
+    c.yMax = (chartSettingsMax && String(chartSettingsMax.value).trim() !== '' && Number.isFinite(parsedMax))
+      ? parsedMax
+      : null;
     c.series = Array.isArray(chartSettingsSeriesDraft) ? [...chartSettingsSeriesDraft] : [];
     appendConsoleLine(
       `chart ${activeSettingsChartId} settings updated dotStyle=${c.dotStyle} areaOpacity=${c.areaOpacity}`
+      + ` yMin=${c.yMin === null ? 'auto' : c.yMin} yMax=${c.yMax === null ? 'auto' : c.yMax}`
     );
     updateTitle(activeSettingsChartId);
     refreshChart(activeSettingsChartId).catch((err) => console.error(err));

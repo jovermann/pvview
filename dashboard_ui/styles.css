@@ -85,7 +85,7 @@ body {
   font-size: 13px;
 }
 
-input[type="datetime-local"], input[type="search"], input[type="text"], select {
+input[type="datetime-local"], input[type="search"], input[type="text"], input[type="number"], select {
   background: #10151d;
   color: var(--text);
   border: 1px solid var(--border);
@@ -97,9 +97,11 @@ input[type="datetime-local"], input[type="search"], input[type="text"], select {
 .topbar input[type="datetime-local"],
 .topbar input[type="search"],
 .topbar input[type="text"],
+.topbar input[type="number"],
 .topbar select,
 .modal input[type="search"],
 .modal input[type="text"],
+.modal input[type="number"],
 .modal select,
 .modal .btn {
   font-family: "Segoe UI", "Ubuntu", sans-serif;
