@@ -398,6 +398,15 @@ main { padding: 2px; }
   font-size: 13px;
 }
 
+#dashboardManageList .series-item {
+  gap: 4px;
+  padding: 2px 1px;
+}
+
+#dashboardManageList .icon-btn {
+  padding: 1px 5px;
+}
+
 .virtual-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.3fr) 64px minmax(180px, 1.3fr) auto;

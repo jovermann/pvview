@@ -714,7 +714,7 @@
           ${['+', '-', '*', '/', 'today'].map((op) => `<option value="${op}" ${d.op === op ? 'selected' : ''}>${op}</option>`).join('')}
         </select>
         <input type="text" data-field="right" placeholder="right series" list="virtualSeriesCandidates" value="${htmlEscape(d.right || '')}" />
-        <button type="button" class="icon-btn danger" data-action="delete-virtual-row" data-index="${i}">✕</button>
+        <button type="button" class="icon-btn danger" data-action="delete-virtual-row" data-index="${i}" title="Delete virtual series">🗑️</button>
       </div>
     `).join('');
   }
@@ -1722,7 +1722,7 @@
         <span style="margin-left:auto;display:inline-flex;gap:6px">
           <button type="button" class="icon-btn" data-action="dashboard-load" data-name="${htmlEscape(name)}">Load</button>
           <button type="button" class="icon-btn" data-action="dashboard-rename" data-name="${htmlEscape(name)}">Rename</button>
-          <button type="button" class="icon-btn danger" data-action="dashboard-delete" data-name="${htmlEscape(name)}">Delete</button>
+          <button type="button" class="icon-btn danger" data-action="dashboard-delete" data-name="${htmlEscape(name)}" title="Delete dashboard">🗑️</button>
         </span>
       </div>
     `).join('');
