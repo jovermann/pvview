@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 8;
+  const FRONTEND_API_VERSION = 9;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -668,7 +668,7 @@
         op: String(d.op || '').trim(),
         right: String(d.right || '').trim(),
       }))
-      .filter((d) => d.name && d.left && d.right && ['+', '-', '*', '/'].includes(d.op));
+      .filter((d) => d.name && d.left && (d.op === 'today' || d.right) && ['+', '-', '*', '/', 'today'].includes(d.op));
     unitOverrideDefs = unitRules
       .filter((d) => d && typeof d === 'object')
       .map((d) => ({
@@ -706,7 +706,7 @@
         <input type="text" data-field="name" placeholder="name" value="${htmlEscape(d.name || '')}" />
         <input type="text" data-field="left" placeholder="left series" list="virtualSeriesCandidates" value="${htmlEscape(d.left || '')}" />
         <select data-field="op">
-          ${['+', '-', '*', '/'].map((op) => `<option value="${op}" ${d.op === op ? 'selected' : ''}>${op}</option>`).join('')}
+          ${['+', '-', '*', '/', 'today'].map((op) => `<option value="${op}" ${d.op === op ? 'selected' : ''}>${op}</option>`).join('')}
         </select>
         <input type="text" data-field="right" placeholder="right series" list="virtualSeriesCandidates" value="${htmlEscape(d.right || '')}" />
         <button type="button" class="icon-btn danger" data-action="delete-virtual-row" data-index="${i}">✕</button>
@@ -2431,8 +2431,8 @@
       .filter((d) => d.name || d.left || d.right);
     const seen = new Set();
     for (const d of defs) {
-      if (!d.name || !d.left || !d.right || !['+', '-', '*', '/'].includes(d.op)) {
-        alert('Each virtual series row must have name, left series, operator, and right series.');
+      if (!d.name || !d.left || !['+', '-', '*', '/', 'today'].includes(d.op) || (d.op !== 'today' && !d.right)) {
+        alert('Each virtual series row must have name, left series, operator, and right series (right is optional for "today").');
         return;
       }
       if (seen.has(d.name)) {

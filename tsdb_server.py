@@ -55,7 +55,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 8  # Increment when API endpoints or payload schemas change.
+API_VERSION = 9  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -643,7 +643,9 @@ def _normalize_virtual_series_def(obj: Any) -> Optional[VirtualSeriesDef]:
     left = str(obj.get("left", "")).strip()
     op = str(obj.get("op", "")).strip()
     right = str(obj.get("right", "")).strip()
-    if not name or not left or not right or op not in {"+", "-", "*", "/"}:
+    if not name or not left or op not in {"+", "-", "*", "/", "today"}:
+        return None
+    if op != "today" and not right:
         return None
     return VirtualSeriesDef(name=name, left=left, op=op, right=right)
 
@@ -811,6 +813,29 @@ def _compute_virtual_events(left_events: List[Event], right_events: List[Event],
     return result
 
 
+def _compute_virtual_events_today(events: List[Event]) -> List[Event]:
+    result: List[Event] = []
+    day_start_value: Dict[Tuple[int, int, int], float] = {}
+    for ev in events:
+        v = ev.value
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        dt = datetime.datetime.fromtimestamp(ev.timestamp_ms / 1000.0).astimezone()
+        key = (dt.year, dt.month, dt.day)
+        fv = day_start_value.get(key)
+        cur = float(v)
+        if fv is None:
+            day_start_value[key] = cur
+            out = 0.0
+        else:
+            out = cur - fv
+            if out < 0:
+                out = 0.0
+        if out == out and abs(out) != float("inf"):
+            result.append(Event(ev.timestamp_ms, out))
+    return result
+
+
 def _parse_virtual_constant(value: str) -> Optional[float]:
     s = str(value or "").strip()
     if not s:
@@ -849,6 +874,8 @@ def _compute_virtual_events_with_constant(events: List[Event], constant: float, 
 
 
 def _virtual_decimal_places(op: str, left_dp: int, right_dp: int) -> int:
+    if op == "today":
+        return left_dp
     if op in {"+", "-"}:
         return max(left_dp, right_dp)
     if op == "*":
@@ -867,6 +894,36 @@ def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optiona
     d = defs.get(series_name)
     if d is None:
         return None
+    if d.op == "today":
+        left_const = _parse_virtual_constant(d.left)
+        if left_const is not None:
+            return [], 3, []
+        left_events, left_dp, left_files, left_sig = _read_series_all_files(data_dir, d.left)
+        cache_key = (os.path.abspath(data_dir), d.name)
+        definition = (d.name, d.left, d.op, d.right)
+        with _VIRTUAL_SERIES_CACHE_LOCK:
+            entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
+            if (
+                entry is not None
+                and entry.definition == definition
+                and entry.left_sig == left_sig
+                and entry.right_sig == ("today",)
+            ):
+                return list(entry.events), entry.decimal_places, list(entry.files)
+        events = _compute_virtual_events_today(left_events)
+        decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
+        files = sorted(set(left_files))
+        cache_entry = VirtualSeriesCacheEntry(
+            definition=definition,
+            left_sig=left_sig,
+            right_sig=("today",),
+            events=list(events),
+            decimal_places=decimal_places,
+            files=list(files),
+        )
+        with _VIRTUAL_SERIES_CACHE_LOCK:
+            _VIRTUAL_SERIES_RESULT_CACHE[cache_key] = cache_entry
+        return list(events), decimal_places, list(files)
     left_const = _parse_virtual_constant(d.left)
     right_const = _parse_virtual_constant(d.right)
     left_is_const = left_const is not None
@@ -1332,7 +1389,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         for item in items:
             d = _normalize_virtual_series_def(item)
             if d is None:
-                raise ValueError("Each virtual series must include name,left,op,right with op in + - * /")
+                raise ValueError("Each virtual series must include name,left,op and valid operator (+ - * / today); right is optional for today")
             if d.name in seen:
                 raise ValueError(f"Duplicate virtual series name: {d.name}")
             seen.add(d.name)
