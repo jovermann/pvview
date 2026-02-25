@@ -27,6 +27,10 @@
   const virtualSeriesDialog = document.getElementById('virtualSeriesDialog');
   const virtualSeriesRows = document.getElementById('virtualSeriesRows');
   const virtualSeriesCandidates = document.getElementById('virtualSeriesCandidates');
+  const virtualSeriesTabBtn = document.getElementById('virtualSeriesTabBtn');
+  const unitOverridesTabBtn = document.getElementById('unitOverridesTabBtn');
+  const virtualSeriesTabPane = document.getElementById('virtualSeriesTabPane');
+  const unitOverridesTabPane = document.getElementById('unitOverridesTabPane');
   const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -87,6 +91,7 @@
   let virtualSeriesDialogDraft = [];
   let unitOverrideDefs = [];
   let unitOverrideDialogDraft = [];
+  let virtualDialogActiveTab = 'virtual';
   let lastForegroundRefreshMs = 0;
   let refreshGetCallCount = 0;
 
@@ -751,6 +756,14 @@
     renderUnitOverrideRows();
   }
 
+  function setVirtualDialogTab(tab) {
+    virtualDialogActiveTab = (tab === 'units') ? 'units' : 'virtual';
+    if (virtualSeriesTabBtn) virtualSeriesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'virtual');
+    if (unitOverridesTabBtn) unitOverridesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'units');
+    if (virtualSeriesTabPane) virtualSeriesTabPane.classList.toggle('active', virtualDialogActiveTab === 'virtual');
+    if (unitOverridesTabPane) unitOverridesTabPane.classList.toggle('active', virtualDialogActiveTab === 'units');
+  }
+
   async function openVirtualSeriesDialog() {
     await loadVirtualSeriesDefs();
     const allNames = await fetchSeriesCatalog();
@@ -770,6 +783,7 @@
     unitOverrideDialogDraft = unitOverrideDefs.map((d) => ({ ...d }));
     renderVirtualSeriesRows();
     renderUnitOverrideRows();
+    setVirtualDialogTab('virtual');
     virtualSeriesDialog.showModal();
   }
 
@@ -2414,6 +2428,12 @@
   document.getElementById('addUnitOverrideRow').addEventListener('click', () => {
     addUnitOverrideDraftRow();
   });
+  if (virtualSeriesTabBtn) {
+    virtualSeriesTabBtn.addEventListener('click', () => setVirtualDialogTab('virtual'));
+  }
+  if (unitOverridesTabBtn) {
+    unitOverridesTabBtn.addEventListener('click', () => setVirtualDialogTab('units'));
+  }
 
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
     virtualSeriesDialog.close();

@@ -212,12 +212,19 @@
 
   <dialog id="virtualSeriesDialog" class="modal">
     <form method="dialog" class="modal-content" id="virtualSeriesForm">
-      <h2>Virtual Series</h2>
-      <div id="virtualSeriesRows" class="series-list"></div>
-      <button id="addVirtualSeriesRow" type="button" class="btn">Add Virtual Series</button>
-      <h2 style="margin-top:6px">Units</h2>
-      <div id="unitOverrideRows" class="series-list"></div>
-      <button id="addUnitOverrideRow" type="button" class="btn">Add Unit Rule</button>
+      <h2>Settings</h2>
+      <div class="dialog-tabs">
+        <button type="button" class="dialog-tab active" id="virtualSeriesTabBtn" data-tab="virtual">Virtual Series</button>
+        <button type="button" class="dialog-tab" id="unitOverridesTabBtn" data-tab="units">Units</button>
+      </div>
+      <div id="virtualSeriesTabPane" class="dialog-tab-pane active">
+        <div id="virtualSeriesRows" class="series-list"></div>
+        <button id="addVirtualSeriesRow" type="button" class="btn">Add Virtual Series</button>
+      </div>
+      <div id="unitOverridesTabPane" class="dialog-tab-pane">
+        <div id="unitOverrideRows" class="series-list"></div>
+        <button id="addUnitOverrideRow" type="button" class="btn">Add Unit Rule</button>
+      </div>
       <datalist id="virtualSeriesCandidates"></datalist>
       <menu>
         <button id="cancelVirtualSeries" type="button" class="btn">Cancel</button>
