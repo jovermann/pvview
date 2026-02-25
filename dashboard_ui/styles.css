@@ -397,21 +397,39 @@ main { padding: 2px; }
 .virtual-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.3fr) 64px minmax(180px, 1.3fr) auto;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
-  padding: 4px 2px;
+  padding: 2px 1px;
 }
 
 .virtual-row .icon-btn {
   justify-self: end;
 }
 
+.virtual-row input,
+.virtual-row select {
+  padding: 3px 6px;
+}
+
+.virtual-row .icon-btn {
+  padding: 1px 5px;
+}
+
 .unit-override-row {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px auto auto auto;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
-  padding: 4px 2px;
+  padding: 2px 1px;
+}
+
+.unit-override-row input,
+.unit-override-row select {
+  padding: 3px 6px;
+}
+
+.unit-override-row .icon-btn {
+  padding: 1px 5px;
 }
 
 menu {
