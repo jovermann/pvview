@@ -18,9 +18,7 @@
   const autoRefreshSelect = document.getElementById('autoRefresh');
   const dashboardSelect = document.getElementById('dashboardSelect');
   const saveDashboardBtn = document.getElementById('saveDashboard');
-  const manageDashboardsBtn = document.getElementById('manageDashboards');
   const manageVirtualSeriesBtn = document.getElementById('manageVirtualSeries');
-  const dashboardManageDialog = document.getElementById('dashboardManageDialog');
   const dashboardManageList = document.getElementById('dashboardManageList');
   const saveDashboardDialog = document.getElementById('saveDashboardDialog');
   const saveDashboardNameInput = document.getElementById('saveDashboardName');
@@ -29,8 +27,10 @@
   const virtualSeriesCandidates = document.getElementById('virtualSeriesCandidates');
   const virtualSeriesTabBtn = document.getElementById('virtualSeriesTabBtn');
   const unitOverridesTabBtn = document.getElementById('unitOverridesTabBtn');
+  const dashboardSettingsTabBtn = document.getElementById('dashboardSettingsTabBtn');
   const virtualSeriesTabPane = document.getElementById('virtualSeriesTabPane');
   const unitOverridesTabPane = document.getElementById('unitOverridesTabPane');
+  const dashboardSettingsTabPane = document.getElementById('dashboardSettingsTabPane');
   const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -757,15 +757,19 @@
   }
 
   function setVirtualDialogTab(tab) {
-    virtualDialogActiveTab = (tab === 'units') ? 'units' : 'virtual';
+    virtualDialogActiveTab = (tab === 'units' || tab === 'dashboards') ? tab : 'virtual';
     if (virtualSeriesTabBtn) virtualSeriesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'virtual');
     if (unitOverridesTabBtn) unitOverridesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'units');
+    if (dashboardSettingsTabBtn) dashboardSettingsTabBtn.classList.toggle('active', virtualDialogActiveTab === 'dashboards');
     if (virtualSeriesTabPane) virtualSeriesTabPane.classList.toggle('active', virtualDialogActiveTab === 'virtual');
     if (unitOverridesTabPane) unitOverridesTabPane.classList.toggle('active', virtualDialogActiveTab === 'units');
+    if (dashboardSettingsTabPane) dashboardSettingsTabPane.classList.toggle('active', virtualDialogActiveTab === 'dashboards');
   }
 
-  async function openVirtualSeriesDialog() {
+  async function openVirtualSeriesDialog(initialTab = null) {
     await loadVirtualSeriesDefs();
+    await refreshDashboardNames();
+    renderDashboardManageList();
     const allNames = await fetchSeriesCatalog();
     const virtualNames = new Set(virtualSeriesDefs.map((d) => d.name));
     if (virtualSeriesCandidates) {
@@ -783,7 +787,7 @@
     unitOverrideDialogDraft = unitOverrideDefs.map((d) => ({ ...d }));
     renderVirtualSeriesRows();
     renderUnitOverrideRows();
-    setVirtualDialogTab('virtual');
+    setVirtualDialogTab(initialTab || virtualDialogActiveTab || 'virtual');
     virtualSeriesDialog.showModal();
   }
 
@@ -1725,9 +1729,7 @@
   }
 
   async function openDashboardManageDialog() {
-    await refreshDashboardNames();
-    renderDashboardManageList();
-    dashboardManageDialog.showModal();
+    await openVirtualSeriesDialog('dashboards');
   }
 
   async function openSeriesDialog(id) {
@@ -2286,7 +2288,7 @@
         await loadDashboardByName(name);
         currentDashboardName = name;
         queueSaveSettings();
-        dashboardManageDialog.close();
+        virtualSeriesDialog.close();
         appendConsoleLine(`dashboard load done name="${name}"`);
         return;
       }
@@ -2331,13 +2333,10 @@
     }
   });
 
-  document.getElementById('closeDashboardManage').addEventListener('click', () => {
-    dashboardManageDialog.close();
-  });
   document.getElementById('clearCurrentDashboard').addEventListener('click', () => {
     appendConsoleLine(`clear dashboard requested panels=${charts.size}`);
     clearAllCharts();
-    dashboardManageDialog.close();
+    virtualSeriesDialog.close();
   });
 
   document.getElementById('saveDashboardForm').addEventListener('submit', (e) => {
@@ -2433,6 +2432,9 @@
   }
   if (unitOverridesTabBtn) {
     unitOverridesTabBtn.addEventListener('click', () => setVirtualDialogTab('units'));
+  }
+  if (dashboardSettingsTabBtn) {
+    dashboardSettingsTabBtn.addEventListener('click', () => setVirtualDialogTab('dashboards'));
   }
 
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
@@ -2597,12 +2599,9 @@
     });
   });
 
-  manageDashboardsBtn.addEventListener('click', () => {
-    openDashboardManageDialog().catch((err) => {
-      console.error(err);
-      alert(`Failed to open dashboard manager: ${err.message || err}`);
-    });
-  });
+  if (manageVirtualSeriesBtn) {
+    manageVirtualSeriesBtn.title = 'Settings';
+  }
 
   async function bootstrap() {
     await verifyApiVersion();

@@ -17,8 +17,7 @@
         </select>
       </label>
       <button id="saveDashboard" class="btn">Save</button>
-      <button id="manageDashboards" class="icon-gadget" title="Manage dashboards">⚙️</button>
-      <button id="manageVirtualSeries" class="icon-gadget" title="Virtual series and decimal overrides">#️⃣</button>
+      <button id="manageVirtualSeries" class="icon-gadget" title="Settings">⚙️</button>
       <div class="range-controls">
         <button id="pageBack" class="btn" title="Shift window left by half range">&lt;</button>
         <button id="zoomIn" class="btn" title="Zoom in (2x)">+</button>
@@ -185,17 +184,6 @@
     </form>
   </dialog>
 
-  <dialog id="dashboardManageDialog" class="modal">
-    <form method="dialog" class="modal-content" id="dashboardManageForm">
-      <h2>Manage Dashboards</h2>
-      <div id="dashboardManageList" class="series-list"></div>
-      <menu>
-        <button id="clearCurrentDashboard" type="button" class="btn danger menu-left">Clear current dashboard</button>
-        <button id="closeDashboardManage" type="button" class="btn">Close</button>
-      </menu>
-    </form>
-  </dialog>
-
   <dialog id="saveDashboardDialog" class="modal">
     <form method="dialog" class="modal-content" id="saveDashboardForm">
       <h2>Save New Dashboard</h2>
@@ -216,6 +204,7 @@
       <div class="dialog-tabs">
         <button type="button" class="dialog-tab active" id="virtualSeriesTabBtn" data-tab="virtual">Virtual Series</button>
         <button type="button" class="dialog-tab" id="unitOverridesTabBtn" data-tab="units">Units</button>
+        <button type="button" class="dialog-tab" id="dashboardSettingsTabBtn" data-tab="dashboards">Dashboards</button>
       </div>
       <div id="virtualSeriesTabPane" class="dialog-tab-pane active">
         <div id="virtualSeriesRows" class="series-list"></div>
@@ -224,6 +213,10 @@
       <div id="unitOverridesTabPane" class="dialog-tab-pane">
         <div id="unitOverrideRows" class="series-list"></div>
         <button id="addUnitOverrideRow" type="button" class="btn">Add Unit Rule</button>
+      </div>
+      <div id="dashboardSettingsTabPane" class="dialog-tab-pane">
+        <div id="dashboardManageList" class="series-list"></div>
+        <button id="clearCurrentDashboard" type="button" class="btn danger">Clear current dashboard</button>
       </div>
       <datalist id="virtualSeriesCandidates"></datalist>
       <menu>
