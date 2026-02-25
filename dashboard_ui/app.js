@@ -730,7 +730,7 @@
       unitOverrideRows.innerHTML = '<div class="series-item"><span>No unit rules defined</span></div>';
       return;
     }
-    const unitOptions = ['', 'W', 'kW', 'Wh', 'kWh', 'MWh', 'V', 'A', 'Hz', '°C', 'm', '%'];
+    const unitOptions = ['', 'W', 'kW', 'Wh', 'kWh', 'MWh', 'V', 'A', 'Hz', '°C', 'm', '%', 's', 'h', 'd', 'y', 'rpm'];
     unitOverrideRows.innerHTML = unitOverrideDialogDraft.map((d, i) => `
       <div class="unit-override-row" data-index="${i}">
         <input type="text" data-field="suffix" placeholder="series suffix (e.g. power or inv/power)" value="${htmlEscape(d.suffix || '')}" />
