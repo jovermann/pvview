@@ -168,6 +168,36 @@ main { padding: 2px; }
   color: #d2d9e5;
 }
 
+.panel-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.panel-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid rgba(140, 160, 184, 0.25);
+  border-top-color: #9fc8ff;
+  opacity: 0;
+  animation: panel-spin 0.8s linear infinite;
+  flex: 0 0 auto;
+}
+
+.panel-spinner.active {
+  opacity: 1;
+}
+
+.panel-header.busy .panel-title {
+  color: #e3edfb;
+}
+
+@keyframes panel-spin {
+  to { transform: rotate(360deg); }
+}
+
 .panel-actions { display: flex; gap: 6px; }
 
 .panel-check {

@@ -878,6 +878,7 @@
       <div class="panel-header">
         <div class="panel-title" id="title-${id}">Chart ${id}</div>
         <div class="panel-actions">
+          <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="settings-gadget" data-action="settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -945,6 +946,7 @@
       <div class="panel-header">
         <div class="panel-title" id="title-${id}">Stat ${id}</div>
         <div class="panel-actions">
+          <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="icon-btn" data-action="stat-columns" data-id="${id}">Columns</button>
           <button class="settings-gadget" data-action="stat-settings" data-id="${id}" title="Settings">⚙️</button>
@@ -968,9 +970,27 @@
     titleEl.textContent = c.label || `Chart ${id}`;
   }
 
+  function setPanelBusy(id, busy) {
+    const c = charts.get(id);
+    if (!c) return;
+    const next = Math.max(0, Number(c.busyCount || 0) + (busy ? 1 : -1));
+    c.busyCount = next;
+    const active = next > 0;
+    const spinner = document.getElementById(`spinner-${id}`);
+    if (spinner) {
+      spinner.classList.toggle('active', active);
+    }
+    const header = spinner ? spinner.closest('.panel-header') : null;
+    if (header instanceof HTMLElement) {
+      header.classList.toggle('busy', active);
+    }
+  }
+
   async function refreshChart(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'chart' || !cfg.instance) return;
+    setPanelBusy(id, true);
+    try {
     const chartName = cfg.label || `Chart ${id}`;
     const refreshT0 = performance.now();
     appendConsoleLine(`chart ${id} refresh start name="${chartName}" series=${cfg.series.length}`);
@@ -1235,11 +1255,16 @@
       `chart ${id} refresh done name="${chartName}" series=${seriesResponses.length} axes=${axisCount} `
       + `elapsed=${Math.round(performance.now() - refreshT0)}ms`
     );
+    } finally {
+      setPanelBusy(id, false);
+    }
   }
 
   async function refreshStat(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'stat' || !(cfg.tableEl instanceof HTMLElement)) return;
+    setPanelBusy(id, true);
+    try {
     const panelName = cfg.label || `Stat ${id}`;
     appendConsoleLine(`stat ${id} refresh start name="${panelName}" series=${cfg.series.length}`);
     const { start, end } = getRange();
@@ -1338,6 +1363,9 @@
     `).join('');
     cfg.tableEl.innerHTML = head + `<tbody>${body}</tbody>`;
     appendConsoleLine(`stat ${id} refresh done name="${panelName}" series=${rows.length}`);
+    } finally {
+      setPanelBusy(id, false);
+    }
   }
 
   function addChart(initialSeries = [], options = {}) {
@@ -1380,6 +1408,7 @@
       legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
       displayNameToSeries: new Map(),
       label: options.label || null,
+      busyCount: 0,
     });
     instance.on('legendselectchanged', (ev) => {
       const c = charts.get(id);
@@ -1428,6 +1457,7 @@
       series: [...initialSeries],
       columns: Array.isArray(options.columns) ? options.columns.map((s) => String(s)) : [],
       label: options.label || null,
+      busyCount: 0,
     });
     appendConsoleLine(`stat ${id} created series=${initialSeries.length}`);
     updateTitle(id);
