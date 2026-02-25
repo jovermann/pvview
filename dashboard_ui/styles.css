@@ -370,6 +370,10 @@ main { padding: 2px; }
   background: var(--panel);
 }
 
+#virtualSeriesDialog {
+  margin: 56px auto auto auto;
+}
+
 .modal-content {
   display: flex;
   flex-direction: column;
