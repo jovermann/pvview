@@ -463,16 +463,13 @@
     const n = Number(value);
     if (!Number.isFinite(n)) return 0;
     if (n <= 0) return 0;
-    if (n >= 3) return 3;
-    if (n >= 2) return 2;
-    return 1;
+    if (n >= 10) return 10;
+    return Math.max(1, Math.floor(n));
   }
 
   function dotVisual(style) {
     const mode = normalizeDotStyle(style);
-    if (mode === 1) return { showSymbol: true, symbol: 'circle', symbolSize: 1 };
-    if (mode === 2) return { showSymbol: true, symbol: 'circle', symbolSize: 2 };
-    if (mode === 3) return { showSymbol: true, symbol: 'circle', symbolSize: 3 };
+    if (mode > 0) return { showSymbol: true, symbol: 'circle', symbolSize: mode };
     return { showSymbol: false, symbol: 'circle', symbolSize: 1 };
   }
 
@@ -778,10 +775,9 @@
     await refreshDashboardNames();
     renderDashboardManageList();
     const allNames = await fetchSeriesCatalog();
-    const virtualNames = new Set(virtualSeriesDefs.map((d) => d.name));
     if (virtualSeriesCandidates) {
       virtualSeriesCandidates.innerHTML = [
-        ...allNames.filter((name) => typeof name === 'string' && !virtualNames.has(name)),
+        ...allNames.filter((name) => typeof name === 'string'),
         '0',
         '1',
       ]

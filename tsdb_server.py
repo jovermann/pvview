@@ -896,68 +896,89 @@ def _virtual_decimal_places(op: str, left_dp: int, right_dp: int) -> int:
     return 3
 
 
-def _virtual_defs_map(data_dir: str) -> Dict[str, VirtualSeriesDef]:
-    return {d.name: d for d in load_virtual_series_defs(data_dir)}
+def _virtual_result_signature(entry: VirtualSeriesCacheEntry) -> Tuple[Any, ...]:
+    return ("virtual", entry.definition, entry.left_sig, entry.right_sig)
 
 
-def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optional[Tuple[List[Event], int, List[str]]]:
-    defs = _virtual_defs_map(data_dir)
-    d = defs.get(series_name)
-    if d is None:
-        return None
+def _resolve_virtual_operand(
+    data_dir: str,
+    operand: str,
+    prior_virtuals: Dict[str, Tuple[List[Event], int, List[str], Tuple[Any, ...]]],
+) -> Tuple[bool, Optional[float], List[Event], int, List[str], Tuple[Any, ...]]:
+    const = _parse_virtual_constant(operand)
+    if const is not None:
+        return True, float(const), [], 3, [], ("const", const)
+    prior = prior_virtuals.get(str(operand))
+    if prior is not None:
+        events, dp, files, sig = prior
+        return False, None, list(events), int(dp), list(files), sig
+    events, dp, files, sig = _read_series_all_files(data_dir, operand)
+    return False, None, events, dp, files, sig
+
+
+def _compute_one_virtual_series_cached(
+    data_dir: str,
+    d: VirtualSeriesDef,
+    prior_virtuals: Dict[str, Tuple[List[Event], int, List[str], Tuple[Any, ...]]],
+) -> Tuple[List[Event], int, List[str], Tuple[Any, ...]]:
+    cache_key = (os.path.abspath(data_dir), d.name)
+    definition = (d.name, d.left, d.op, d.right)
+
+    left_is_const, left_const, left_events, left_dp, left_files, left_sig = _resolve_virtual_operand(data_dir, d.left, prior_virtuals)
     if d.op == "today":
-        left_const = _parse_virtual_constant(d.left)
-        if left_const is not None:
-            return [], 3, []
-        left_events, left_dp, left_files, left_sig = _read_series_all_files(data_dir, d.left)
-        cache_key = (os.path.abspath(data_dir), d.name)
-        definition = (d.name, d.left, d.op, d.right)
+        right_sig = ("today",)
         with _VIRTUAL_SERIES_CACHE_LOCK:
             entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
             if (
                 entry is not None
                 and entry.definition == definition
                 and entry.left_sig == left_sig
-                and entry.right_sig == ("today",)
+                and entry.right_sig == right_sig
             ):
-                return list(entry.events), entry.decimal_places, list(entry.files)
-        events = _compute_virtual_events_today(left_events)
-        decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
-        files = sorted(set(left_files))
+                return list(entry.events), entry.decimal_places, list(entry.files), _virtual_result_signature(entry)
+        if left_is_const:
+            events = []
+            decimal_places = 3
+            files: List[str] = []
+        else:
+            events = _compute_virtual_events_today(left_events)
+            decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
+            files = sorted(set(left_files))
         cache_entry = VirtualSeriesCacheEntry(
             definition=definition,
             left_sig=left_sig,
-            right_sig=("today",),
+            right_sig=right_sig,
             events=list(events),
             decimal_places=decimal_places,
             files=list(files),
         )
         with _VIRTUAL_SERIES_CACHE_LOCK:
             _VIRTUAL_SERIES_RESULT_CACHE[cache_key] = cache_entry
-        return list(events), decimal_places, list(files)
-    left_const = _parse_virtual_constant(d.left)
-    right_const = _parse_virtual_constant(d.right)
-    left_is_const = left_const is not None
-    right_is_const = right_const is not None
+        return list(events), decimal_places, list(files), _virtual_result_signature(cache_entry)
+
+    right_is_const, right_const, right_events, right_dp, right_files, right_sig = _resolve_virtual_operand(data_dir, d.right, prior_virtuals)
     if left_is_const and right_is_const:
-        return [], 3, []
-    if left_is_const:
-        right_events, right_dp, right_files, right_sig = _read_series_all_files(data_dir, d.right)
-        left_events = []
-        left_dp = 3
-        left_files = []
-        left_sig = ("const", left_const)
-    else:
-        left_events, left_dp, left_files, left_sig = _read_series_all_files(data_dir, d.left)
-    if right_is_const:
-        right_events = []
-        right_dp = 3
-        right_files = []
-        right_sig = ("const", right_const)
-    elif not left_is_const:
-        right_events, right_dp, right_files, right_sig = _read_series_all_files(data_dir, d.right)
-    cache_key = (os.path.abspath(data_dir), d.name)
-    definition = (d.name, d.left, d.op, d.right)
+        with _VIRTUAL_SERIES_CACHE_LOCK:
+            entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
+            if (
+                entry is not None
+                and entry.definition == definition
+                and entry.left_sig == left_sig
+                and entry.right_sig == right_sig
+            ):
+                return list(entry.events), entry.decimal_places, list(entry.files), _virtual_result_signature(entry)
+        cache_entry = VirtualSeriesCacheEntry(
+            definition=definition,
+            left_sig=left_sig,
+            right_sig=right_sig,
+            events=[],
+            decimal_places=3,
+            files=[],
+        )
+        with _VIRTUAL_SERIES_CACHE_LOCK:
+            _VIRTUAL_SERIES_RESULT_CACHE[cache_key] = cache_entry
+        return [], 3, [], _virtual_result_signature(cache_entry)
+
     with _VIRTUAL_SERIES_CACHE_LOCK:
         entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
         if (
@@ -966,7 +987,8 @@ def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optiona
             and entry.left_sig == left_sig
             and entry.right_sig == right_sig
         ):
-            return list(entry.events), entry.decimal_places, list(entry.files)
+            return list(entry.events), entry.decimal_places, list(entry.files), _virtual_result_signature(entry)
+
     if left_is_const:
         events = _compute_virtual_events_with_constant(right_events, float(left_const), d.op, True)
     elif right_is_const:
@@ -985,7 +1007,25 @@ def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optiona
     )
     with _VIRTUAL_SERIES_CACHE_LOCK:
         _VIRTUAL_SERIES_RESULT_CACHE[cache_key] = cache_entry
-    return list(events), decimal_places, list(files)
+    return list(events), decimal_places, list(files), _virtual_result_signature(cache_entry)
+
+
+def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optional[Tuple[List[Event], int, List[str]]]:
+    defs = load_virtual_series_defs(data_dir)
+    target_idx: Optional[int] = None
+    for i, d in enumerate(defs):
+        if d.name == series_name:
+            target_idx = i
+            break
+    if target_idx is None:
+        return None
+
+    prior_virtuals: Dict[str, Tuple[List[Event], int, List[str], Tuple[Any, ...]]] = {}
+    for d in defs[:target_idx + 1]:
+        events, decimal_places, files, sig = _compute_one_virtual_series_cached(data_dir, d, prior_virtuals)
+        prior_virtuals[d.name] = (events, decimal_places, files, sig)
+    events, decimal_places, files, _sig = prior_virtuals[series_name]
+    return list(events), int(decimal_places), list(files)
 
 
 class TsdbRequestHandler(BaseHTTPRequestHandler):
