@@ -56,7 +56,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 12  # Increment when API endpoints or payload schemas change.
+API_VERSION = 13  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -644,9 +644,9 @@ def _normalize_virtual_series_def(obj: Any) -> Optional[VirtualSeriesDef]:
     left = str(obj.get("left", "")).strip()
     op = str(obj.get("op", "")).strip()
     right = str(obj.get("right", "")).strip()
-    if not name or not left or op not in {"+", "-", "*", "/", "today"}:
+    if not name or not left or op not in {"+", "-", "*", "/", "today", "yesterday"}:
         return None
-    if op != "today" and not right:
+    if op not in {"today", "yesterday"} and not right:
         return None
     return VirtualSeriesDef(name=name, left=left, op=op, right=right)
 
@@ -871,6 +871,37 @@ def _compute_virtual_events_today(events: List[Event]) -> List[Event]:
     return result
 
 
+def _compute_virtual_events_yesterday(events: List[Event]) -> List[Event]:
+    result: List[Event] = []
+    day_first_value: Dict[Tuple[int, int, int], float] = {}
+    # First pass: capture first numeric value per local day.
+    for ev in events:
+        v = ev.value
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        dt = datetime.datetime.fromtimestamp(ev.timestamp_ms / 1000.0).astimezone()
+        key = (dt.year, dt.month, dt.day)
+        if key not in day_first_value:
+            day_first_value[key] = float(v)
+    # Second pass: emit previous-day delta at timestamps of current day.
+    for ev in events:
+        v = ev.value
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        dt = datetime.datetime.fromtimestamp(ev.timestamp_ms / 1000.0).astimezone()
+        key = (dt.year, dt.month, dt.day)
+        today_first = day_first_value.get(key)
+        prev_day = (dt.date() - datetime.timedelta(days=1))
+        prev_key = (prev_day.year, prev_day.month, prev_day.day)
+        prev_first = day_first_value.get(prev_key)
+        if today_first is None or prev_first is None:
+            continue
+        out = today_first - prev_first
+        if out == out and abs(out) != float("inf"):
+            result.append(Event(ev.timestamp_ms, out))
+    return result
+
+
 def _parse_virtual_constant(value: str) -> Optional[float]:
     s = str(value or "").strip()
     if not s:
@@ -909,7 +940,7 @@ def _compute_virtual_events_with_constant(events: List[Event], constant: float, 
 
 
 def _virtual_decimal_places(op: str, left_dp: int, right_dp: int) -> int:
-    if op == "today":
+    if op in {"today", "yesterday"}:
         return left_dp
     if op in {"+", "-"}:
         return max(left_dp, right_dp)
@@ -950,8 +981,8 @@ def _compute_one_virtual_series_cached(
     definition = (d.name, d.left, d.op, d.right, int(align_window_ms))
 
     left_is_const, left_const, left_events, left_dp, left_files, left_sig = _resolve_virtual_operand(data_dir, d.left, prior_virtuals)
-    if d.op == "today":
-        right_sig = ("today",)
+    if d.op in {"today", "yesterday"}:
+        right_sig = (d.op,)
         with _VIRTUAL_SERIES_CACHE_LOCK:
             entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
             if (
@@ -966,7 +997,7 @@ def _compute_one_virtual_series_cached(
             decimal_places = 3
             files: List[str] = []
         else:
-            events = _compute_virtual_events_today(left_events)
+            events = _compute_virtual_events_today(left_events) if d.op == "today" else _compute_virtual_events_yesterday(left_events)
             decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
             files = sorted(set(left_files))
         cache_entry = VirtualSeriesCacheEntry(
@@ -1473,7 +1504,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         for item in items:
             d = _normalize_virtual_series_def(item)
             if d is None:
-                raise ValueError("Each virtual series must include name,left,op and valid operator (+ - * / today); right is optional for today")
+                raise ValueError("Each virtual series must include name,left,op and valid operator (+ - * / today yesterday); right is optional for today/yesterday")
             if d.name in seen:
                 raise ValueError(f"Duplicate virtual series name: {d.name}")
             seen.add(d.name)
