@@ -175,6 +175,12 @@ main { padding: 2px; }
   min-width: 0;
 }
 
+.panel-title-meta {
+  font-size: 11px;
+  color: #8fa0b4;
+  white-space: nowrap;
+}
+
 .panel-spinner {
   width: 11px;
   height: 11px;

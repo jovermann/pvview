@@ -903,7 +903,10 @@
     wrapper.className = 'panel';
     wrapper.innerHTML = `
       <div class="panel-header">
-        <div class="panel-title" id="title-${id}">Chart ${id}</div>
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">Chart ${id}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
         <div class="panel-actions">
           <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
@@ -971,7 +974,10 @@
     wrapper.className = 'panel';
     wrapper.innerHTML = `
       <div class="panel-header">
-        <div class="panel-title" id="title-${id}">Stat ${id}</div>
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">Stat ${id}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
         <div class="panel-actions">
           <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
@@ -989,12 +995,23 @@
   function updateTitle(id) {
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
+    const metaEl = document.getElementById(`titlemeta-${id}`);
     if (!titleEl || !c) return;
     if (c.kind === 'stat') {
       titleEl.textContent = c.label || `Stat ${id}`;
+      if (metaEl) metaEl.textContent = c.titleMeta || '';
       return;
     }
     titleEl.textContent = c.label || `Chart ${id}`;
+    if (metaEl) metaEl.textContent = c.titleMeta || '';
+  }
+
+  function setPanelTitleMeta(id, text) {
+    const c = charts.get(id);
+    if (!c) return;
+    c.titleMeta = String(text || '');
+    const metaEl = document.getElementById(`titlemeta-${id}`);
+    if (metaEl) metaEl.textContent = c.titleMeta;
   }
 
   function setPanelBusy(id, busy) {
@@ -1024,6 +1041,7 @@
     const { start, end } = getRange();
     await ensureInverterNames(cfg.series);
     if (!cfg.series.length) {
+      setPanelTitleMeta(id, '');
       cfg.instance.clear();
       cfg.instance.setOption({
         backgroundColor: 'transparent',
@@ -1053,6 +1071,7 @@
       `chart ${id} request done batch series=${cfg.series.length} returned=${eventItems.length} `
       + `elapsed=${Math.round(performance.now() - batchReqT0)}ms`
     );
+    const batchReqElapsedMs = Math.round(performance.now() - batchReqT0);
     const seriesResponses = await Promise.all(cfg.series.map(async (name) => {
       const data = eventsBySeries.get(name) || {
         series: name,
@@ -1204,6 +1223,9 @@
     }));
 
     const axisCount = yAxes.length;
+    const totalReturnedPoints = eventItems.reduce((sum, it) => sum + Number(it && it.returnedPoints || 0), 0);
+    const anyDownsampled = eventItems.some((it) => !!(it && it.downsampled));
+    setPanelTitleMeta(id, `${totalReturnedPoints} pts, ${anyDownsampled ? 'ds' : 'raw'}, ${batchReqElapsedMs} ms`);
     const dots = dotVisual(cfg.dotStyle);
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
     const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
@@ -1300,6 +1322,7 @@
     const { start, end } = getRange();
     await ensureInverterNames(cfg.series);
     if (!cfg.series.length) {
+      setPanelTitleMeta(id, '');
       cfg.tableEl.innerHTML = '<tr><td class="stat-name" colspan="3">No series selected</td></tr>';
       appendConsoleLine(`stat ${id} refresh done (no series)`);
       return;
@@ -1332,6 +1355,7 @@
       `stat ${id} request done batch series=${uniqueSiblingNames.length} returned=${statsItems.length} `
       + `elapsed=${Math.round(performance.now() - statsReqT0)}ms`
     );
+    setPanelTitleMeta(id, `${Math.round(performance.now() - statsReqT0)} ms`);
 
     const rows = await Promise.all(cfg.series.map(async (seriesName) => {
       const parts = splitSeriesParentSuffix(seriesName);
@@ -1439,6 +1463,7 @@
       displayNameToSeries: new Map(),
       label: options.label || null,
       busyCount: 0,
+      titleMeta: '',
     });
     instance.on('legendselectchanged', (ev) => {
       const c = charts.get(id);
@@ -1488,6 +1513,7 @@
       columns: Array.isArray(options.columns) ? options.columns.map((s) => String(s)) : [],
       label: options.label || null,
       busyCount: 0,
+      titleMeta: '',
     });
     appendConsoleLine(`stat ${id} created series=${initialSeries.length}`);
     updateTitle(id);
