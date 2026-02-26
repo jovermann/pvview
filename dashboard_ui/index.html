@@ -214,6 +214,10 @@
         <button type="button" class="dialog-tab" id="dashboardSettingsTabBtn" data-tab="dashboards">Dashboards</button>
       </div>
       <div id="virtualSeriesTabPane" class="dialog-tab-pane active">
+        <div class="settings-grid">
+          <div class="settings-label">Align Window (ms)</div>
+          <div><input id="virtualAlignWindowMs" type="number" min="0" step="1000" value="10000" /></div>
+        </div>
         <div id="virtualSeriesRows" class="series-list"></div>
         <button id="addVirtualSeriesRow" type="button" class="btn">Add Virtual Series</button>
       </div>

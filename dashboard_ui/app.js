@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 11;
+  const FRONTEND_API_VERSION = 12;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -24,6 +24,7 @@
   const saveDashboardNameInput = document.getElementById('saveDashboardName');
   const virtualSeriesDialog = document.getElementById('virtualSeriesDialog');
   const virtualSeriesRows = document.getElementById('virtualSeriesRows');
+  const virtualAlignWindowMsInput = document.getElementById('virtualAlignWindowMs');
   const virtualSeriesCandidates = document.getElementById('virtualSeriesCandidates');
   const virtualSeriesTabBtn = document.getElementById('virtualSeriesTabBtn');
   const unitOverridesTabBtn = document.getElementById('unitOverridesTabBtn');
@@ -89,6 +90,7 @@
   let currentDashboardName = 'Default';
   let virtualSeriesDefs = [];
   let virtualSeriesDialogDraft = [];
+  let virtualAlignWindowMs = 10000;
   let unitOverrideDefs = [];
   let unitOverrideDialogDraft = [];
   let virtualDialogActiveTab = 'virtual';
@@ -663,6 +665,8 @@
     const data = await apiJson('/virtual-series');
     const defs = Array.isArray(data.virtualSeries) ? data.virtualSeries : [];
     const unitRules = Array.isArray(data.unitOverrides) ? data.unitOverrides : [];
+    const alignRaw = Number(data.alignWindowMs);
+    virtualAlignWindowMs = (Number.isFinite(alignRaw) && alignRaw >= 0) ? Math.floor(alignRaw) : 10000;
     virtualSeriesDefs = defs
       .filter((d) => d && typeof d === 'object')
       .map((d) => ({
@@ -685,20 +689,21 @@
           : 'max',
       }))
       .filter((d) => d.suffix.length > 0 && d.decimals >= 0 && d.decimals <= 6 && d.scale > 0);
-    appendConsoleLine(`virtual series load done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length}`);
+    appendConsoleLine(`virtual series load done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length} alignWindowMs=${virtualAlignWindowMs}`);
     return virtualSeriesDefs;
   }
 
-  async function saveVirtualSeriesDefs(defs, unitOverrides) {
-    appendConsoleLine(`virtual series save start count=${defs.length} unitOverrides=${unitOverrides.length}`);
+  async function saveVirtualSeriesDefs(defs, unitOverrides, alignWindowMs) {
+    appendConsoleLine(`virtual series save start count=${defs.length} unitOverrides=${unitOverrides.length} alignWindowMs=${alignWindowMs}`);
     await apiJson('/virtual-series', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ virtualSeries: defs, unitOverrides }),
+      body: JSON.stringify({ virtualSeries: defs, unitOverrides, alignWindowMs }),
     });
     virtualSeriesDefs = defs.map((d) => ({ ...d }));
+    virtualAlignWindowMs = alignWindowMs;
     unitOverrideDefs = unitOverrides.map((d) => ({ ...d }));
-    appendConsoleLine(`virtual series save done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length}`);
+    appendConsoleLine(`virtual series save done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length} alignWindowMs=${virtualAlignWindowMs}`);
   }
 
   function renderVirtualSeriesRows() {
@@ -788,6 +793,7 @@
     }
     virtualSeriesDialogDraft = virtualSeriesDefs.map((d) => ({ ...d }));
     unitOverrideDialogDraft = unitOverrideDefs.map((d) => ({ ...d }));
+    if (virtualAlignWindowMsInput) virtualAlignWindowMsInput.value = String(virtualAlignWindowMs);
     renderVirtualSeriesRows();
     renderUnitOverrideRows();
     setVirtualDialogTab(initialTab || virtualDialogActiveTab || 'virtual');
@@ -2449,6 +2455,12 @@
 
   document.getElementById('virtualSeriesForm').addEventListener('submit', (e) => {
     e.preventDefault();
+    const alignWindowMs = Number(virtualAlignWindowMsInput ? virtualAlignWindowMsInput.value : virtualAlignWindowMs);
+    if (!Number.isFinite(alignWindowMs) || alignWindowMs < 0) {
+      alert('Align Window (ms) must be a non-negative integer.');
+      return;
+    }
+    const alignWindowMsInt = Math.floor(alignWindowMs);
     const defs = virtualSeriesDialogDraft
       .map((d) => ({
         name: String(d.name || '').trim(),
@@ -2502,7 +2514,7 @@
       }
       seenSuffixes.add(key);
     }
-    saveVirtualSeriesDefs(defs, overrides).then(() => {
+    saveVirtualSeriesDefs(defs, overrides, alignWindowMsInt).then(() => {
       virtualSeriesDialog.close();
       refreshAllCharts('virtual-series-update').catch((err) => console.error(err));
     }).catch((err) => {

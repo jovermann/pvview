@@ -41,6 +41,7 @@ When downsampled, points are:
 """
 
 import argparse
+import bisect
 import datetime
 import json
 import mimetypes
@@ -55,7 +56,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 11  # Increment when API endpoints or payload schemas change.
+API_VERSION = 12  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -118,7 +119,7 @@ class VirtualSeriesDef:
 
 @dataclass
 class VirtualSeriesCacheEntry:
-    definition: Tuple[str, str, str, str]
+    definition: Tuple[Any, ...]
     left_sig: Tuple[Any, ...]
     right_sig: Tuple[Any, ...]
     events: List[Event]
@@ -676,20 +677,27 @@ def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def load_virtual_series_config(data_dir: str) -> Tuple[List[VirtualSeriesDef], List[Dict[str, Any]]]:
+def load_virtual_series_config(data_dir: str) -> Tuple[List[VirtualSeriesDef], List[Dict[str, Any]], int]:
     path = _virtual_series_file_path(data_dir)
     if not os.path.isfile(path):
-        return [], []
+        return [], [], 10000
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
+    align_window_ms = 10000
     if isinstance(raw, list):
         items = raw
         overrides_raw = []
     elif isinstance(raw, dict):
         items = raw.get("virtualSeries", [])
         overrides_raw = raw.get("unitOverrides", raw.get("decimalOverrides", []))
+        try:
+            align_window_ms = int(raw.get("alignWindowMs", 10000))
+        except Exception:
+            align_window_ms = 10000
     else:
-        return [], []
+        return [], [], 10000
+    if align_window_ms < 0:
+        align_window_ms = 0
     if not isinstance(items, list):
         items = []
     if not isinstance(overrides_raw, list):
@@ -713,18 +721,21 @@ def load_virtual_series_config(data_dir: str) -> Tuple[List[VirtualSeriesDef], L
             continue
         seen_suffixes.add(key)
         overrides.append(d)
-    return defs, overrides
+    return defs, overrides, align_window_ms
 
 
 def load_virtual_series_defs(data_dir: str) -> List[VirtualSeriesDef]:
-    defs, _overrides = load_virtual_series_config(data_dir)
+    defs, _overrides, _align = load_virtual_series_config(data_dir)
     return defs
 
 
-def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit_overrides: List[Dict[str, Any]]) -> None:
+def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit_overrides: List[Dict[str, Any]], align_window_ms: int = 10000) -> None:
     path = _virtual_series_file_path(data_dir)
     tmp = f"{path}.tmp"
+    if align_window_ms < 0:
+        align_window_ms = 0
     payload = {
+        "alignWindowMs": int(align_window_ms),
         "virtualSeries": [
             {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
             for d in defs
@@ -750,8 +761,8 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit
 
 
 def save_virtual_series_defs(data_dir: str, defs: List[VirtualSeriesDef]) -> None:
-    _defs, overrides = load_virtual_series_config(data_dir)
-    save_virtual_series_config(data_dir, defs, overrides)
+    _defs, overrides, align_window_ms = load_virtual_series_config(data_dir)
+    save_virtual_series_config(data_dir, defs, overrides, align_window_ms)
 
 
 def _all_tsdb_files(data_dir: str) -> List[str]:
@@ -788,39 +799,52 @@ def _read_series_all_files(data_dir: str, series_name: str) -> Tuple[List[Event]
     return events, max_decimal_places, files_used, tuple(signature_parts)
 
 
-def _compute_virtual_events(left_events: List[Event], right_events: List[Event], op: str) -> List[Event]:
+def _compute_virtual_events(left_events: List[Event], right_events: List[Event], op: str, align_window_ms: int = 0) -> List[Event]:
     result: List[Event] = []
-    i = 0
-    j = 0
-    while i < len(left_events) and j < len(right_events):
-        lt = left_events[i].timestamp_ms
-        rt = right_events[j].timestamp_ms
-        if lt < rt:
-            i += 1
+    window = max(0, int(align_window_ms))
+    right_numeric: List[Tuple[int, float]] = []
+    for ev in right_events:
+        rv = ev.value
+        if isinstance(rv, (int, float)) and not isinstance(rv, bool):
+            right_numeric.append((ev.timestamp_ms, float(rv)))
+    if not right_numeric:
+        return result
+    right_ts = [t for t, _v in right_numeric]
+    for lev in left_events:
+        lv = lev.value
+        if not isinstance(lv, (int, float)) or isinstance(lv, bool):
             continue
-        if rt < lt:
-            j += 1
+        lt = lev.timestamp_ms
+        pos = bisect.bisect_left(right_ts, lt)
+        best_idx: Optional[int] = None
+        best_dist: Optional[int] = None
+        for cand in (pos - 1, pos):
+            if cand < 0 or cand >= len(right_numeric):
+                continue
+            rt = right_numeric[cand][0]
+            dist = abs(rt - lt)
+            if dist > window:
+                continue
+            if best_dist is None or dist < best_dist or (dist == best_dist and rt < right_numeric[best_idx][0]):  # prefer earlier on tie
+                best_idx = cand
+                best_dist = dist
+        if best_idx is None:
             continue
-        lv = left_events[i].value
-        rv = right_events[j].value
-        if isinstance(lv, (int, float)) and not isinstance(lv, bool) and isinstance(rv, (int, float)) and not isinstance(rv, bool):
-            a = float(lv)
-            b = float(rv)
-            out: Optional[float]
-            if op == "+":
-                out = a + b
-            elif op == "-":
-                out = a - b
-            elif op == "*":
-                out = a * b
-            elif op == "/":
-                out = None if b == 0 else (a / b)
-            else:
-                out = None
-            if out is not None and out == out and abs(out) != float("inf"):
-                result.append(Event(lt, out))
-        i += 1
-        j += 1
+        a = float(lv)
+        b = right_numeric[best_idx][1]
+        out: Optional[float]
+        if op == "+":
+            out = a + b
+        elif op == "-":
+            out = a - b
+        elif op == "*":
+            out = a * b
+        elif op == "/":
+            out = None if b == 0 else (a / b)
+        else:
+            out = None
+        if out is not None and out == out and abs(out) != float("inf"):
+            result.append(Event(lt, out))
     return result
 
 
@@ -920,9 +944,10 @@ def _compute_one_virtual_series_cached(
     data_dir: str,
     d: VirtualSeriesDef,
     prior_virtuals: Dict[str, Tuple[List[Event], int, List[str], Tuple[Any, ...]]],
+    align_window_ms: int,
 ) -> Tuple[List[Event], int, List[str], Tuple[Any, ...]]:
     cache_key = (os.path.abspath(data_dir), d.name)
-    definition = (d.name, d.left, d.op, d.right)
+    definition = (d.name, d.left, d.op, d.right, int(align_window_ms))
 
     left_is_const, left_const, left_events, left_dp, left_files, left_sig = _resolve_virtual_operand(data_dir, d.left, prior_virtuals)
     if d.op == "today":
@@ -994,7 +1019,7 @@ def _compute_one_virtual_series_cached(
     elif right_is_const:
         events = _compute_virtual_events_with_constant(left_events, float(right_const), d.op, False)
     else:
-        events = _compute_virtual_events(left_events, right_events, d.op)
+        events = _compute_virtual_events(left_events, right_events, d.op, align_window_ms)
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     files = sorted(set(left_files + right_files))
     cache_entry = VirtualSeriesCacheEntry(
@@ -1011,7 +1036,7 @@ def _compute_one_virtual_series_cached(
 
 
 def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optional[Tuple[List[Event], int, List[str]]]:
-    defs = load_virtual_series_defs(data_dir)
+    defs, _overrides, align_window_ms = load_virtual_series_config(data_dir)
     target_idx: Optional[int] = None
     for i, d in enumerate(defs):
         if d.name == series_name:
@@ -1022,7 +1047,7 @@ def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optiona
 
     prior_virtuals: Dict[str, Tuple[List[Event], int, List[str], Tuple[Any, ...]]] = {}
     for d in defs[:target_idx + 1]:
-        events, decimal_places, files, sig = _compute_one_virtual_series_cached(data_dir, d, prior_virtuals)
+        events, decimal_places, files, sig = _compute_one_virtual_series_cached(data_dir, d, prior_virtuals, align_window_ms)
         prior_virtuals[d.name] = (events, decimal_places, files, sig)
     events, decimal_places, files, _sig = prior_virtuals[series_name]
     return list(events), int(decimal_places), list(files)
@@ -1399,10 +1424,11 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_virtual_series_get(self) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]
-        defs, overrides = load_virtual_series_config(data_dir)
+        defs, overrides, align_window_ms = load_virtual_series_config(data_dir)
         self._send_json(
             200,
             {
+                "alignWindowMs": int(align_window_ms),
                 "virtualSeries": [
                     {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
                     for d in defs
@@ -1431,10 +1457,17 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("virtual-series payload must be an object")
         items = payload.get("virtualSeries", [])
         overrides_raw = payload.get("unitOverrides", payload.get("decimalOverrides", []))
+        align_window_raw = payload.get("alignWindowMs", 10000)
         if not isinstance(items, list):
             raise ValueError("virtualSeries payload must be a list")
         if not isinstance(overrides_raw, list):
             raise ValueError("unitOverrides payload must be a list")
+        try:
+            align_window_ms = int(align_window_raw)
+        except Exception:
+            raise ValueError("alignWindowMs must be an integer")
+        if align_window_ms < 0:
+            raise ValueError("alignWindowMs must be >= 0")
         defs: List[VirtualSeriesDef] = []
         seen: set[str] = set()
         for item in items:
@@ -1456,8 +1489,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"Duplicate unit override suffix: {d['suffix']}")
             seen_suffixes.add(key)
             overrides.append(d)
-        save_virtual_series_config(data_dir, defs, overrides)
-        self._send_json(200, {"ok": True, "count": len(defs), "unitOverrideCount": len(overrides)})
+        save_virtual_series_config(data_dir, defs, overrides, align_window_ms)
+        self._send_json(200, {"ok": True, "count": len(defs), "unitOverrideCount": len(overrides), "alignWindowMs": align_window_ms})
 
     def _dashboard_name_from_path(self, path: str) -> str:
         raw = path[len("/dashboards/"):]
