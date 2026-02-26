@@ -55,7 +55,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
-API_VERSION = 9  # Increment when API endpoints or payload schemas change.
+API_VERSION = 11  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
@@ -656,6 +656,7 @@ def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
     suffix = str(obj.get("suffix", "")).strip().strip("/")
     unit = str(obj.get("unit", "")).strip()
     scale_op = str(obj.get("scaleOp", obj.get("op", "*"))).strip()
+    max_mode = str(obj.get("maxMode", "")).strip().lower()
     try:
         scale = float(obj.get("scale", 1))
         decimals = int(obj.get("decimals"))
@@ -663,7 +664,16 @@ def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
         return None
     if not suffix or decimals < 0 or decimals > 6 or scale <= 0 or scale_op not in {"*", "/"}:
         return None
-    return {"suffix": suffix, "unit": unit, "scale": scale, "scaleOp": scale_op, "decimals": decimals}
+    if max_mode not in {"", "auto", "max", "nomax"}:
+        return None
+    return {
+        "suffix": suffix,
+        "unit": unit,
+        "scale": scale,
+        "scaleOp": scale_op,
+        "decimals": decimals,
+        "maxMode": "max" if max_mode in {"", "auto"} else max_mode,
+    }
 
 
 def load_virtual_series_config(data_dir: str) -> Tuple[List[VirtualSeriesDef], List[Dict[str, Any]]]:
@@ -726,6 +736,7 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit
                 "scale": float(d.get("scale", 1)),
                 "scaleOp": str(d.get("scaleOp", "*")),
                 "decimals": int(d["decimals"]),
+                "maxMode": str(d.get("maxMode", "max")),
             }
             for d in unit_overrides
         ],

@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 9;
+  const FRONTEND_API_VERSION = 11;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -520,6 +520,7 @@
       scale: (r && Number.isFinite(Number(r.scale)) && Number(r.scale) > 0) ? Number(r.scale) : 1,
       scaleOp: (r && String(r.scaleOp || '*') === '/') ? '/' : '*',
       decimals: r ? normalizeDecimalPlaces(r.decimals) : normalizeDecimalPlaces(defaultDecimals),
+      maxMode: (r && (r.maxMode === 'max' || r.maxMode === 'nomax')) ? r.maxMode : 'max',
     };
   }
 
@@ -682,6 +683,9 @@
         scale: Number.isFinite(Number(d.scale)) ? Number(d.scale) : 1,
         scaleOp: (String(d.scaleOp || '*') === '/') ? '/' : '*',
         decimals: normalizeDecimalPlaces(d.decimals),
+        maxMode: (String(d.maxMode || 'max') === 'max' || String(d.maxMode || 'max') === 'nomax')
+          ? String(d.maxMode || 'max')
+          : 'max',
       }))
       .filter((d) => d.suffix.length > 0 && d.decimals >= 0 && d.decimals <= 6 && d.scale > 0);
     appendConsoleLine(`virtual series load done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length}`);
@@ -744,6 +748,9 @@
         <select data-field="decimals">
           ${[0,1,2,3,4,5,6].map((n) => `<option value="${n}" ${Number(d.decimals) === n ? 'selected' : ''}>${n}</option>`).join('')}
         </select>
+        <select data-field="maxMode">
+          ${['max', 'nomax'].map((m) => `<option value="${m}" ${String(d.maxMode || 'max') === m ? 'selected' : ''}>${m}</option>`).join('')}
+        </select>
         <button type="button" class="icon-btn" data-action="unit-override-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button type="button" class="icon-btn" data-action="unit-override-down" data-index="${i}" ${i === unitOverrideDialogDraft.length - 1 ? 'disabled' : ''}>↓</button>
         <button type="button" class="icon-btn danger" data-action="delete-unit-override-row" data-index="${i}">🗑️</button>
@@ -752,7 +759,7 @@
   }
 
   function addUnitOverrideDraftRow() {
-    unitOverrideDialogDraft.push({ suffix: '', unit: '', scale: 1, scaleOp: '*', decimals: 3 });
+    unitOverrideDialogDraft.push({ suffix: '', unit: '', scale: 1, scaleOp: '*', decimals: 3, maxMode: 'max' });
     renderUnitOverrideRows();
   }
 
@@ -1136,10 +1143,13 @@
       if (!unitByLegendName.has(s.displayName)) {
         unitByLegendName.set(s.displayName, s.displayRule.unit || unitForSuffix(s.axisKey));
       }
+      const candidateHideMax = !!(s.displayRule && s.displayRule.maxMode === 'nomax');
       if (!hideMaxByLegendName.has(s.displayName)) {
-        hideMaxByLegendName.set(s.displayName, isYieldSuffix(s.axisKey));
-      } else if (isYieldSuffix(s.axisKey)) {
-        hideMaxByLegendName.set(s.displayName, true);
+        hideMaxByLegendName.set(s.displayName, candidateHideMax);
+      } else {
+        const prev = !!hideMaxByLegendName.get(s.displayName);
+        const next = prev || candidateHideMax;
+        hideMaxByLegendName.set(s.displayName, next);
       }
       if (!decimalsByLegendName.has(s.displayName)) {
         decimalsByLegendName.set(s.displayName, normalizeDecimalPlaces(s.displayRule.decimals));
@@ -1349,7 +1359,7 @@
           maxText: (typeof maxValue === 'number')
             ? formatValueWithUnit(roundNumeric(applyDisplayScale(maxValue, displayRule)), unit, decimals)
             : '-',
-          hideMax: missing || isYieldSuffix(suffix),
+          hideMax: missing || displayRule.maxMode === 'nomax',
         };
       }));
       const displayParent = splitSeriesParentSuffix(displaySeriesName(seriesName)).parent.replace(/\/$/, '');
@@ -2470,6 +2480,9 @@
         scale: Number(d.scale),
         scaleOp: String(d.scaleOp || '*') === '/' ? '/' : '*',
         decimals: normalizeDecimalPlaces(d.decimals),
+        maxMode: (String(d.maxMode || 'max') === 'max' || String(d.maxMode || 'max') === 'nomax')
+          ? String(d.maxMode || 'max')
+          : 'max',
       }))
       .filter((d) => d.suffix);
     const seenSuffixes = new Set();
@@ -2485,6 +2498,10 @@
       }
       if (d.decimals < 0 || d.decimals > 6) {
         alert(`Invalid decimals for ${d.suffix}: ${d.decimals}`);
+        return;
+      }
+      if (!['max', 'nomax'].includes(d.maxMode)) {
+        alert(`Invalid max mode for ${d.suffix}: ${d.maxMode}`);
         return;
       }
       seenSuffixes.add(key);

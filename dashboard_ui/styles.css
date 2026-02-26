@@ -430,7 +430,7 @@ main { padding: 2px; }
 
 .unit-override-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px auto auto auto;
+  grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px 72px auto auto auto;
   gap: 4px;
   align-items: center;
   padding: 2px 1px;
