@@ -19,6 +19,7 @@ ENTRY_TYPE_TIME_REL_24 = 0xF3
 ENTRY_TYPE_TIME_REL_32 = 0xF4
 ENTRY_TYPE_CHANNEL_DEF_8 = 0xF5
 ENTRY_TYPE_CHANNEL_DEF_16 = 0xF6
+ENTRY_TYPE_META_INFO = 0xF7
 ENTRY_TYPE_EOF = 0xFE
 ENTRY_TYPE_VALUE_16 = 0xFF
 ENTRY_TYPE_CHANNEL_VALUE_16 = ENTRY_TYPE_VALUE_16
@@ -62,6 +63,8 @@ class CachedTsdbFile:
     channel_defs: Dict[int, Tuple[int, str]]
     series_format_ids: Dict[str, int]
     series_events: Dict[str, List[Event]]
+    meta_info: Dict[str, Any]
+    ds_bucket_ms: Optional[int]
     ended_with_eof: bool
 
 
@@ -180,7 +183,13 @@ def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdb
                 if channel_id not in cache.channel_defs:
                     raise TsdbParseError(f"Undefined channel id {channel_id}")
                 format_id, series_name = cache.channel_defs[channel_id]
-                value, offset = read_format_value(raw, offset, format_id)
+                if cache.ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                    v_min, offset = read_format_value(raw, offset, format_id)
+                    v_avg, offset = read_format_value(raw, offset, format_id)
+                    v_max, offset = read_format_value(raw, offset, format_id)
+                    value = {"min": v_min, "avg": v_avg, "max": v_max}
+                else:
+                    value, offset = read_format_value(raw, offset, format_id)
                 cache.series_events.setdefault(series_name, []).append(Event(cache.current_ts, value))
                 continue
 
@@ -193,7 +202,13 @@ def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdb
                 if channel_id not in cache.channel_defs:
                     raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
                 format_id, series_name = cache.channel_defs[channel_id]
-                value, offset = read_format_value(raw, offset, format_id)
+                if cache.ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                    v_min, offset = read_format_value(raw, offset, format_id)
+                    v_avg, offset = read_format_value(raw, offset, format_id)
+                    v_max, offset = read_format_value(raw, offset, format_id)
+                    value = {"min": v_min, "avg": v_avg, "max": v_max}
+                else:
+                    value, offset = read_format_value(raw, offset, format_id)
                 cache.series_events.setdefault(series_name, []).append(Event(cache.current_ts, value))
                 continue
 
@@ -256,6 +271,25 @@ def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdb
                 cache.series_format_ids.setdefault(series_name, format_id)
                 continue
 
+            if entry_type == ENTRY_TYPE_META_INFO:
+                _ensure_available(raw, offset, 1, "meta-info key length")
+                key_len = raw[offset]
+                offset += 1
+                _ensure_available(raw, offset, key_len, "meta-info key")
+                key = raw[offset:offset + key_len].decode("utf-8")
+                offset += key_len
+                _ensure_available(raw, offset, 1, "meta-info format id")
+                format_id = raw[offset]
+                offset += 1
+                value, offset = read_format_value(raw, offset, format_id)
+                cache.meta_info[key] = value
+                if key == "dsBucketMs":
+                    try:
+                        cache.ds_bucket_ms = int(value)
+                    except Exception:
+                        cache.ds_bucket_ms = None
+                continue
+
             if entry_type == ENTRY_TYPE_EOF:
                 ended_with_eof = True
                 break
@@ -289,6 +323,8 @@ def _build_cache_from_scratch(path: str, st: os.stat_result) -> CachedTsdbFile:
         channel_defs={},
         series_format_ids={},
         series_events={},
+        meta_info={},
+        ds_bucket_ms=None,
         ended_with_eof=False,
     )
     consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw[12:], 12, cache)
@@ -387,6 +423,10 @@ def is_numeric_format_id(format_id: Optional[int]) -> bool:
     return hi in {0x1, 0x2, 0x3, 0x4, 0x5, 0x9, 0xA, 0xB, 0xC, 0xD} and 0 <= lo <= 3
 
 
+def is_string_format_id(format_id: Optional[int]) -> bool:
+    return format_id in {FORMAT_STRING_U8, FORMAT_STRING_U16, FORMAT_STRING_U32, FORMAT_STRING_U64}
+
+
 def read_tsdb_events_for_series(path: str, target_series: str, start_ms: int, end_ms: int) -> List[Event]:
     cache = get_cached_tsdb_file(path)
     events = cache.series_events.get(target_series, [])
@@ -410,6 +450,7 @@ class TimeSeriesDbData:
         self._series_values: dict[str, list[TimeSeriesPoint]] = {}
         self._events: list[tuple[int, str, Any]] = []
         self._series_format_ids: dict[str, int] = {}
+        self._meta_info: dict[str, Any] = {}
 
     def _append(self, series_name: str, timestamp_ms: int, value: Any) -> None:
         point = TimeSeriesPoint(timestamp_ms, value)
@@ -430,6 +471,12 @@ class TimeSeriesDbData:
 
     def get_series_format_id(self, series_name: str) -> Optional[int]:
         return self._series_format_ids.get(series_name)
+
+    def set_meta_info(self, key: str, value: Any) -> None:
+        self._meta_info[key] = value
+
+    def get_meta_info(self, key: str) -> Any:
+        return self._meta_info.get(key)
 
     def dump(self, out: Optional[TextIO] = None) -> None:
         stream = out if out is not None else sys.stdout
@@ -475,6 +522,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
     result = TimeSeriesDbData()
     channel_defs: dict[int, tuple[int, str]] = {}
     current_ts: Optional[int] = None
+    ds_bucket_ms: Optional[int] = None
     stream = dump_out if dump_out is not None else None
     if stream is not None:
         stream.write("Events:\n")
@@ -493,7 +541,13 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if channel_id not in channel_defs:
                 raise TsdbParseError(f"Undefined channel id {channel_id}")
             format_id, series_name = channel_defs[channel_id]
-            value, offset = read_format_value(raw, offset, format_id)
+            if ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                v_min, offset = read_format_value(raw, offset, format_id)
+                v_avg, offset = read_format_value(raw, offset, format_id)
+                v_max, offset = read_format_value(raw, offset, format_id)
+                value = {"min": v_min, "avg": v_avg, "max": v_max}
+            else:
+                value, offset = read_format_value(raw, offset, format_id)
             entry_bytes = raw[entry_start:offset]
             if stream is not None and verbose:
                 stream.write(
@@ -522,7 +576,13 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if channel_id not in channel_defs:
                 raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
             format_id, series_name = channel_defs[channel_id]
-            value, offset = read_format_value(raw, offset, format_id)
+            if ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                v_min, offset = read_format_value(raw, offset, format_id)
+                v_avg, offset = read_format_value(raw, offset, format_id)
+                v_max, offset = read_format_value(raw, offset, format_id)
+                value = {"min": v_min, "avg": v_avg, "max": v_max}
+            else:
+                value, offset = read_format_value(raw, offset, format_id)
             entry_bytes = raw[entry_start:offset]
             if stream is not None and verbose:
                 stream.write(
@@ -628,6 +688,31 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
                 stream.write(
                     f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
                     f"(def ch16={channel_id} format=0x{format_id:02x} name={series_name!r})\n"
+                )
+            continue
+
+        if entry_type == ENTRY_TYPE_META_INFO:
+            _ensure_available(raw, offset, 1, "meta-info key length")
+            key_len = raw[offset]
+            offset += 1
+            _ensure_available(raw, offset, key_len, "meta-info key")
+            key = raw[offset:offset + key_len].decode("utf-8")
+            offset += key_len
+            _ensure_available(raw, offset, 1, "meta-info format id")
+            format_id = raw[offset]
+            offset += 1
+            value, offset = read_format_value(raw, offset, format_id)
+            result.set_meta_info(key, value)
+            if key == "dsBucketMs":
+                try:
+                    ds_bucket_ms = int(value)
+                except Exception:
+                    ds_bucket_ms = None
+            if stream is not None and verbose:
+                entry_bytes = raw[entry_start:offset]
+                stream.write(
+                    f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} "
+                    f"(meta key={key!r} format=0x{format_id:02x} value={value!r})\n"
                 )
             continue
 
@@ -924,6 +1009,59 @@ def encode_value_for_format(value: Any, format_id: int) -> Optional[bytes]:
     return None
 
 
+def _best_integer_meta_format(value: int) -> int:
+    if value < 0:
+        if -(1 << 7) <= value <= (1 << 7) - 1:
+            return 0x10
+        if -(1 << 15) <= value <= (1 << 15) - 1:
+            return 0x20
+        if -(1 << 23) <= value <= (1 << 23) - 1:
+            return 0x30
+        if -(1 << 31) <= value <= (1 << 31) - 1:
+            return 0x40
+        return 0x50
+    if value <= 0xFF:
+        return 0x90
+    if value <= 0xFFFF:
+        return 0xA0
+    if value <= 0xFFFFFF:
+        return 0xB0
+    if value <= 0xFFFFFFFF:
+        return 0xC0
+    return 0xD0
+
+
+def _write_meta_info_entry(f: Any, key: str, value: Any) -> None:
+    key_bytes = key.encode("utf-8")
+    if len(key_bytes) > 255:
+        raise ValueError(f"Meta-info key too long: {key!r}")
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, int):
+        format_id = _best_integer_meta_format(value)
+    elif isinstance(value, str):
+        raw = value.encode("utf-8")
+        if len(raw) <= 0xFF:
+            format_id = FORMAT_STRING_U8
+        elif len(raw) <= 0xFFFF:
+            format_id = FORMAT_STRING_U16
+        elif len(raw) <= 0xFFFFFFFF:
+            format_id = FORMAT_STRING_U32
+        else:
+            format_id = FORMAT_STRING_U64
+    elif isinstance(value, float):
+        format_id = FORMAT_DOUBLE
+    else:
+        raise ValueError(f"Unsupported meta-info value type for key={key!r}")
+    payload = encode_value_for_format(value, format_id)
+    if payload is None:
+        raise ValueError(f"Cannot encode meta-info value for key={key!r}")
+    f.write(bytes([ENTRY_TYPE_META_INFO, len(key_bytes)]))
+    f.write(key_bytes)
+    f.write(bytes([format_id]))
+    f.write(payload)
+
+
 def select_best_format_for_series(values: list[Any]) -> int:
     if not values:
         raise ValueError("Cannot select a format for an empty series")
@@ -1200,6 +1338,72 @@ def double_format_id_for_decimals(decimals: int) -> int:
     return FORMAT_DOUBLE_DEC6PLUS
 
 
+def write_downsampled_timeseries_db(
+    path: str,
+    bucket_ms: int,
+    series_order: List[str],
+    series_to_format: Dict[str, int],
+    numeric_points: Dict[str, List[Tuple[int, Any, Any, Any]]],
+    string_points: Dict[str, List[Tuple[int, str]]],
+) -> None:
+    if bucket_ms <= 0:
+        raise ValueError("bucket_ms must be > 0")
+
+    series_names = [name for name in series_order if name in series_to_format]
+    series_to_channel: Dict[str, int] = {name: idx for idx, name in enumerate(series_names)}
+    per_timestamp: Dict[int, List[Tuple[int, bytes]]] = {}
+
+    for series_name in series_names:
+        format_id = series_to_format[series_name]
+        channel_id = series_to_channel[series_name]
+        if is_numeric_format_id(format_id):
+            for timestamp_ms, v_min, v_avg, v_max in numeric_points.get(series_name, []):
+                p_min = encode_value_for_format(v_min, format_id)
+                p_avg = encode_value_for_format(v_avg, format_id)
+                p_max = encode_value_for_format(v_max, format_id)
+                if p_min is None or p_avg is None or p_max is None:
+                    raise ValueError(f"Cannot encode downsampled numeric value for series={series_name!r}")
+                per_timestamp.setdefault(timestamp_ms, []).append((channel_id, p_min + p_avg + p_max))
+        elif is_string_format_id(format_id):
+            for timestamp_ms, value in string_points.get(series_name, []):
+                payload = encode_value_for_format(value, format_id)
+                if payload is None:
+                    raise ValueError(f"Cannot encode downsampled string value for series={series_name!r}")
+                per_timestamp.setdefault(timestamp_ms, []).append((channel_id, payload))
+
+    with open(path, "wb") as f:
+        f.write(TSDB_TAG_BYTES)
+        f.write(struct.pack("<I", TSDB_VERSION))
+        _write_meta_info_entry(f, "dsBucketMs", int(bucket_ms))
+
+        for series_name in series_names:
+            channel_id = series_to_channel[series_name]
+            format_id = series_to_format[series_name]
+            name_bytes = series_name.encode("utf-8")
+            if len(name_bytes) > 255:
+                raise ValueError(f"Series name too long ({len(name_bytes)} bytes > 255): {series_name!r}")
+            if channel_id <= 0xEF:
+                f.write(bytes([ENTRY_TYPE_CHANNEL_DEF_8, channel_id, format_id, len(name_bytes)]))
+            else:
+                f.write(bytes([ENTRY_TYPE_CHANNEL_DEF_16]))
+                f.write(channel_id.to_bytes(2, "little"))
+                f.write(bytes([format_id, len(name_bytes)]))
+            f.write(name_bytes)
+
+        current_ts: Optional[int] = None
+        for timestamp_ms in sorted(per_timestamp.keys()):
+            current_ts = _append_timestamp_entry(f, current_ts, int(timestamp_ms))
+            for channel_id, payload in sorted(per_timestamp[timestamp_ms], key=lambda item: item[0]):
+                if channel_id <= 0xEF:
+                    f.write(bytes([channel_id]))
+                else:
+                    f.write(bytes([ENTRY_TYPE_CHANNEL_VALUE_16]))
+                    f.write(channel_id.to_bytes(2, "little"))
+                f.write(payload)
+        f.write(bytes([ENTRY_TYPE_EOF]))
+    invalidate_tsdb_cache(path)
+
+
 class TimeSeriesDbAppender:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -1297,4 +1501,3 @@ class TimeSeriesDbAppender:
                 if series_name.endswith("/name") and isinstance(value, str):
                     self.latest_name_values[series_name] = value
         invalidate_tsdb_cache(self.path)
-

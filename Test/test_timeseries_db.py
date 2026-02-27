@@ -13,6 +13,7 @@ from tsdb_collector import (
     read_timeseries_db,
     save_collector_config,
 )
+from tsdb import get_cached_tsdb_file, write_downsampled_timeseries_db
 
 
 def test_roundtrip_double_and_string_values(tmp_path):
@@ -73,6 +74,27 @@ def test_querying_missing_series_returns_empty_list(tmp_path):
 
     db = read_timeseries_db(str(path))
     assert db.get_series_values("missing") == []
+
+
+def test_downsampled_file_roundtrip_and_cache_metadata(tmp_path):
+    path = tmp_path / "data5s_2026-02-20.tsdb"
+    write_downsampled_timeseries_db(
+        str(path),
+        5000,
+        ["pv.power", "state"],
+        {"pv.power": 0x02, "state": 0x08},
+        {"pv.power": [(2500, 100.0, 101.25, 102.0)]},
+        {"state": [(2500, "on")]},
+    )
+
+    db = read_timeseries_db(str(path))
+    assert db.get_meta_info("dsBucketMs") == 5000
+    assert db.get_series_values("pv.power") == [(2500, {"min": 100.0, "avg": 101.25, "max": 102.0})]
+    assert db.get_series_values("state") == [(2500, "on")]
+
+    cache = get_cached_tsdb_file(str(path))
+    assert cache.ds_bucket_ms == 5000
+    assert cache.meta_info["dsBucketMs"] == 5000
 
 
 def _extract_channel_format_ids(path):

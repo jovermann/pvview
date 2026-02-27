@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 13;
+  const FRONTEND_API_VERSION = 14;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
