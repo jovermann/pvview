@@ -7,7 +7,14 @@ like sensor data or PV inverter data.
 Files
 -----
 One file per UTC day. New files start at 00:00:00 UTC. Each file contains multiple time series.
-Filenames: data_2026-02-13.tsdb
+Original data and downsampled data in various granularity are stored in separate files, to allow manual deletion of old high resolution data.
+
+data_YYYY-MM-DD.tsdb: Original data. Not downsampled.
+data5s_YYYY-MM-DD.tsdb: Downsampled to 5s buckets.
+data15s_YYYY-MM-DD.tsdb: Downsampled to 15s buckets.
+data1m_YYYY-MM-DD.tsdb: Downsampled to 1m buckets.
+data5m_YYYY-MM-DD.tsdb: Downsampled to 5m buckets.
+data15m_YYYY-MM-DD.tsdb: Downsampled to 15m buckets.
 
 Binary format
 -------------
@@ -31,11 +38,11 @@ uint8_t data[]; // The semantics and layout of data depends on the type and is d
 ValueEntries
 ------------
 uint8_t type = 0..0xef; // channelId: The channel id must be defined by a type=0xf5 channel definition beforehand. Also the timestamp must be set beforehand.
-uint8_t data[]; // Data in the format defined for this channel id (see type=0xf5).
+uint8_t data[]; // Data in the format defined for this channel id (see type=0xf5). For downsampled data (dsBucketMs present) this is min/avg/max (three items of the defined format). For non-downsampled data (dsBucketMs not present) this is the value.
 
 uint8_t type = 0xff; // Escape for 16-bit (uint16_t) channel id. The 16 bit channel id must be defined by a type=0xf6 channel definition beforehand. Also the timestamp must be set beforehand.
 uint16_t channelId16; // 16-bit channel id 0xf0..0xffff
-uint8_t data[]; // Data in the format defined for this channel id (see type=0xf6).
+uint8_t data[]; // Data in the format defined for this channel id (see type=0xf6). For downsampled data (dsBucketMs present) this is min/avg/max (three items of the defined format). For non-downsampled data (dsBucketMs not present) this is the value.
 
 TimeEntries
 -----------
@@ -62,6 +69,33 @@ uint16_t channelId16; // Channel id (0xf0..0xffff).
 uint8_t formatId; // Format of the value of ValueEntries for this channel (see table below).
 uint8_t nameLen; // Length of the name in bytes.
 uint8_t name[nameLen]; // Name of this channel in UTF-8.
+
+MetaInfoEntries
+---------------
+Meta-info entries (key/value pairs) may occur anywhere in a TSDB file, but global meta-info entries always occur before the
+first ChannelDefinitionEntry and before the first TimeEntry. If a certain meta-info entry did not occur before the first
+ChannelDefinitionEntry and before the first TimeEntry it can be safely assumed that this meta-info entry is not present
+and should thus have its default value/semantics.
+
+uint8_t type = 0xf7; // Meta-info entry, a key/value pair where key is a UTF-8 string and value is a signed/unsigned integer, a float/double or a string.
+uint8_t keyLen; // Length of the key name in bytes. 0..255 bytes.
+uint8_t key[keyLen]; // Key of this key/value pair in UTF-8.
+uint8_t formatId; // Format of the value. See format ids.
+uint8_t value[]; // Value in the format described by formatId.
+
+Defined MetaInfoEntry keys
+--------------------------
+key dsBucketMs, value N (any integer format): Global meta-info: If this is present, then this file contains downsampled time series, downsampled to a bucket size of N ms (N > 0).
+    If this is not present then this file does not contain downsampled data.
+    The bucket size is always a whole fraction of 1d. Typical bucket sizes used are 5s, 15s, 1m, 5m, 15m, 1h.
+    When this key is present the layout for numeric values changes from a simple value:
+    The layout of data[] for numeric ValueEntries is min/avg/max (minimum, average and maximum in the current bucket). The format id is always the same as the original data and this format is used for min/avg/max.
+    Avg is the arithmetic average and is accumulated as double and is quantized to the nearest value upon serialization, potentially losing fractional information. It is rounded towards 0 when tied.
+    String values are assigned to the bucket covering their timestamp and thus their timestamp gets changed to the center timestamp of the bucket. The string itself is unchanged. If multiple strings for the same channel occur in the same bucket, only the last string put into the bucket (last write wins semantics).
+    The timestamp of each bucket is the center timestamp, rounded down to the nearest ms.
+    The first bucket of a day starts at 00:00:00 UTC which is also the starting time of each day file.
+    Bucket N on the UTC day of the file is associated with all timestamps [N*dsBucketMs, (N+1)*dsBucketMs) of that UTC day.
+    Empty buckets are omitted. Their center timestamp is not present in the file.
 
 SpecialEntries
 --------------
@@ -131,3 +165,4 @@ Constraints
 - A channel id X must be defined before any values for channel X occur in the sequence of entries.
 - The initial timestamp must be set before the first value in the sequence of entries.
 - A timestamp applies to all following values until a new timestamp is set.
+
