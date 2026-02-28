@@ -15,7 +15,7 @@ from tsdb_collector import (
     save_collector_config,
 )
 from tsdb import get_cached_tsdb_file, write_downsampled_timeseries_db
-from tsdb_server import _get_or_build_downsampled_day_points
+from tsdb_server import _get_or_build_downsampled_day_points, get_virtual_series_points, save_virtual_series_config, VirtualSeriesDef
 
 
 def test_roundtrip_double_and_string_values(tmp_path):
@@ -127,6 +127,69 @@ def test_current_day_downsampling_updates_incrementally_for_completed_buckets(tm
     assert points[0]["min"] == pytest.approx(10.0)
     assert points[0]["avg"] == pytest.approx(12.0)
     assert points[0]["max"] == pytest.approx(14.0)
+
+
+def test_virtual_series_uses_bucketed_source_data(tmp_path):
+    day = datetime.date(2026, 2, 20)
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    path = tmp_path / f"data_{day.isoformat()}.tsdb"
+
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("a", 10.0, timestamp_ms=day_start_ms + 1000)
+    writer.addValue("a", 20.0, timestamp_ms=day_start_ms + 3000)
+    writer.addValue("a", 30.0, timestamp_ms=day_start_ms + 6000)
+    writer.addValue("a", 40.0, timestamp_ms=day_start_ms + 8000)
+    writer.addValue("b", 1.0, timestamp_ms=day_start_ms + 1200)
+    writer.addValue("b", 2.0, timestamp_ms=day_start_ms + 3200)
+    writer.addValue("b", 3.0, timestamp_ms=day_start_ms + 6200)
+    writer.addValue("b", 4.0, timestamp_ms=day_start_ms + 8200)
+    writer.close(mark_complete=True)
+
+    save_virtual_series_config(str(tmp_path), [VirtualSeriesDef(name="sum", left="a", op="+", right="b")], [], 10000)
+    result = get_virtual_series_points(str(tmp_path), "sum", day_start_ms, day_start_ms + 9999, 5000)
+    assert result is not None
+    points, decimal_places, files = result
+    assert decimal_places == 0
+    assert files == [f"data5s_{day.isoformat()}.tsdb"]
+    assert len(points) == 2
+    assert points[0]["timestamp"] == day_start_ms + 2500
+    assert points[0]["min"] == pytest.approx(11.0)
+    assert points[0]["avg"] == pytest.approx(17.0)
+    assert points[0]["max"] == pytest.approx(22.0)
+    assert points[1]["timestamp"] == day_start_ms + 7500
+    assert points[1]["min"] == pytest.approx(33.0)
+    assert points[1]["avg"] == pytest.approx(39.0)
+    assert points[1]["max"] == pytest.approx(44.0)
+
+
+def test_virtual_yesterday_uses_bucketed_source_data(tmp_path):
+    day1 = datetime.date(2026, 2, 20)
+    day2 = datetime.date(2026, 2, 21)
+    start1 = int(datetime.datetime(day1.year, day1.month, day1.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    start2 = int(datetime.datetime(day2.year, day2.month, day2.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    path1 = tmp_path / f"data_{day1.isoformat()}.tsdb"
+    path2 = tmp_path / f"data_{day2.isoformat()}.tsdb"
+
+    writer1 = create_timeseries_db_writer(str(path1))
+    writer1.addValue("yieldtotal", 100.0, timestamp_ms=start1 + 1000)
+    writer1.addValue("yieldtotal", 110.0, timestamp_ms=start1 + 3000)
+    writer1.close(mark_complete=True)
+
+    writer2 = create_timeseries_db_writer(str(path2))
+    writer2.addValue("yieldtotal", 125.0, timestamp_ms=start2 + 1000)
+    writer2.addValue("yieldtotal", 135.0, timestamp_ms=start2 + 3000)
+    writer2.close(mark_complete=True)
+
+    save_virtual_series_config(str(tmp_path), [VirtualSeriesDef(name="yday", left="yieldtotal", op="yesterday", right="")], [], 10000)
+    result = get_virtual_series_points(str(tmp_path), "yday", start2, start2 + 4999, 5000)
+    assert result is not None
+    points, _decimal_places, files = result
+    assert files == [f"data5s_{day1.isoformat()}.tsdb", f"data5s_{day2.isoformat()}.tsdb"]
+    assert len(points) == 1
+    assert points[0]["timestamp"] == start2 + 2500
+    assert points[0]["avg"] == pytest.approx(25.0)
+    assert points[0]["min"] == pytest.approx(25.0)
+    assert points[0]["max"] == pytest.approx(25.0)
 
 
 def _extract_channel_format_ids(path):

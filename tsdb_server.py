@@ -643,6 +643,274 @@ def _downsample_fixed_numeric_events(
     return points
 
 
+def _point_numeric_stats(point: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(point, dict):
+        return None
+    if "avg" in point and isinstance(point.get("avg"), (int, float)) and not isinstance(point.get("avg"), bool):
+        return {
+            "timestamp": int(point.get("timestamp", 0)),
+            "start": int(point.get("start", point.get("timestamp", 0))),
+            "end": int(point.get("end", point.get("timestamp", 0))),
+            "count": int(point.get("count", 1) or 1),
+            "min": float(point.get("min", point["avg"])),
+            "avg": float(point["avg"]),
+            "max": float(point.get("max", point["avg"])),
+        }
+    if "value" in point and isinstance(point.get("value"), (int, float)) and not isinstance(point.get("value"), bool):
+        value = float(point["value"])
+        ts = int(point.get("timestamp", 0))
+        return {"timestamp": ts, "start": ts, "end": ts, "count": 1, "min": value, "avg": value, "max": value}
+    return None
+
+
+def _apply_numeric_op(op: str, a: float, b: float) -> Optional[float]:
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "*":
+        return a * b
+    if op == "/":
+        return None if b == 0 else (a / b)
+    return None
+
+
+def _combine_numeric_extrema(op: str, left: Dict[str, Any], right: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    candidates: List[float] = []
+    for a in (float(left["min"]), float(left["max"])):
+        for b in (float(right["min"]), float(right["max"])):
+            out = _apply_numeric_op(op, a, b)
+            if out is None or out != out or abs(out) == float("inf"):
+                continue
+            candidates.append(out)
+    if not candidates:
+        return None, None
+    return min(candidates), max(candidates)
+
+
+def _combine_numeric_points(
+    left_points: List[Dict[str, Any]],
+    right_points: List[Dict[str, Any]],
+    op: str,
+    align_window_ms: int,
+    decimal_places: int,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    right_stats: List[Dict[str, Any]] = []
+    right_ts: List[int] = []
+    for point in right_points:
+        stats = _point_numeric_stats(point)
+        if stats is None:
+            continue
+        right_stats.append(stats)
+        right_ts.append(int(stats["timestamp"]))
+    if not right_stats:
+        return result
+    window = max(0, int(align_window_ms))
+    for point in left_points:
+        left = _point_numeric_stats(point)
+        if left is None:
+            continue
+        lt = int(left["timestamp"])
+        pos = bisect.bisect_left(right_ts, lt)
+        best_idx: Optional[int] = None
+        best_dist: Optional[int] = None
+        for cand in (pos - 1, pos):
+            if cand < 0 or cand >= len(right_stats):
+                continue
+            rt = right_ts[cand]
+            dist = abs(rt - lt)
+            if dist > window:
+                continue
+            if best_dist is None or dist < best_dist or (dist == best_dist and rt < right_ts[best_idx]):
+                best_idx = cand
+                best_dist = dist
+        if best_idx is None:
+            continue
+        right = right_stats[best_idx]
+        avg_out = _apply_numeric_op(op, float(left["avg"]), float(right["avg"]))
+        if avg_out is None or avg_out != avg_out or abs(avg_out) == float("inf"):
+            continue
+        min_out, max_out = _combine_numeric_extrema(op, left, right)
+        if min_out is None or max_out is None:
+            min_out = avg_out
+            max_out = avg_out
+        result.append(
+            {
+                "timestamp": lt,
+                "start": int(left["start"]),
+                "end": int(left["end"]),
+                "count": min(int(left["count"]), int(right["count"])),
+                "min": round(min_out, decimal_places),
+                "avg": round(avg_out, decimal_places),
+                "max": round(max_out, decimal_places),
+            }
+        )
+    return result
+
+
+def _combine_numeric_points_with_constant(
+    points: List[Dict[str, Any]],
+    constant: float,
+    op: str,
+    constant_on_left: bool,
+    decimal_places: int,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for point in points:
+        stats = _point_numeric_stats(point)
+        if stats is None:
+            continue
+        a_avg = constant if constant_on_left else float(stats["avg"])
+        b_avg = float(stats["avg"]) if constant_on_left else constant
+        avg_out = _apply_numeric_op(op, a_avg, b_avg)
+        if avg_out is None or avg_out != avg_out or abs(avg_out) == float("inf"):
+            continue
+        left_stats = {"min": constant, "max": constant} if constant_on_left else stats
+        right_stats = stats if constant_on_left else {"min": constant, "max": constant}
+        min_out, max_out = _combine_numeric_extrema(op, left_stats, right_stats)
+        if min_out is None or max_out is None:
+            min_out = avg_out
+            max_out = avg_out
+        result.append(
+            {
+                "timestamp": int(stats["timestamp"]),
+                "start": int(stats["start"]),
+                "end": int(stats["end"]),
+                "count": int(stats["count"]),
+                "min": round(min_out, decimal_places),
+                "avg": round(avg_out, decimal_places),
+                "max": round(max_out, decimal_places),
+            }
+        )
+    return result
+
+
+def _compute_virtual_points_today(points: List[Dict[str, Any]], decimal_places: int) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    day_start_value: Dict[Tuple[int, int, int], float] = {}
+    for point in points:
+        stats = _point_numeric_stats(point)
+        if stats is None:
+            continue
+        dt = datetime.datetime.fromtimestamp(int(stats["timestamp"]) / 1000.0).astimezone()
+        key = (dt.year, dt.month, dt.day)
+        start_value = day_start_value.get(key)
+        baseline = float(stats["min"])
+        if start_value is None:
+            day_start_value[key] = baseline
+            min_out = avg_out = max_out = 0.0
+        else:
+            min_out = max(0.0, float(stats["min"]) - start_value)
+            avg_out = max(0.0, float(stats["avg"]) - start_value)
+            max_out = max(0.0, float(stats["max"]) - start_value)
+        result.append(
+            {
+                "timestamp": int(stats["timestamp"]),
+                "start": int(stats["start"]),
+                "end": int(stats["end"]),
+                "count": int(stats["count"]),
+                "min": round(min_out, decimal_places),
+                "avg": round(avg_out, decimal_places),
+                "max": round(max_out, decimal_places),
+            }
+        )
+    return result
+
+
+def _compute_virtual_points_yesterday(points: List[Dict[str, Any]], decimal_places: int) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    day_first_value: Dict[Tuple[int, int, int], float] = {}
+    for point in points:
+        stats = _point_numeric_stats(point)
+        if stats is None:
+            continue
+        dt = datetime.datetime.fromtimestamp(int(stats["timestamp"]) / 1000.0).astimezone()
+        key = (dt.year, dt.month, dt.day)
+        if key not in day_first_value:
+            day_first_value[key] = float(stats["min"])
+    for point in points:
+        stats = _point_numeric_stats(point)
+        if stats is None:
+            continue
+        dt = datetime.datetime.fromtimestamp(int(stats["timestamp"]) / 1000.0).astimezone()
+        key = (dt.year, dt.month, dt.day)
+        today_first = day_first_value.get(key)
+        prev_day = dt.date() - datetime.timedelta(days=1)
+        prev_key = (prev_day.year, prev_day.month, prev_day.day)
+        prev_first = day_first_value.get(prev_key)
+        if today_first is None or prev_first is None:
+            continue
+        delta = today_first - prev_first
+        if delta != delta or abs(delta) == float("inf"):
+            continue
+        result.append(
+            {
+                "timestamp": int(stats["timestamp"]),
+                "start": int(stats["start"]),
+                "end": int(stats["end"]),
+                "count": int(stats["count"]),
+                "min": round(delta, decimal_places),
+                "avg": round(delta, decimal_places),
+                "max": round(delta, decimal_places),
+            }
+        )
+    return result
+
+
+def _real_series_points_for_virtual(
+    data_dir: str,
+    series_name: str,
+    start_ms: int,
+    end_ms: int,
+    bucket_ms: int,
+) -> Tuple[List[Dict[str, Any]], int, List[str]]:
+    files = find_candidate_files(data_dir, start_ms, end_ms)
+    max_decimal_places: Optional[int] = None
+    if bucket_ms <= 0:
+        events: List[Event] = []
+        for path in files:
+            events.extend(read_tsdb_events_for_series(path, series_name, start_ms, end_ms))
+            fmt = get_series_format_id_in_file(path, series_name)
+            if is_numeric_format_id(fmt):
+                d = decimal_places_from_format_id(fmt)
+                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+        events.sort(key=lambda e: e.timestamp_ms)
+        return [{"timestamp": e.timestamp_ms, "value": e.value} for e in events], max_decimal_places if max_decimal_places is not None else 3, [os.path.basename(p) for p in files]
+
+    has_daily_files = bool(files) and all(os.path.basename(path).startswith("data_") for path in files)
+    if not has_daily_files:
+        events = []
+        for path in files:
+            events.extend(read_tsdb_events_for_series(path, series_name, start_ms, end_ms))
+            fmt = get_series_format_id_in_file(path, series_name)
+            if is_numeric_format_id(fmt):
+                d = decimal_places_from_format_id(fmt)
+                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+        events.sort(key=lambda e: e.timestamp_ms)
+        return (
+            _downsample_fixed_numeric_events(events, bucket_ms, start_ms, end_ms, decimal_places=max_decimal_places if max_decimal_places is not None else 3),
+            max_decimal_places if max_decimal_places is not None else 3,
+            [os.path.basename(p) for p in files],
+        )
+
+    points: List[Dict[str, Any]] = []
+    files_used: List[str] = []
+    for day in day_range_utc(start_ms, end_ms):
+        day_files, day_points = _get_or_build_downsampled_day_points(data_dir, day, bucket_ms, series_name, start_ms, end_ms)
+        for name in day_files:
+            if name not in files_used:
+                files_used.append(name)
+        points.extend(day_points)
+    for path in files:
+        fmt = get_series_format_id_in_file(path, series_name)
+        if is_numeric_format_id(fmt):
+            d = decimal_places_from_format_id(fmt)
+            max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+    points.sort(key=lambda p: int(p.get("timestamp", 0)))
+    return points, max_decimal_places if max_decimal_places is not None else 3, files_used
+
+
 def build_error(status: int, code: str, message: str) -> Tuple[int, Dict[str, Any]]:
     return status, {"error": {"code": code, "message": message}}
 
@@ -1115,6 +1383,71 @@ def _resolve_virtual_operand(
     return False, None, events, dp, files, sig
 
 
+def _resolve_virtual_operand_points(
+    data_dir: str,
+    operand: str,
+    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str]]],
+    start_ms: int,
+    end_ms: int,
+    bucket_ms: int,
+) -> Tuple[bool, Optional[float], List[Dict[str, Any]], int, List[str]]:
+    const = _parse_virtual_constant(operand)
+    if const is not None:
+        return True, float(const), [], 3, []
+    prior = prior_virtuals.get(str(operand))
+    if prior is not None:
+        points, dp, files = prior
+        return False, None, list(points), int(dp), list(files)
+    points, dp, files = _real_series_points_for_virtual(data_dir, operand, start_ms, end_ms, bucket_ms)
+    return False, None, points, dp, files
+
+
+def _compute_one_virtual_series_points(
+    data_dir: str,
+    d: VirtualSeriesDef,
+    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str]]],
+    start_ms: int,
+    end_ms: int,
+    bucket_ms: int,
+    align_window_ms: int,
+) -> Tuple[List[Dict[str, Any]], int, List[str]]:
+    operand_start_ms = start_ms
+    operand_end_ms = end_ms
+    if d.op in {"today", "yesterday"}:
+        start_day = datetime.datetime.fromtimestamp(start_ms / 1000.0, tz=datetime.timezone.utc).date()
+        end_day = datetime.datetime.fromtimestamp(end_ms / 1000.0, tz=datetime.timezone.utc).date()
+        if d.op == "yesterday":
+            start_day = start_day - datetime.timedelta(days=1)
+        operand_start_ms = _day_start_ms(start_day)
+        operand_end_ms = _day_start_ms(end_day) + 86_400_000 - 1
+    left_is_const, left_const, left_points, left_dp, left_files = _resolve_virtual_operand_points(
+        data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, bucket_ms
+    )
+    if d.op in {"today", "yesterday"}:
+        if left_is_const:
+            return [], 3, []
+        decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
+        points = _compute_virtual_points_today(left_points, decimal_places) if d.op == "today" else _compute_virtual_points_yesterday(left_points, decimal_places)
+        points = [p for p in points if start_ms <= int(p.get("timestamp", 0)) <= end_ms]
+        return points, decimal_places, sorted(set(left_files))
+
+    right_is_const, right_const, right_points, right_dp, right_files = _resolve_virtual_operand_points(
+        data_dir, d.right, prior_virtuals, start_ms, end_ms, bucket_ms
+    )
+    decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
+    if left_is_const and right_is_const:
+        return [], 3, []
+    if left_is_const:
+        return _combine_numeric_points_with_constant(right_points, float(left_const), d.op, True, decimal_places), decimal_places, sorted(set(right_files))
+    if right_is_const:
+        return _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places), decimal_places, sorted(set(left_files))
+    return (
+        _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places),
+        decimal_places,
+        sorted(set(left_files + right_files)),
+    )
+
+
 def _compute_one_virtual_series_cached(
     data_dir: str,
     d: VirtualSeriesDef,
@@ -1226,6 +1559,37 @@ def get_virtual_series_events_cached(data_dir: str, series_name: str) -> Optiona
         prior_virtuals[d.name] = (events, decimal_places, files, sig)
     events, decimal_places, files, _sig = prior_virtuals[series_name]
     return list(events), int(decimal_places), list(files)
+
+
+def get_virtual_series_points(
+    data_dir: str,
+    series_name: str,
+    start_ms: int,
+    end_ms: int,
+    bucket_ms: int,
+) -> Optional[Tuple[List[Dict[str, Any]], int, List[str]]]:
+    defs, _overrides, align_window_ms = load_virtual_series_config(data_dir)
+    target_idx: Optional[int] = None
+    for i, d in enumerate(defs):
+        if d.name == series_name:
+            target_idx = i
+            break
+    if target_idx is None:
+        return None
+    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str]]] = {}
+    for d in defs[:target_idx + 1]:
+        points, decimal_places, files = _compute_one_virtual_series_points(
+            data_dir,
+            d,
+            prior_virtuals,
+            start_ms,
+            end_ms,
+            bucket_ms,
+            align_window_ms,
+        )
+        prior_virtuals[d.name] = (points, decimal_places, files)
+    points, decimal_places, files = prior_virtuals[series_name]
+    return list(points), int(decimal_places), list(files)
 
 
 class TsdbRequestHandler(BaseHTTPRequestHandler):
@@ -1481,8 +1845,31 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
-        virtual = get_virtual_series_events_cached(data_dir, series)
+        virtual_bucket_ms = 0 if (end_ms - start_ms + 1) < _DOWNSAMPLE_BUCKETS[0][0] else _choose_fixed_bucket_ms(start_ms, end_ms, max_events)
+        virtual = get_virtual_series_points(data_dir, series, start_ms, end_ms, virtual_bucket_ms) if virtual_bucket_ms > 0 else None
+        if virtual is None:
+            virtual = get_virtual_series_events_cached(data_dir, series)
         if virtual is not None:
+            if virtual_bucket_ms > 0 and isinstance(virtual[0], list) and (not virtual[0] or isinstance(virtual[0][0], dict)):
+                points = list(virtual[0])
+                max_decimal_places = int(virtual[1])
+                files_used = list(virtual[2])
+                downsampled = True
+                bucket_ms = virtual_bucket_ms
+                response: Dict[str, Any] = {
+                    "series": series,
+                    "start": start_ms,
+                    "end": end_ms,
+                    "requestedMaxEvents": max_events,
+                    "returnedPoints": len(points),
+                    "downsampled": downsampled,
+                    "files": files_used,
+                    "points": points,
+                }
+                if max_decimal_places is not None:
+                    response["decimalPlaces"] = max_decimal_places
+                response["bucketMs"] = bucket_ms
+                return response
             all_events, max_decimal_places, virtual_files = virtual
             events = [e for e in all_events if start_ms <= e.timestamp_ms <= end_ms]
             files = [os.path.join(data_dir, f) for f in virtual_files]
