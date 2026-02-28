@@ -14,7 +14,7 @@ from tsdb_collector import (
     read_timeseries_db,
     save_collector_config,
 )
-from tsdb import get_cached_tsdb_file, write_downsampled_timeseries_db, stat_timeseries_db
+from tsdb import get_cached_tsdb_file, write_downsampled_timeseries_db, stat_timeseries_db, write_series_array_timeseries_db
 from tsdb_server import _get_or_build_downsampled_day_points, get_virtual_series_points, save_virtual_series_config, VirtualSeriesDef
 
 
@@ -97,6 +97,37 @@ def test_downsampled_file_roundtrip_and_cache_metadata(tmp_path):
     cache = get_cached_tsdb_file(str(path))
     assert cache.ds_bucket_ms == 5000
     assert cache.meta_info["dsBucketMs"] == 5000
+
+
+def test_series_array_roundtrip(tmp_path):
+    day = datetime.date(2026, 2, 20)
+    path = tmp_path / "dsda_2026-02-20.5s.tsdb"
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    write_series_array_timeseries_db(
+        str(path),
+        day,
+        5000,
+        ["pv.power", "pv.temp"],
+        {"pv.power": 1, "pv.temp": 1},
+        {
+            "pv.power": [
+                (day_start_ms + 2500, {"min": 10.0, "avg": 11.0, "max": 12.0}),
+                (day_start_ms + 7500, {"min": 20.0, "avg": 21.0, "max": 22.0}),
+            ],
+            "pv.temp": [
+                (day_start_ms + 2500, {"min": 30.0, "avg": 31.0, "max": 32.0}),
+            ],
+        },
+        3,
+    )
+    db = read_timeseries_db(str(path))
+    assert db.get_series_values("pv.power") == [
+        (day_start_ms + 2500, {"min": 10.0, "avg": 11.0, "max": 12.0}),
+        (day_start_ms + 7500, {"min": 20.0, "avg": 21.0, "max": 22.0}),
+    ]
+    assert db.get_series_values("pv.temp") == [
+        (day_start_ms + 2500, {"min": 30.0, "avg": 31.0, "max": 32.0}),
+    ]
 
 
 def test_current_day_downsampling_updates_incrementally_for_completed_buckets(tmp_path):
@@ -447,6 +478,32 @@ def test_cli_stat_tsdb_prints_tables(tmp_path):
     assert "values" in result.stdout
     assert "timestamps" in result.stdout
     assert "channel definitions" in result.stdout
+
+
+def test_cli_downsample_creates_series_array_variants(tmp_path):
+    day = datetime.date(2026, 2, 20)
+    path = tmp_path / f"data_{day.isoformat()}.tsdb"
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.0, timestamp_ms=day_start_ms + 200)
+    writer.addValue("pv.power", 20.0, timestamp_ms=day_start_ms + 1200)
+    writer.addValue("pv.power", 30.0, timestamp_ms=day_start_ms + 5200)
+    writer.close(mark_complete=True)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--downsample", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    for label in ("1s", "5s", "15s", "1m", "5m", "15m", "1h"):
+        out_path = tmp_path / f"dsda_{day.isoformat()}.{label}.tsdb"
+        assert out_path.exists()
+        db = read_timeseries_db(str(out_path))
+        assert "pv.power" in db.list_series()
 
 
 def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):

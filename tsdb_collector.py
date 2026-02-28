@@ -22,8 +22,11 @@ from tsdb import (
     TimeSeriesDbAppender,
     compress_timeseries_db_file,
     create_timeseries_db_writer,
+    decimal_places_from_format_id,
+    downsample_series_points,
     read_timeseries_db,
     stat_timeseries_db,
+    write_series_array_timeseries_db,
 )
 
 COLLECTOR_UI_API_VERSION = 1
@@ -315,6 +318,82 @@ def _print_tsdb_file_stats(path: str) -> None:
             f"{pct:>{summary_widths[3]}.2f}%"
         )
 
+
+_DOWNSAMPLE_LEVELS: list[tuple[int, str, int]] = [
+    (1000, "1s", 1),
+    (5000, "5s", 3),
+    (15000, "15s", 3),
+    (60000, "1m", 3),
+    (300000, "5m", 3),
+    (900000, "15m", 3),
+    (3600000, "1h", 3),
+]
+
+
+def _parse_downsample_input_path(path: str) -> tuple[datetime.date, int]:
+    base = os.path.basename(path)
+    if base.startswith("data_") and base.endswith(".tsdb"):
+        return datetime.date.fromisoformat(base[5:15]), 0
+    m = re.fullmatch(r"dsda_(\d{4}-\d{2}-\d{2})\.(1s|5s|15s|1m|5m|15m|1h)\.tsdb", base)
+    if m:
+        day = datetime.date.fromisoformat(m.group(1))
+        label = m.group(2)
+        for bucket_ms, bucket_label, _elem_size in _DOWNSAMPLE_LEVELS:
+            if bucket_label == label:
+                return day, bucket_ms
+    raise ValueError(f"Unsupported downsample input file name: {path!r}")
+
+
+def _downsample_output_path(input_path: str, day: datetime.date, label: str) -> str:
+    return os.path.join(os.path.dirname(input_path), f"dsda_{day.isoformat()}.{label}.tsdb")
+
+
+def _downsample_file(path: str) -> None:
+    source_path = os.path.abspath(path)
+    day, source_bucket_ms = _parse_downsample_input_path(source_path)
+    db = read_timeseries_db(source_path)
+    source_points_by_series = {
+        series_name: [
+            (ts_ms, value)
+            for ts_ms, value in db.get_series_values(series_name)
+            if isinstance(value, dict) or (isinstance(value, (int, float)) and not isinstance(value, bool))
+        ]
+        for series_name in db.list_series()
+    }
+    series_names = [series_name for series_name in db.list_series() if source_points_by_series.get(series_name)]
+    series_decimals = {
+        series_name: min(3, decimal_places_from_format_id(db.get_series_format_id(series_name)))
+        for series_name in series_names
+    }
+    next_levels = [level for level in _DOWNSAMPLE_LEVELS if level[0] > source_bucket_ms]
+    if not next_levels:
+        print(f"No coarser downsample levels above {source_path}")
+        return
+    current_points_by_series = source_points_by_series
+    for bucket_ms, label, elem_size in next_levels:
+        output_path = _downsample_output_path(source_path, day, label)
+        print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label})")
+        next_points_by_series: dict[str, list[tuple[int, Any]]] = {}
+        for idx, series_name in enumerate(series_names, start=1):
+            print(f"  series {idx}/{len(series_names)}: {series_name}")
+            next_points_by_series[series_name] = downsample_series_points(
+                current_points_by_series.get(series_name, []),
+                day,
+                bucket_ms,
+                elem_size,
+                series_decimals.get(series_name, 0),
+            )
+        write_series_array_timeseries_db(
+            output_path,
+            day,
+            bucket_ms,
+            series_names,
+            series_decimals,
+            next_points_by_series,
+            elem_size,
+        )
+        print(f"  wrote {output_path}")
+        current_points_by_series = next_points_by_series
 
 _EMBEDDED_DEMO_SERIES_TEXT = """
 solar/ac/power=1200.0
@@ -1527,6 +1606,7 @@ def main() -> int:
     parser.add_argument("--topics", action="append", default=[], help="MQTT subscription topic filter (repeatable)")
     parser.add_argument("--dump-tsdb", help="Dump a TimeSeriesDB file in human-readable format")
     parser.add_argument("--stat-tsdb", metavar="TSDB_FILE", help="Print byte statistics for a TimeSeriesDB file")
+    parser.add_argument("--downsample", metavar="DATA_FILE", help="Read data_* or dsda_* TSDB file and create all coarser dsda_* variants up to 1h")
     parser.add_argument("--generate-demo-db", type=int, metavar="DAYS", help="Generate demo TSDB files for DAYS days")
     parser.add_argument("--compress", metavar="DBFILE", help="Compress a TSDB file in place")
     parser.add_argument("--timeout", type=float, default=1.0, help="Seconds to listen for topics when listing (default: 1.0)")
@@ -1591,6 +1671,14 @@ def main() -> int:
             _print_tsdb_file_stats(stat_path)
         except Exception as exc:
             print(f"Failed to stat DB file {stat_path!r}: {exc}")
+            return 2
+        return 0
+    if args.downsample:
+        downsample_path = resolve_tsdb_path(args.downsample)
+        try:
+            _downsample_file(downsample_path)
+        except Exception as exc:
+            print(f"Failed to downsample DB file {downsample_path!r}: {exc}")
             return 2
         return 0
     if args.generate_demo_db is not None:
@@ -1675,7 +1763,7 @@ def main() -> int:
             http_config=default_http,
         )
 
-    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --stat-tsdb, --generate-demo-db, or --compress.")
+    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --stat-tsdb, --downsample, --generate-demo-db, or --compress.")
     return 2
 
 

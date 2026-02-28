@@ -10,11 +10,13 @@ One file per UTC day. New files start at 00:00:00 UTC. Each file contains multip
 Original data and downsampled data in various granularity are stored in separate files, to allow manual deletion of old high resolution data.
 
 data_YYYY-MM-DD.tsdb: Original data. Not downsampled.
-data5s_YYYY-MM-DD.tsdb: Downsampled to 5s buckets.
-data15s_YYYY-MM-DD.tsdb: Downsampled to 15s buckets.
-data1m_YYYY-MM-DD.tsdb: Downsampled to 1m buckets.
-data5m_YYYY-MM-DD.tsdb: Downsampled to 5m buckets.
-data15m_YYYY-MM-DD.tsdb: Downsampled to 15m buckets.
+dsda_YYYY-MM-DD.1s.tsdb: Downsampled to 1s buckets. No min/avg/max, just plain values.
+dsda_YYYY-MM-DD.5s.tsdb: Downsampled to 5s buckets. Min/avg/max.
+dsda_YYYY-MM-DD.15s.tsdb: Downsampled to 15s buckets. Min/avg/max.
+dsda_YYYY-MM-DD.1m.tsdb: Downsampled to 1m buckets. Min/avg/max.
+dsda_YYYY-MM-DD.5m.tsdb: Downsampled to 5m buckets. Min/avg/max.
+dsda_YYYY-MM-DD.15m.tsdb: Downsampled to 15m buckets. Min/avg/max.
+dsda_YYYY-MM-DD.1h.tsdb: Downsampled to 1h buckets. Min/avg/max.
 
 Binary format
 -------------

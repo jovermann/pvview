@@ -20,6 +20,7 @@ ENTRY_TYPE_TIME_REL_32 = 0xF4
 ENTRY_TYPE_CHANNEL_DEF_8 = 0xF5
 ENTRY_TYPE_CHANNEL_DEF_16 = 0xF6
 ENTRY_TYPE_META_INFO = 0xF7
+ENTRY_TYPE_SERIES_ARRAY = 0xF8
 ENTRY_TYPE_EOF = 0xFE
 ENTRY_TYPE_VALUE_16 = 0xFF
 ENTRY_TYPE_CHANNEL_VALUE_16 = ENTRY_TYPE_VALUE_16
@@ -110,6 +111,53 @@ def _read_scalar(data: bytes, offset: int, byte_count: int, signed: bool) -> Tup
     raise TsdbParseError(f"Unsupported scalar byte_count={byte_count}")
 
 
+def _read_uleb128(data: bytes, offset: int) -> Tuple[int, int]:
+    shift = 0
+    value = 0
+    while True:
+        _ensure_available(data, offset, 1, "ULEB128")
+        b = data[offset]
+        offset += 1
+        value |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return value, offset
+        shift += 7
+        if shift > 70:
+            raise TsdbParseError("ULEB128 too large")
+
+
+def _write_uleb128(value: int) -> bytes:
+    if value < 0:
+        raise ValueError("ULEB128 value must be >= 0")
+    out = bytearray()
+    remaining = int(value)
+    while True:
+        b = remaining & 0x7F
+        remaining >>= 7
+        if remaining:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _zigzag_encode(value: int) -> int:
+    return value * 2 if value >= 0 else ((-value) * 2 - 1)
+
+
+def _zigzag_decode(value: int) -> int:
+    return (value >> 1) ^ -(value & 1)
+
+
+def _read_zigzag_leb128(data: bytes, offset: int) -> Tuple[int, int]:
+    value, offset = _read_uleb128(data, offset)
+    return _zigzag_decode(value), offset
+
+
+def _write_zigzag_leb128(value: int) -> bytes:
+    return _write_uleb128(_zigzag_encode(int(value)))
+
+
 def read_format_value(data: bytes, offset: int, format_id: int) -> Tuple[Any, int]:
     if format_id == FORMAT_FLOAT:
         _ensure_available(data, offset, 4, "float")
@@ -167,7 +215,7 @@ def _is_incomplete_parse_error(exc: TsdbParseError) -> bool:
     return str(exc).startswith("Unexpected EOF while reading")
 
 
-def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdbFile) -> Tuple[int, bool]:
+def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdbFile, path: str) -> Tuple[int, bool]:
     offset = 0
     ended_with_eof = False
     while offset < len(raw):
@@ -290,6 +338,12 @@ def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdb
                         cache.ds_bucket_ms = None
                 continue
 
+            if entry_type == ENTRY_TYPE_SERIES_ARRAY:
+                if cache.channel_defs or cache.current_ts is not None:
+                    raise TsdbParseError("Series Array entries must not be mixed with regular TSDB entries")
+                offset = _parse_series_array_entry(raw, entry_start, offset, cache, path)
+                continue
+
             if entry_type == ENTRY_TYPE_EOF:
                 ended_with_eof = True
                 break
@@ -327,10 +381,105 @@ def _build_cache_from_scratch(path: str, st: os.stat_result) -> CachedTsdbFile:
         ds_bucket_ms=None,
         ended_with_eof=False,
     )
-    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw[12:], 12, cache)
+    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw[12:], 12, cache, path)
     cache.parsed_offset = 12 + consumed
     cache.ended_with_eof = ended_with_eof
     return cache
+
+
+def _day_from_tsdb_path(path: str) -> datetime.date:
+    base = os.path.basename(path)
+    for prefix in ("data_", "dsda_"):
+        if base.startswith(prefix):
+            rest = base[len(prefix):]
+            if len(rest) >= 10:
+                try:
+                    return datetime.date.fromisoformat(rest[:10])
+                except ValueError:
+                    pass
+    raise TsdbParseError(f"Cannot derive UTC day from TSDB filename: {path!r}")
+
+
+def _slot_center_timestamp_ms(day: datetime.date, num_elements: int, index: int) -> int:
+    if num_elements <= 0 or 86_400_000 % num_elements != 0:
+        raise TsdbParseError(f"Invalid numElements in series array: {num_elements}")
+    slot_ms = 86_400_000 // num_elements
+    day_start = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    return day_start + index * slot_ms + (slot_ms // 2)
+
+
+def _format_id_from_n_decimals(n_decimals: int) -> int:
+    n = max(0, min(6, int(n_decimals)))
+    return {
+        0: FORMAT_DOUBLE,
+        1: FORMAT_DOUBLE_DEC1,
+        2: FORMAT_DOUBLE_DEC2,
+        3: FORMAT_DOUBLE_DEC3,
+        4: FORMAT_DOUBLE_DEC4,
+        5: FORMAT_DOUBLE_DEC5,
+        6: FORMAT_DOUBLE_DEC6PLUS,
+    }[n]
+
+
+def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: CachedTsdbFile, path: str) -> int:
+    entry_size, offset = _read_uleb128(raw, offset)
+    entry_end = entry_start + entry_size
+    if entry_end > len(raw):
+        raise TsdbParseError(f"Series Array entry exceeds file size at offset {entry_start}")
+    name_len, offset = _read_uleb128(raw, offset)
+    _ensure_available(raw, offset, name_len, "series array name")
+    series_name = raw[offset:offset + name_len].decode("utf-8")
+    offset += name_len
+    num_elements, offset = _read_uleb128(raw, offset)
+    _ensure_available(raw, offset, 2, "series array header")
+    n_decimals = raw[offset]
+    elem_size = raw[offset + 1]
+    offset += 2
+    if elem_size not in (1, 3):
+        raise TsdbParseError(f"Unsupported elemSize {elem_size} in series array")
+    void_element, offset = _read_uleb128(raw, offset)
+    day = _day_from_tsdb_path(path)
+    slot_ms = 86_400_000 // num_elements if num_elements > 0 and (86_400_000 % num_elements == 0) else 0
+    if slot_ms <= 0:
+        raise TsdbParseError(f"Invalid numElements {num_elements} in series array")
+    cache.series_format_ids.setdefault(series_name, _format_id_from_n_decimals(n_decimals))
+    cache.ds_bucket_ms = slot_ms
+    cache.meta_info.setdefault("dsBucketMs", slot_ms)
+
+    element_index = 0
+    last_value = 0
+    while offset < entry_end:
+        chunk_len, offset = _read_zigzag_leb128(raw, offset)
+        if chunk_len == 0:
+            raise TsdbParseError("Series array chunkLen must not be 0")
+        if chunk_len < 0:
+            element_index += -chunk_len
+            continue
+        for _ in range(chunk_len):
+            if element_index >= num_elements:
+                raise TsdbParseError("Series array element index exceeds numElements")
+            decoded_values: List[int] = []
+            for _j in range(elem_size):
+                delta, offset = _read_zigzag_leb128(raw, offset)
+                last_value += delta
+                decoded_values.append(last_value)
+            is_void = all(v == void_element for v in decoded_values)
+            if not is_void:
+                ts_ms = _slot_center_timestamp_ms(day, num_elements, element_index)
+                scale = 10 ** int(n_decimals)
+                if elem_size == 1:
+                    value: Any = decoded_values[0] / scale
+                else:
+                    value = {
+                        "min": decoded_values[0] / scale,
+                        "avg": decoded_values[1] / scale,
+                        "max": decoded_values[2] / scale,
+                    }
+                cache.series_events.setdefault(series_name, []).append(Event(ts_ms, value))
+            element_index += 1
+    if element_index != num_elements:
+        raise TsdbParseError(f"Series array elements {element_index} != numElements {num_elements}")
+    return entry_end
 
 
 def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbFile) -> CachedTsdbFile:
@@ -346,7 +495,7 @@ def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbF
         f.seek(parse_from)
         raw = f.read(st.st_size - parse_from)
 
-    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw, parse_from, cache)
+    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw, parse_from, cache, path)
     cache.parsed_offset = parse_from + consumed
     cache.ended_with_eof = ended_with_eof
     cache.mtime_ns = st.st_mtime_ns
@@ -356,6 +505,7 @@ def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbF
 
 def get_cached_tsdb_file(path: str) -> CachedTsdbFile:
     st = os.stat(path)
+    series_array_file = os.path.basename(path).startswith("dsda_")
     with _TSDB_CACHE_LOCK:
         cache = _TSDB_FILE_CACHE.get(path)
         if cache is None:
@@ -363,6 +513,10 @@ def get_cached_tsdb_file(path: str) -> CachedTsdbFile:
             _TSDB_FILE_CACHE[path] = cache
             return cache
         if st.st_mtime_ns == cache.mtime_ns and st.st_size == cache.size:
+            return cache
+        if series_array_file:
+            cache = _build_cache_from_scratch(path, st)
+            _TSDB_FILE_CACHE[path] = cache
             return cache
         if st.st_size < cache.parsed_offset:
             cache = _build_cache_from_scratch(path, st)
@@ -676,6 +830,49 @@ def stat_timeseries_db(path: str) -> TsdbFileStats:
                     ds_bucket_ms = None
             other_count += 1
             continue
+        if entry_type == ENTRY_TYPE_SERIES_ARRAY:
+            entry_size, offset = _read_uleb128(raw, offset)
+            entry_end = entry_start + entry_size
+            if entry_end > len(raw):
+                raise TsdbParseError(f"Series Array entry exceeds file size at offset {entry_start}")
+            name_len, offset = _read_uleb128(raw, offset)
+            _ensure_available(raw, offset, name_len, "series array name")
+            offset += name_len
+            num_elements, offset = _read_uleb128(raw, offset)
+            _ensure_available(raw, offset, 2, "series array header")
+            n_decimals = raw[offset]
+            elem_size = raw[offset + 1]
+            offset += 2
+            if elem_size not in (1, 3):
+                raise TsdbParseError(f"Unsupported elemSize {elem_size} in series array")
+            void_element, offset = _read_uleb128(raw, offset)
+            value_format_id = _format_id_from_n_decimals(n_decimals)
+            non_void_count = 0
+            last_value = 0
+            while offset < entry_end:
+                chunk_len, offset = _read_zigzag_leb128(raw, offset)
+                if chunk_len == 0:
+                    raise TsdbParseError("Series array chunkLen must not be 0")
+                if chunk_len < 0:
+                    continue
+                for _ in range(chunk_len):
+                    decoded_values: List[int] = []
+                    for _ in range(elem_size):
+                        delta, offset = _read_zigzag_leb128(raw, offset)
+                        last_value += delta
+                        decoded_values.append(last_value)
+                    if not all(v == void_element for v in decoded_values):
+                        non_void_count += 1
+            if offset != entry_end:
+                raise TsdbParseError(f"Series array entry parsing did not end on entry boundary at {entry_start}")
+            value_payload_size = elem_size * 8
+            per_format_counts[value_format_id] = per_format_counts.get(value_format_id, 0) + non_void_count
+            per_format_total_bytes[value_format_id] = per_format_total_bytes.get(value_format_id, 0) + non_void_count * value_payload_size
+            per_format_value_sizes.setdefault(value_format_id, set()).add(value_payload_size)
+            value_count += non_void_count
+            value_bytes += non_void_count * value_payload_size
+            other_count += 1
+            continue
         if entry_type == ENTRY_TYPE_EOF:
             other_count += 1
             break
@@ -726,6 +923,24 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
     version = int.from_bytes(raw[8:12], "little")
     if version != TSDB_VERSION:
         raise TsdbParseError(f"Unsupported TSDB version {version} in {path!r}")
+    if len(raw) > 12 and raw[12] == ENTRY_TYPE_SERIES_ARRAY:
+        cache = get_cached_tsdb_file(path)
+        result = TimeSeriesDbData()
+        for key, value in cache.meta_info.items():
+            result.set_meta_info(key, value)
+        events: List[Tuple[int, str, Any]] = []
+        for series_name, series_events in cache.series_events.items():
+            format_id = cache.series_format_ids.get(series_name)
+            if format_id is not None:
+                result._set_series_format_id(series_name, format_id)
+            for ev in series_events:
+                events.append((ev.timestamp_ms, series_name, ev.value))
+        events.sort(key=lambda item: (item[0], item[1]))
+        for ts_ms, series_name, value in events:
+            result._append(series_name, ts_ms, value)
+        if dump_out is not None:
+            result.dump(dump_out)
+        return result
 
     result = TimeSeriesDbData()
     channel_defs: dict[int, tuple[int, str]] = {}
@@ -1387,6 +1602,166 @@ def compress_timeseries_db_file(input_path: str, output_path: str) -> dict[str, 
         out.write(bytes([ENTRY_TYPE_EOF]))
     invalidate_tsdb_cache(output_path)
     return chosen_formats
+
+
+def write_series_array_timeseries_db(
+    path: str,
+    day: datetime.date,
+    bucket_ms: int,
+    series_order: List[str],
+    series_decimals: Dict[str, int],
+    series_points: Dict[str, List[Tuple[int, Any]]],
+    elem_size: int,
+) -> None:
+    if elem_size not in (1, 3):
+        raise ValueError(f"elem_size must be 1 or 3, got {elem_size}")
+    if bucket_ms <= 0 or 86_400_000 % bucket_ms != 0:
+        raise ValueError(f"bucket_ms must be a whole fraction of 1 day, got {bucket_ms}")
+    num_elements = 86_400_000 // bucket_ms
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+
+    with open(path, "wb") as f:
+        f.write(TSDB_TAG_BYTES)
+        f.write(struct.pack("<I", TSDB_VERSION))
+
+        for series_name in series_order:
+            decimals = max(0, min(3, int(series_decimals.get(series_name, 0))))
+            scale = 10 ** decimals
+            entries = series_points.get(series_name, [])
+            element_values: List[Optional[List[int]]] = [None] * num_elements
+            used_values: set[int] = set()
+            for ts_ms, value in entries:
+                idx = (int(ts_ms) - day_start_ms) // bucket_ms
+                if idx < 0 or idx >= num_elements:
+                    continue
+                if elem_size == 1:
+                    if isinstance(value, dict):
+                        numeric = float(value.get("avg"))
+                    else:
+                        numeric = float(value)
+                    encoded_values = [int(round(numeric * scale))]
+                else:
+                    if not isinstance(value, dict):
+                        numeric = float(value)
+                        encoded_values = [int(round(numeric * scale))] * 3
+                    else:
+                        encoded_values = [
+                            int(round(float(value["min"]) * scale)),
+                            int(round(float(value["avg"]) * scale)),
+                            int(round(float(value["max"]) * scale)),
+                        ]
+                element_values[idx] = encoded_values
+                used_values.update(encoded_values)
+            void_element = max([0] + [abs(v) for v in used_values]) + 1
+            while void_element in used_values:
+                void_element += 1
+
+            payload = bytearray()
+            name_bytes = series_name.encode("utf-8")
+            payload.extend(_write_uleb128(len(name_bytes)))
+            payload.extend(name_bytes)
+            payload.extend(_write_uleb128(num_elements))
+            payload.append(decimals)
+            payload.append(elem_size)
+            payload.extend(_write_uleb128(void_element))
+
+            last_value = 0
+            idx = 0
+            while idx < num_elements:
+                if element_values[idx] is None:
+                    run = 1
+                    while idx + run < num_elements and element_values[idx + run] is None:
+                        run += 1
+                    if run >= 2:
+                        payload.extend(_write_zigzag_leb128(-run))
+                        idx += run
+                        continue
+                    chunk_values = [void_element] * elem_size
+                    payload.extend(_write_zigzag_leb128(1))
+                    for v in chunk_values:
+                        payload.extend(_write_zigzag_leb128(v - last_value))
+                        last_value = v
+                    idx += 1
+                    continue
+                run_values: List[List[int]] = []
+                while idx < num_elements and element_values[idx] is not None:
+                    run_values.append(element_values[idx] or [])
+                    idx += 1
+                payload.extend(_write_zigzag_leb128(len(run_values)))
+                for values in run_values:
+                    for v in values:
+                        payload.extend(_write_zigzag_leb128(v - last_value))
+                        last_value = v
+
+            entry_size_bytes = b""
+            while True:
+                entry_size = 1 + len(entry_size_bytes) + len(payload)
+                next_bytes = _write_uleb128(entry_size)
+                if len(next_bytes) == len(entry_size_bytes) and next_bytes == entry_size_bytes:
+                    break
+                entry_size_bytes = next_bytes
+            f.write(bytes([ENTRY_TYPE_SERIES_ARRAY]))
+            f.write(entry_size_bytes)
+            f.write(payload)
+    invalidate_tsdb_cache(path)
+
+
+def downsample_series_points(
+    series_values: List[Tuple[int, Any]],
+    day: datetime.date,
+    target_bucket_ms: int,
+    target_elem_size: int,
+    decimals: int,
+) -> List[Tuple[int, Any]]:
+    if target_bucket_ms <= 0 or 86_400_000 % target_bucket_ms != 0:
+        raise ValueError(f"Invalid target_bucket_ms={target_bucket_ms}")
+    if target_elem_size not in (1, 3):
+        raise ValueError(f"Invalid target_elem_size={target_elem_size}")
+    scale_decimals = max(0, min(3, int(decimals)))
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    buckets: Dict[int, Dict[str, Any]] = {}
+    for ts_ms, value in series_values:
+        idx = (int(ts_ms) - day_start_ms) // target_bucket_ms
+        if idx < 0:
+            continue
+        if isinstance(value, dict):
+            v_min = float(value["min"])
+            v_avg = float(value["avg"])
+            v_max = float(value["max"])
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            v_min = v_avg = v_max = float(value)
+        else:
+            continue
+        bucket = buckets.get(idx)
+        if bucket is None:
+            buckets[idx] = {"count": 1, "sum_avg": v_avg, "min": v_min, "max": v_max}
+        else:
+            bucket["count"] += 1
+            bucket["sum_avg"] += v_avg
+            if v_min < bucket["min"]:
+                bucket["min"] = v_min
+            if v_max > bucket["max"]:
+                bucket["max"] = v_max
+    out: List[Tuple[int, Any]] = []
+    for idx in sorted(buckets.keys()):
+        bucket = buckets[idx]
+        bucket_start = day_start_ms + idx * target_bucket_ms
+        ts_ms = bucket_start + (target_bucket_ms // 2)
+        avg = round(bucket["sum_avg"] / bucket["count"], scale_decimals)
+        if target_elem_size == 1:
+            out.append((ts_ms, avg))
+        else:
+            out.append(
+                (
+                    ts_ms,
+                    {
+                        "min": round(bucket["min"], scale_decimals),
+                        "avg": avg,
+                        "max": round(bucket["max"], scale_decimals),
+                    },
+                )
+            )
+    return out
 
 
 @dataclasses.dataclass
