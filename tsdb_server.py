@@ -47,6 +47,7 @@ import json
 import mimetypes
 import os
 import threading
+import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -89,8 +90,20 @@ class VirtualSeriesCacheEntry:
     files: List[str]
 
 
+@dataclass
+class SeriesAllFilesCacheEntry:
+    file_signatures: Tuple[Tuple[Any, ...], ...]
+    events: List[Event]
+    decimal_places: int
+    files: List[str]
+
+
 _VIRTUAL_SERIES_CACHE_LOCK = threading.Lock()
 _VIRTUAL_SERIES_RESULT_CACHE: Dict[Tuple[str, str], VirtualSeriesCacheEntry] = {}
+
+_SERIES_ALL_FILES_CACHE_LOCK = threading.Lock()
+_SERIES_ALL_FILES_CACHE: Dict[Tuple[str, str], SeriesAllFilesCacheEntry] = {}
+_REQUEST_TRACE = threading.local()
 
 _DOWNSAMPLE_BUCKETS: List[Tuple[int, str]] = [
     (5_000, "5s"),
@@ -790,6 +803,10 @@ def load_virtual_series_defs(data_dir: str) -> List[VirtualSeriesDef]:
     return defs
 
 
+def _virtual_series_name_set(data_dir: str) -> set[str]:
+    return {d.name for d in load_virtual_series_defs(data_dir)}
+
+
 def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit_overrides: List[Dict[str, Any]], align_window_ms: int = 10000) -> None:
     path = _virtual_series_file_path(data_dir)
     tmp = f"{path}.tmp"
@@ -842,22 +859,88 @@ def _all_tsdb_files(data_dir: str) -> List[str]:
 
 
 def _read_series_all_files(data_dir: str, series_name: str) -> Tuple[List[Event], int, List[str], Tuple[Any, ...]]:
-    events: List[Event] = []
+    t0 = time.perf_counter()
+    abs_data_dir = os.path.abspath(data_dir)
+    cache_key = (abs_data_dir, series_name)
+    file_signatures: List[Tuple[Any, ...]] = []
+    file_parts: List[Tuple[str, List[Event]]] = []
     max_decimal_places = 3
     files_used: List[str] = []
-    signature_parts: List[Any] = []
+
     for path in _all_tsdb_files(data_dir):
-        part = read_tsdb_events_for_series(path, series_name, 0, 2**63 - 1)
+        cache = get_cached_tsdb_file(path)
+        part = cache.series_events.get(series_name, [])
         if part:
-            events.extend(part)
             base = os.path.basename(path)
             files_used.append(base)
-            signature_parts.append((base, len(part), part[-1].timestamp_ms))
-        fmt = get_series_format_id_in_file(path, series_name)
+            file_parts.append((base, part))
+            file_signatures.append((base, cache.parsed_offset, len(part), part[-1].timestamp_ms))
+        fmt = cache.series_format_ids.get(series_name)
         if is_numeric_format_id(fmt):
             max_decimal_places = max(max_decimal_places, decimal_places_from_format_id(fmt))
-    events.sort(key=lambda e: e.timestamp_ms)
-    return events, max_decimal_places, files_used, tuple(signature_parts)
+
+    new_sig = tuple(file_signatures)
+    with _SERIES_ALL_FILES_CACHE_LOCK:
+        cached = _SERIES_ALL_FILES_CACHE.get(cache_key)
+        if cached is not None and cached.file_signatures == new_sig:
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            trace_reads = getattr(_REQUEST_TRACE, "series_reads", None)
+            if isinstance(trace_reads, list):
+                trace_reads.append(
+                    {
+                        "series": series_name,
+                        "cacheHit": True,
+                        "elapsedMs": elapsed_ms,
+                        "files": len(files_used),
+                        "points": len(cached.events),
+                        "prefixFiles": len(new_sig),
+                    }
+                )
+            return list(cached.events), cached.decimal_places, list(cached.files), new_sig
+
+    events: List[Event]
+    prefix_files = 0
+    if cached is not None:
+        max_prefix = min(len(cached.file_signatures), len(file_parts))
+        for i in range(max_prefix):
+            if cached.file_signatures[i] != new_sig[i]:
+                break
+            prefix_files += 1
+        if prefix_files > 0:
+            prefix_event_count = sum(int(sig[2]) for sig in cached.file_signatures[:prefix_files])
+            events = list(cached.events[:prefix_event_count])
+            for _base, part in file_parts[prefix_files:]:
+                events.extend(part)
+        else:
+            events = []
+            for _base, part in file_parts:
+                events.extend(part)
+    else:
+        events = []
+        for _base, part in file_parts:
+            events.extend(part)
+
+    with _SERIES_ALL_FILES_CACHE_LOCK:
+        _SERIES_ALL_FILES_CACHE[cache_key] = SeriesAllFilesCacheEntry(
+            file_signatures=new_sig,
+            events=list(events),
+            decimal_places=max_decimal_places,
+            files=list(files_used),
+        )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    trace_reads = getattr(_REQUEST_TRACE, "series_reads", None)
+    if isinstance(trace_reads, list):
+        trace_reads.append(
+            {
+                "series": series_name,
+                "cacheHit": False,
+                "elapsedMs": elapsed_ms,
+                "files": len(files_used),
+                "points": len(events),
+                "prefixFiles": prefix_files,
+            }
+        )
+    return events, max_decimal_places, files_used, new_sig
 
 
 def _compute_virtual_events(left_events: List[Event], right_events: List[Event], op: str, align_window_ms: int = 0) -> List[Event]:
@@ -1498,10 +1581,11 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         end_ms = parse_timestamp(end_raw)
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
+        virtual_names = _virtual_series_name_set(data_dir)
         if len(series_values) == 1:
-            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms))
+            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms, virtual_names))
             return
-        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms) for s in series_values]
+        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms, virtual_names) for s in series_values]
         self._send_json(
             200,
             {
@@ -1512,7 +1596,17 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _stats_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int) -> Dict[str, Any]:
+    def _stats_for_series(
+        self,
+        data_dir: str,
+        series: str,
+        start_ms: int,
+        end_ms: int,
+        virtual_names: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        _REQUEST_TRACE.series_reads = []
+        is_virtual = series in (virtual_names if virtual_names is not None else _virtual_series_name_set(data_dir))
         event_data = self._events_for_series(data_dir, series, start_ms, end_ms, STATS_MAX_EVENTS)
         points = list(event_data.get("points") or [])
         downsampled = bool(event_data.get("downsampled"))
@@ -1553,7 +1647,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                         max_value = v
 
         count = len(points)
-        return {
+        response = {
             "series": series,
             "start": start_ms,
             "end": end_ms,
@@ -1568,6 +1662,27 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             "downsampled": downsampled,
             "bucketMs": event_data.get("bucketMs"),
         }
+        trace_reads = getattr(_REQUEST_TRACE, "series_reads", [])
+        cache_hits = 0
+        cache_misses = 0
+        if isinstance(trace_reads, list):
+            for item in trace_reads:
+                if item.get("cacheHit"):
+                    cache_hits += 1
+                else:
+                    cache_misses += 1
+        source_cache = "n/a"
+        if trace_reads:
+            source_cache = "hit" if cache_misses == 0 else ("miss" if cache_hits == 0 else f"mixed({cache_hits}/{cache_misses})")
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        response["debug"] = {
+            "virtual": is_virtual,
+            "sourceCache": source_cache,
+            "elapsedMs": elapsed_ms,
+            "seriesReads": trace_reads if isinstance(trace_reads, list) else [],
+        }
+        _REQUEST_TRACE.series_reads = []
+        return response
 
     def _handle_virtual_series_get(self) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]

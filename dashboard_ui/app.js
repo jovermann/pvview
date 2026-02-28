@@ -1362,6 +1362,29 @@
       `stat ${id} request done batch series=${uniqueSiblingNames.length} returned=${statsItems.length} `
       + `elapsed=${Math.round(performance.now() - statsReqT0)}ms downsampled=${downsampledCount}/${statsItems.length}${bucketSummary}`
     );
+    for (const item of statsItems) {
+      if (!item || typeof item !== 'object' || typeof item.series !== 'string') continue;
+      const debug = (item.debug && typeof item.debug === 'object') ? item.debug : {};
+      const sourceCache = (typeof debug.sourceCache === 'string' && debug.sourceCache) ? debug.sourceCache : 'n/a';
+      const elapsedMs = Number.isFinite(Number(debug.elapsedMs)) ? Number(debug.elapsedMs) : null;
+      appendConsoleLine(
+        `stat ${id} series=${item.series} virtual=${debug.virtual ? 'yes' : 'no'} `
+        + `downsampled=${item.downsampled ? 'yes' : 'no'} bucket=${Number(item.bucketMs) > 0 ? Number(item.bucketMs) : 0} `
+        + `points=${Number.isFinite(Number(item.count)) ? Number(item.count) : 0} `
+        + `sourceCache=${sourceCache}${elapsedMs !== null ? ` elapsed=${elapsedMs}ms` : ''}`
+      );
+      const reads = Array.isArray(debug.seriesReads) ? debug.seriesReads : [];
+      for (const read of reads) {
+        if (!read || typeof read !== 'object' || typeof read.series !== 'string') continue;
+        appendConsoleLine(
+          `stat ${id} read series=${read.series} cache=${read.cacheHit ? 'hit' : 'miss'} `
+          + `files=${Number.isFinite(Number(read.files)) ? Number(read.files) : 0} `
+          + `points=${Number.isFinite(Number(read.points)) ? Number(read.points) : 0} `
+          + `prefixReuse=${Number.isFinite(Number(read.prefixFiles)) ? Number(read.prefixFiles) : 0} `
+          + `elapsed=${Number.isFinite(Number(read.elapsedMs)) ? Number(read.elapsedMs) : 0}ms`
+        );
+      }
+    }
     setPanelTitleMeta(id, `${Math.round(performance.now() - statsReqT0)} ms`);
 
     const rows = await Promise.all(cfg.series.map(async (seriesName) => {
