@@ -1,3 +1,4 @@
+import datetime
 import pytest
 import sys
 import subprocess
@@ -14,6 +15,7 @@ from tsdb_collector import (
     save_collector_config,
 )
 from tsdb import get_cached_tsdb_file, write_downsampled_timeseries_db
+from tsdb_server import _get_or_build_downsampled_day_points
 
 
 def test_roundtrip_double_and_string_values(tmp_path):
@@ -95,6 +97,36 @@ def test_downsampled_file_roundtrip_and_cache_metadata(tmp_path):
     cache = get_cached_tsdb_file(str(path))
     assert cache.ds_bucket_ms == 5000
     assert cache.meta_info["dsBucketMs"] == 5000
+
+
+def test_current_day_downsampling_updates_incrementally_for_completed_buckets(tmp_path):
+    day = datetime.datetime.now(datetime.timezone.utc).date()
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    path = tmp_path / f"data_{day.isoformat()}.tsdb"
+
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.0, timestamp_ms=day_start_ms + 1000)
+    writer.addValue("pv.power", 12.0, timestamp_ms=day_start_ms + 2000)
+    writer.addValue("pv.power", 14.0, timestamp_ms=day_start_ms + 4000)
+    writer.close()
+
+    files, points = _get_or_build_downsampled_day_points(str(tmp_path), day, 5000, "pv.power", day_start_ms, day_start_ms + 10000)
+    assert files == [path.name]
+    assert points == []
+
+    appender = TimeSeriesDbAppender(str(path))
+    appender.append_events([(day_start_ms + 6000, "pv.power", 20.0)])
+
+    files, points = _get_or_build_downsampled_day_points(str(tmp_path), day, 5000, "pv.power", day_start_ms, day_start_ms + 10000)
+    assert files == [path.name]
+    assert len(points) == 1
+    assert points[0]["timestamp"] == day_start_ms + 2500
+    assert points[0]["start"] == day_start_ms
+    assert points[0]["end"] == day_start_ms + 4999
+    assert points[0]["count"] == 3
+    assert points[0]["min"] == pytest.approx(10.0)
+    assert points[0]["avg"] == pytest.approx(12.0)
+    assert points[0]["max"] == pytest.approx(14.0)
 
 
 def _extract_channel_format_ids(path):

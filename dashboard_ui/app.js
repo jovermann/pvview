@@ -1351,9 +1351,16 @@
       ? statsResp.stats
       : ((statsResp && typeof statsResp.series === 'string') ? [statsResp] : []);
     const statsBySeries = new Map(statsItems.filter((x) => x && typeof x === 'object' && typeof x.series === 'string').map((x) => [x.series, x]));
+    const downsampledCount = statsItems.filter((x) => x && x.downsampled).length;
+    const bucketSet = new Set(
+      statsItems
+        .map((x) => (x && Number.isFinite(Number(x.bucketMs)) && Number(x.bucketMs) > 0) ? Number(x.bucketMs) : null)
+        .filter((x) => x !== null)
+    );
+    const bucketSummary = bucketSet.size ? ` buckets=${Array.from(bucketSet).sort((a, b) => a - b).join(',')}` : '';
     appendConsoleLine(
       `stat ${id} request done batch series=${uniqueSiblingNames.length} returned=${statsItems.length} `
-      + `elapsed=${Math.round(performance.now() - statsReqT0)}ms`
+      + `elapsed=${Math.round(performance.now() - statsReqT0)}ms downsampled=${downsampledCount}/${statsItems.length}${bucketSummary}`
     );
     setPanelTitleMeta(id, `${Math.round(performance.now() - statsReqT0)} ms`);
 

@@ -55,6 +55,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 API_VERSION = 14  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
+STATS_MAX_EVENTS = 1200
 
 from tsdb import (
     Event,
@@ -109,6 +110,10 @@ class DownsampledDayCacheEntry:
     string_series: Dict[str, List[Dict[str, Any]]]
     series_format_ids: Dict[str, int]
     files: List[str]
+    raw_parsed_offset: int = 0
+    raw_series_counts: Optional[Dict[str, int]] = None
+    pending_numeric: Optional[Dict[str, Dict[int, Dict[str, Any]]]] = None
+    pending_string: Optional[Dict[str, Dict[int, str]]] = None
 
 
 _DOWNSAMPLE_DAY_CACHE_LOCK = threading.Lock()
@@ -270,6 +275,138 @@ def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, bu
     )
 
 
+def _new_incremental_downsampled_day_cache_entry(path: str, day: datetime.date, bucket_ms: int) -> DownsampledDayCacheEntry:
+    cache = get_cached_tsdb_file(path)
+    return DownsampledDayCacheEntry(
+        source_signature=(path, cache.mtime_ns, cache.size, cache.parsed_offset),
+        bucket_ms=bucket_ms,
+        day=day,
+        numeric_series={},
+        string_series={},
+        series_format_ids=dict(cache.series_format_ids),
+        files=[os.path.basename(path)],
+        raw_parsed_offset=0,
+        raw_series_counts={},
+        pending_numeric={},
+        pending_string={},
+    )
+
+
+def _append_numeric_bucket_point(
+    entry: DownsampledDayCacheEntry,
+    series_name: str,
+    bucket_idx: int,
+    bucket: Dict[str, Any],
+) -> None:
+    day_start_ms = _day_start_ms(entry.day)
+    bucket_start = day_start_ms + bucket_idx * entry.bucket_ms
+    bucket_end = min(day_start_ms + 86_400_000 - 1, bucket_start + entry.bucket_ms - 1)
+    entry.numeric_series.setdefault(series_name, []).append(
+        {
+            "timestamp": _bucket_center_ms(bucket_start, entry.bucket_ms),
+            "start": bucket_start,
+            "end": bucket_end,
+            "count": int(bucket["count"]),
+            "min": bucket["min"],
+            "avg": bucket["sum"] / bucket["count"],
+            "max": bucket["max"],
+        }
+    )
+
+
+def _append_string_bucket_point(
+    entry: DownsampledDayCacheEntry,
+    series_name: str,
+    bucket_idx: int,
+    value: str,
+) -> None:
+    day_start_ms = _day_start_ms(entry.day)
+    bucket_start = day_start_ms + bucket_idx * entry.bucket_ms
+    entry.string_series.setdefault(series_name, []).append(
+        {"timestamp": _bucket_center_ms(bucket_start, entry.bucket_ms), "value": value}
+    )
+
+
+def _update_current_day_downsampled_cache_from_original(
+    path: str,
+    day: datetime.date,
+    bucket_ms: int,
+    entry: Optional[DownsampledDayCacheEntry],
+) -> DownsampledDayCacheEntry:
+    cache = get_cached_tsdb_file(path)
+    if (
+        entry is None
+        or entry.bucket_ms != bucket_ms
+        or entry.day != day
+        or entry.raw_series_counts is None
+        or entry.pending_numeric is None
+        or entry.pending_string is None
+        or cache.parsed_offset < entry.raw_parsed_offset
+    ):
+        entry = _new_incremental_downsampled_day_cache_entry(path, day, bucket_ms)
+
+    if cache.parsed_offset == entry.raw_parsed_offset and entry.series_format_ids == cache.series_format_ids:
+        entry.source_signature = (path, cache.mtime_ns, cache.size, cache.parsed_offset)
+        return entry
+
+    entry.series_format_ids = dict(cache.series_format_ids)
+    day_start_ms = _day_start_ms(day)
+    day_end_ms = day_start_ms + 86_400_000 - 1
+
+    for series_name, format_id in cache.series_format_ids.items():
+        events = cache.series_events.get(series_name, [])
+        prev_count = entry.raw_series_counts.get(series_name, 0)
+        if prev_count > len(events):
+            entry = _new_incremental_downsampled_day_cache_entry(path, day, bucket_ms)
+            prev_count = 0
+        if is_numeric_format_id(format_id):
+            series_pending = entry.pending_numeric.setdefault(series_name, {})
+            for ev in events[prev_count:]:
+                ts = ev.timestamp_ms
+                if ts < day_start_ms or ts > day_end_ms:
+                    continue
+                if not isinstance(ev.value, (int, float)) or isinstance(ev.value, bool):
+                    continue
+                bucket_idx = (ts - day_start_ms) // bucket_ms
+                bucket = series_pending.get(bucket_idx)
+                value = float(ev.value)
+                if bucket is None:
+                    series_pending[bucket_idx] = {"count": 1, "sum": value, "min": value, "max": value}
+                else:
+                    bucket["count"] += 1
+                    bucket["sum"] += value
+                    if value < bucket["min"]:
+                        bucket["min"] = value
+                    if value > bucket["max"]:
+                        bucket["max"] = value
+        elif is_string_format_id(format_id):
+            series_pending = entry.pending_string.setdefault(series_name, {})
+            for ev in events[prev_count:]:
+                ts = ev.timestamp_ms
+                if ts < day_start_ms or ts > day_end_ms or not isinstance(ev.value, str):
+                    continue
+                bucket_idx = (ts - day_start_ms) // bucket_ms
+                series_pending[bucket_idx] = ev.value
+        entry.raw_series_counts[series_name] = len(events)
+
+    latest_ts = cache.current_ts
+    if latest_ts is not None and latest_ts >= day_start_ms:
+        current_bucket_idx = min((latest_ts - day_start_ms) // bucket_ms, (86_400_000 - 1) // bucket_ms)
+        complete_before_idx = current_bucket_idx
+        for series_name, series_pending in entry.pending_numeric.items():
+            for bucket_idx in sorted([idx for idx in series_pending.keys() if idx < complete_before_idx]):
+                bucket = series_pending.pop(bucket_idx)
+                _append_numeric_bucket_point(entry, series_name, bucket_idx, bucket)
+        for series_name, series_pending in entry.pending_string.items():
+            for bucket_idx in sorted([idx for idx in series_pending.keys() if idx < complete_before_idx]):
+                value = series_pending.pop(bucket_idx)
+                _append_string_bucket_point(entry, series_name, bucket_idx, value)
+
+    entry.raw_parsed_offset = cache.parsed_offset
+    entry.source_signature = (path, cache.mtime_ns, cache.size, cache.parsed_offset)
+    return entry
+
+
 def _write_downsampled_day_cache(path: str, entry: DownsampledDayCacheEntry) -> None:
     series_order = sorted(entry.series_format_ids.keys())
     numeric_points = {
@@ -362,14 +499,11 @@ def _get_or_build_downsampled_day_points(
 
     today = datetime.datetime.now(datetime.timezone.utc).date()
     if day == today:
-        cache = get_cached_tsdb_file(original_path)
-        source_sig = (original_path, cache.mtime_ns, cache.size)
         key = (original_path, bucket_ms)
         with _DOWNSAMPLE_DAY_CACHE_LOCK:
             entry = _DOWNSAMPLE_DAY_CACHE.get(key)
-            if entry is None or entry.source_signature != source_sig:
-                entry = _build_downsampled_day_cache_from_original(original_path, day, bucket_ms)
-                _DOWNSAMPLE_DAY_CACHE[key] = entry
+            entry = _update_current_day_downsampled_cache_from_original(original_path, day, bucket_ms, entry)
+            _DOWNSAMPLE_DAY_CACHE[key] = entry
         _downsampled, points = _downsampled_points_from_day_cache(entry, series_name, start_ms, end_ms)
         return entry.files, points
 
@@ -1379,48 +1513,60 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _stats_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int) -> Dict[str, Any]:
-        files = find_candidate_files(data_dir, start_ms, end_ms)
-        events: List[Event] = []
-        max_decimal_places: Optional[int] = None
-        virtual = get_virtual_series_events_cached(data_dir, series)
-        if virtual is not None:
-            all_events, max_decimal_places, virtual_files = virtual
-            events = [e for e in all_events if start_ms <= e.timestamp_ms <= end_ms]
-            files = [os.path.join(data_dir, f) for f in virtual_files]
-        else:
-            for path in files:
-                events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
-                fmt = get_series_format_id_in_file(path, series)
-                if is_numeric_format_id(fmt):
-                    d = decimal_places_from_format_id(fmt)
-                    max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
-        events.sort(key=lambda e: e.timestamp_ms)
-
+        event_data = self._events_for_series(data_dir, series, start_ms, end_ms, STATS_MAX_EVENTS)
+        points = list(event_data.get("points") or [])
+        downsampled = bool(event_data.get("downsampled"))
         current_ts: Optional[int] = None
         current_value: Any = None
         max_value: Optional[float] = None
         numeric_count = 0
-        for ev in events:
-            current_ts = ev.timestamp_ms
-            current_value = ev.value
-            if isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool):
-                numeric_count += 1
-                v = float(ev.value)
-                if max_value is None or v > max_value:
-                    max_value = v
 
+        if downsampled:
+            for point in points:
+                if not isinstance(point, dict):
+                    continue
+                current_ts = point.get("timestamp")
+                if "avg" in point:
+                    current_value = point.get("avg")
+                else:
+                    current_value = point.get("value")
+                if "max" in point and isinstance(point.get("max"), (int, float)) and not isinstance(point.get("max"), bool):
+                    numeric_count += 1
+                    v = float(point["max"])
+                    if max_value is None or v > max_value:
+                        max_value = v
+                elif isinstance(point.get("value"), (int, float)) and not isinstance(point.get("value"), bool):
+                    numeric_count += 1
+                    v = float(point["value"])
+                    if max_value is None or v > max_value:
+                        max_value = v
+        else:
+            for point in points:
+                if not isinstance(point, dict):
+                    continue
+                current_ts = point.get("timestamp")
+                current_value = point.get("value")
+                if isinstance(current_value, (int, float)) and not isinstance(current_value, bool):
+                    numeric_count += 1
+                    v = float(current_value)
+                    if max_value is None or v > max_value:
+                        max_value = v
+
+        count = len(points)
         return {
             "series": series,
             "start": start_ms,
             "end": end_ms,
-            "count": len(events),
+            "count": count,
             "numericCount": numeric_count,
-            "isNumeric": numeric_count == len(events) and len(events) > 0,
+            "isNumeric": numeric_count == count and count > 0,
             "currentTimestamp": current_ts,
             "currentValue": current_value,
             "maxValue": max_value,
-            "decimalPlaces": max_decimal_places,
-            "files": [os.path.basename(p) for p in files],
+            "decimalPlaces": event_data.get("decimalPlaces"),
+            "files": list(event_data.get("files") or []),
+            "downsampled": downsampled,
+            "bucketMs": event_data.get("bucketMs"),
         }
 
     def _handle_virtual_series_get(self) -> None:
