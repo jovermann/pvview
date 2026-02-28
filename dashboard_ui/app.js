@@ -191,7 +191,7 @@
     return `${Math.round(n / 1000)}s`;
   }
 
-  function summarizeBucketMode(items, countKey, ignorePredicate = null) {
+  function summarizeBucketMode(items, countKey, startMs, endMs, ignorePredicate = null) {
     const bucketCounts = new Map();
     let rawCount = 0;
     let totalBuckets = 0;
@@ -207,13 +207,15 @@
         rawCount += 1;
       }
     }
-    if (bucketCounts.size === 0) return { label: 'raw', buckets: totalBuckets };
+    if (bucketCounts.size === 0) return { label: 'raw', buckets: totalBuckets, potentialBuckets: totalBuckets };
     if (rawCount === 0 && bucketCounts.size === 1) {
-      return { label: bucketLabelShort(Array.from(bucketCounts.keys())[0]), buckets: totalBuckets };
+      const bucketMs = Array.from(bucketCounts.keys())[0];
+      const potentialBuckets = Math.max(0, Math.ceil((Math.max(0, Number(endMs) - Number(startMs)) + 1) / bucketMs));
+      return { label: bucketLabelShort(bucketMs), buckets: totalBuckets, potentialBuckets };
     }
     const labels = Array.from(bucketCounts.keys()).sort((a, b) => a - b).map((ms) => bucketLabelShort(ms));
     if (rawCount > 0) labels.unshift('raw');
-    return { label: labels.join('/'), buckets: totalBuckets };
+    return { label: labels.join('/'), buckets: totalBuckets, potentialBuckets: totalBuckets };
   }
 
   function alignedNowMs(stepMs) {
@@ -1276,9 +1278,12 @@
     }));
 
     const axisCount = yAxes.length;
-    const chartBucketSummary = summarizeBucketMode(eventItems, 'returnedPoints');
-    appendConsoleLine(`chart ${id} request buckets mode=${chartBucketSummary.label} buckets=${chartBucketSummary.buckets}`);
-    setPanelTitleMeta(id, `${chartBucketSummary.label} ${chartBucketSummary.buckets}, ${batchReqElapsedMs} ms`);
+    const chartBucketSummary = summarizeBucketMode(eventItems, 'returnedPoints', start, end);
+    appendConsoleLine(
+      `chart ${id} request buckets mode=${chartBucketSummary.label} `
+      + `buckets=${chartBucketSummary.buckets}/${chartBucketSummary.potentialBuckets}`
+    );
+    setPanelTitleMeta(id, `${chartBucketSummary.label} ${chartBucketSummary.buckets}/${chartBucketSummary.potentialBuckets}, ${batchReqElapsedMs} ms`);
     const dots = dotVisual(cfg.dotStyle);
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
     const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
@@ -1422,9 +1427,14 @@
     const statBucketSummary = summarizeBucketMode(
       statsItems,
       'count',
+      start,
+      end,
       (item) => item && item.debug && item.debug.operator === 'yesterday'
     );
-    appendConsoleLine(`stat ${id} request buckets mode=${statBucketSummary.label} buckets=${statBucketSummary.buckets}`);
+    appendConsoleLine(
+      `stat ${id} request buckets mode=${statBucketSummary.label} `
+      + `buckets=${statBucketSummary.buckets}/${statBucketSummary.potentialBuckets}`
+    );
     for (const item of statsItems) {
       if (!item || typeof item !== 'object' || typeof item.series !== 'string') continue;
       const debug = (item.debug && typeof item.debug === 'object') ? item.debug : {};
@@ -1448,7 +1458,7 @@
         );
       }
     }
-    setPanelTitleMeta(id, `${statBucketSummary.label} ${statBucketSummary.buckets}, ${Math.round(performance.now() - statsReqT0)} ms`);
+    setPanelTitleMeta(id, `${statBucketSummary.label} ${statBucketSummary.buckets}/${statBucketSummary.potentialBuckets}, ${Math.round(performance.now() - statsReqT0)} ms`);
 
     const rows = await Promise.all(cfg.series.map(async (seriesName) => {
       const parts = splitSeriesParentSuffix(seriesName);
