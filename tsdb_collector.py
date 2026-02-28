@@ -23,6 +23,7 @@ from tsdb import (
     compress_timeseries_db_file,
     create_timeseries_db_writer,
     read_timeseries_db,
+    stat_timeseries_db,
 )
 
 COLLECTOR_UI_API_VERSION = 1
@@ -252,6 +253,67 @@ def _quantize_numeric(value: float, decimal_places: int) -> float:
     if decimal_places <= 0:
         return float(round(value))
     return round(value, decimal_places)
+
+
+def _print_tsdb_file_stats(path: str) -> None:
+    stats = stat_timeseries_db(path)
+
+    format_header = ("format", "name", "values", "value bytes", "total bytes")
+    format_rows = [
+        (f"0x{row.format_id:02x}", row.format_name, str(row.count), row.value_size_text, str(row.total_value_bytes))
+        for row in stats.per_format
+    ]
+    format_widths = [
+        max(len(format_header[i]), *(len(row[i]) for row in format_rows)) if format_rows else len(format_header[i])
+        for i in range(5)
+    ]
+    print("Per-format value bytes:")
+    print(
+        f"{format_header[0]:<{format_widths[0]}}  "
+        f"{format_header[1]:<{format_widths[1]}}  "
+        f"{format_header[2]:>{format_widths[2]}}  "
+        f"{format_header[3]:>{format_widths[3]}}  "
+        f"{format_header[4]:>{format_widths[4]}}"
+    )
+    for row in format_rows:
+        print(
+            f"{row[0]:<{format_widths[0]}}  "
+            f"{row[1]:<{format_widths[1]}}  "
+            f"{row[2]:>{format_widths[2]}}  "
+            f"{row[3]:>{format_widths[3]}}  "
+            f"{row[4]:>{format_widths[4]}}"
+        )
+
+    total = max(1, stats.total_bytes)
+    summary_rows = [
+        ("values", stats.value_count, stats.value_bytes, 100.0 * stats.value_bytes / total),
+        ("timestamps", stats.timestamp_count, stats.timestamp_bytes, 100.0 * stats.timestamp_bytes / total),
+        ("channel definitions", stats.channel_definition_count, stats.channel_definition_bytes, 100.0 * stats.channel_definition_bytes / total),
+        ("other", stats.other_count, stats.other_bytes, 100.0 * stats.other_bytes / total),
+        ("total", stats.value_count + stats.timestamp_count + stats.channel_definition_count + stats.other_count, stats.total_bytes, 100.0),
+    ]
+    summary_header = ("category", "number of", "bytes", "percent")
+    summary_widths = [
+        max(len(summary_header[0]), *(len(row[0]) for row in summary_rows)),
+        max(len(summary_header[1]), *(len(str(row[1])) for row in summary_rows)),
+        max(len(summary_header[2]), *(len(str(row[2])) for row in summary_rows)),
+        max(len(summary_header[3]), *(len(f"{row[3]:.2f}%") for row in summary_rows)),
+    ]
+    print()
+    print("Overall byte usage:")
+    print(
+        f"{summary_header[0]:<{summary_widths[0]}}  "
+        f"{summary_header[1]:>{summary_widths[1]}}  "
+        f"{summary_header[2]:>{summary_widths[2]}}  "
+        f"{summary_header[3]:>{summary_widths[3]}}"
+    )
+    for label, count, byte_count, pct in summary_rows:
+        print(
+            f"{label:<{summary_widths[0]}}  "
+            f"{count:>{summary_widths[1]}}  "
+            f"{byte_count:>{summary_widths[2]}}  "
+            f"{pct:>{summary_widths[3]}.2f}%"
+        )
 
 
 _EMBEDDED_DEMO_SERIES_TEXT = """
@@ -1464,6 +1526,7 @@ def main() -> int:
     parser.add_argument("-c", "--collect", action="store_true", help="Collect subscribed MQTT topics into current TSDB files")
     parser.add_argument("--topics", action="append", default=[], help="MQTT subscription topic filter (repeatable)")
     parser.add_argument("--dump-tsdb", help="Dump a TimeSeriesDB file in human-readable format")
+    parser.add_argument("--stat-tsdb", metavar="TSDB_FILE", help="Print byte statistics for a TimeSeriesDB file")
     parser.add_argument("--generate-demo-db", type=int, metavar="DAYS", help="Generate demo TSDB files for DAYS days")
     parser.add_argument("--compress", metavar="DBFILE", help="Compress a TSDB file in place")
     parser.add_argument("--timeout", type=float, default=1.0, help="Seconds to listen for topics when listing (default: 1.0)")
@@ -1521,6 +1584,14 @@ def main() -> int:
             print(f"Failed to read DB file {dump_path!r}: {exc}")
             return 2
         db.dump()
+        return 0
+    if args.stat_tsdb:
+        stat_path = resolve_tsdb_path(args.stat_tsdb)
+        try:
+            _print_tsdb_file_stats(stat_path)
+        except Exception as exc:
+            print(f"Failed to stat DB file {stat_path!r}: {exc}")
+            return 2
         return 0
     if args.generate_demo_db is not None:
         try:
@@ -1604,7 +1675,7 @@ def main() -> int:
             http_config=default_http,
         )
 
-    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --generate-demo-db, or --compress.")
+    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --stat-tsdb, --generate-demo-db, or --compress.")
     return 2
 
 

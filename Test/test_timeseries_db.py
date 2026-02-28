@@ -14,7 +14,7 @@ from tsdb_collector import (
     read_timeseries_db,
     save_collector_config,
 )
-from tsdb import get_cached_tsdb_file, write_downsampled_timeseries_db
+from tsdb import get_cached_tsdb_file, write_downsampled_timeseries_db, stat_timeseries_db
 from tsdb_server import _get_or_build_downsampled_day_points, get_virtual_series_points, save_virtual_series_config, VirtualSeriesDef
 
 
@@ -400,6 +400,53 @@ def test_cli_collect_requires_subscription(tmp_path):
     assert result.returncode == 2
     assert result.stderr == ""
     assert "--collect requires at least one topic via --topics or config" in result.stdout
+
+
+def test_stat_timeseries_db_counts_bytes(tmp_path):
+    path = tmp_path / "stats.tsdb"
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.5, timestamp_ms=1000)
+    writer.addValue("pv.power", 11.5, timestamp_ms=1100)
+    writer.addStringValue("state", "ok", timestamp_ms=1100)
+    writer.close(mark_complete=True)
+
+    stats = stat_timeseries_db(str(path))
+    assert stats.total_bytes == path.stat().st_size
+    assert stats.value_bytes > 0
+    assert stats.timestamp_bytes > 0
+    assert stats.channel_definition_bytes > 0
+    assert stats.other_bytes >= 0
+    assert stats.value_bytes + stats.timestamp_bytes + stats.channel_definition_bytes + stats.other_bytes == stats.total_bytes
+    by_format = {row.format_id: row for row in stats.per_format}
+    assert by_format[0x01].count == 2
+    assert by_format[0x01].value_size_text == "8"
+    assert by_format[0x0b].count == 1
+    assert by_format[0x0b].value_size_text == "10"
+
+
+def test_cli_stat_tsdb_prints_tables(tmp_path):
+    path = tmp_path / "stats_cli.tsdb"
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.5, timestamp_ms=1000)
+    writer.addStringValue("state", "ok", timestamp_ms=1100)
+    writer.close(mark_complete=True)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--stat-tsdb", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "Per-format value bytes:" in result.stdout
+    assert "Overall byte usage:" in result.stdout
+    assert "0x01" in result.stdout
+    assert "0x0b" in result.stdout
+    assert "values" in result.stdout
+    assert "timestamps" in result.stdout
+    assert "channel definitions" in result.stdout
 
 
 def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):

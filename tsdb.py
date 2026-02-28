@@ -503,6 +503,214 @@ class TimeSeriesDbData:
 
 
 @dataclasses.dataclass(frozen=True)
+class TsdbFormatStatsRow:
+    format_id: int
+    format_name: str
+    count: int
+    value_size_text: str
+    total_value_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class TsdbFileStats:
+    total_bytes: int
+    value_count: int
+    value_bytes: int
+    timestamp_count: int
+    timestamp_bytes: int
+    channel_definition_count: int
+    channel_definition_bytes: int
+    other_count: int
+    other_bytes: int
+    per_format: List[TsdbFormatStatsRow]
+
+
+def _scan_format_value_size(data: bytes, offset: int, format_id: int) -> Tuple[int, int]:
+    start = offset
+    _value, offset = read_format_value(data, offset, format_id)
+    return offset - start, offset
+
+
+def stat_timeseries_db(path: str) -> TsdbFileStats:
+    with open(path, "rb") as f:
+        raw = f.read()
+    if len(raw) < 12:
+        raise TsdbParseError(f"File too small: {path}")
+    if raw[:8] != TSDB_TAG_BYTES:
+        raise TsdbParseError(f"Invalid TSDB tag in {path!r}")
+    version = int.from_bytes(raw[8:12], "little")
+    if version != TSDB_VERSION:
+        raise TsdbParseError(f"Unsupported TSDB version {version} in {path!r}")
+
+    offset = 12
+    channel_defs: Dict[int, Tuple[int, str]] = {}
+    ds_bucket_ms: Optional[int] = None
+    value_count = 0
+    value_bytes = 0
+    timestamp_count = 0
+    timestamp_bytes = 0
+    channel_definition_count = 0
+    channel_definition_bytes = 0
+    other_count = 1  # file header
+    per_format_counts: Dict[int, int] = {}
+    per_format_total_bytes: Dict[int, int] = {}
+    per_format_value_sizes: Dict[int, set[int]] = {}
+
+    while offset < len(raw):
+        entry_start = offset
+        entry_type = raw[offset]
+        offset += 1
+
+        if entry_type <= 0xEF:
+            channel_id = entry_type
+            if channel_id not in channel_defs:
+                raise TsdbParseError(f"Undefined channel id {channel_id}")
+            format_id, _series_name = channel_defs[channel_id]
+            payload_size = 0
+            if ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                for _ in range(3):
+                    size, offset = _scan_format_value_size(raw, offset, format_id)
+                    payload_size += size
+            else:
+                payload_size, offset = _scan_format_value_size(raw, offset, format_id)
+            entry_size = 1 + payload_size
+            value_count += 1
+            value_bytes += entry_size
+            per_format_counts[format_id] = per_format_counts.get(format_id, 0) + 1
+            per_format_total_bytes[format_id] = per_format_total_bytes.get(format_id, 0) + entry_size
+            per_format_value_sizes.setdefault(format_id, set()).add(payload_size)
+            continue
+
+        if entry_type == ENTRY_TYPE_VALUE_16:
+            _ensure_available(raw, offset, 2, "16-bit channel id")
+            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+            offset += 2
+            if channel_id not in channel_defs:
+                raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
+            format_id, _series_name = channel_defs[channel_id]
+            payload_size = 0
+            if ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                for _ in range(3):
+                    size, offset = _scan_format_value_size(raw, offset, format_id)
+                    payload_size += size
+            else:
+                payload_size, offset = _scan_format_value_size(raw, offset, format_id)
+            entry_size = 3 + payload_size
+            value_count += 1
+            value_bytes += entry_size
+            per_format_counts[format_id] = per_format_counts.get(format_id, 0) + 1
+            per_format_total_bytes[format_id] = per_format_total_bytes.get(format_id, 0) + entry_size
+            per_format_value_sizes.setdefault(format_id, set()).add(payload_size)
+            continue
+
+        if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
+            _ensure_available(raw, offset, 8, "absolute timestamp")
+            offset += 8
+            timestamp_count += 1
+            timestamp_bytes += offset - entry_start
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_8:
+            _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
+            offset += 1
+            timestamp_count += 1
+            timestamp_bytes += offset - entry_start
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_16:
+            _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
+            offset += 2
+            timestamp_count += 1
+            timestamp_bytes += offset - entry_start
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_24:
+            _rel, offset = _read_u24(raw, offset)
+            timestamp_count += 1
+            timestamp_bytes += offset - entry_start
+            continue
+        if entry_type == ENTRY_TYPE_TIME_REL_32:
+            _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
+            offset += 4
+            timestamp_count += 1
+            timestamp_bytes += offset - entry_start
+            continue
+        if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
+            _ensure_available(raw, offset, 3, "8-bit channel definition")
+            channel_id = raw[offset]
+            format_id = raw[offset + 1]
+            name_len = raw[offset + 2]
+            offset += 3
+            _ensure_available(raw, offset, name_len, "channel name")
+            series_name = raw[offset:offset + name_len].decode("utf-8")
+            offset += name_len
+            channel_defs[channel_id] = (format_id, series_name)
+            channel_definition_count += 1
+            channel_definition_bytes += offset - entry_start
+            continue
+        if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
+            _ensure_available(raw, offset, 4, "16-bit channel definition")
+            channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+            format_id = raw[offset + 2]
+            name_len = raw[offset + 3]
+            offset += 4
+            _ensure_available(raw, offset, name_len, "channel name")
+            series_name = raw[offset:offset + name_len].decode("utf-8")
+            offset += name_len
+            channel_defs[channel_id] = (format_id, series_name)
+            channel_definition_count += 1
+            channel_definition_bytes += offset - entry_start
+            continue
+        if entry_type == ENTRY_TYPE_META_INFO:
+            _ensure_available(raw, offset, 1, "meta-info key length")
+            key_len = raw[offset]
+            offset += 1
+            _ensure_available(raw, offset, key_len, "meta-info key")
+            key = raw[offset:offset + key_len].decode("utf-8")
+            offset += key_len
+            _ensure_available(raw, offset, 1, "meta-info format id")
+            format_id = raw[offset]
+            offset += 1
+            _value, offset = read_format_value(raw, offset, format_id)
+            if key == "dsBucketMs":
+                try:
+                    ds_bucket_ms = int(_value)
+                except Exception:
+                    ds_bucket_ms = None
+            other_count += 1
+            continue
+        if entry_type == ENTRY_TYPE_EOF:
+            other_count += 1
+            break
+        raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {entry_start}")
+
+    total_bytes = len(raw)
+    other_bytes = total_bytes - value_bytes - timestamp_bytes - channel_definition_bytes
+    rows: List[TsdbFormatStatsRow] = []
+    for format_id in sorted(per_format_counts.keys()):
+        sizes = per_format_value_sizes.get(format_id, set())
+        value_size_text = str(next(iter(sizes))) if len(sizes) == 1 else "var"
+        rows.append(
+            TsdbFormatStatsRow(
+                format_id=format_id,
+                format_name=format_id_description(format_id),
+                count=per_format_counts[format_id],
+                value_size_text=value_size_text,
+                total_value_bytes=per_format_total_bytes[format_id],
+            )
+        )
+    return TsdbFileStats(
+        total_bytes=total_bytes,
+        value_count=value_count,
+        value_bytes=value_bytes,
+        timestamp_count=timestamp_count,
+        timestamp_bytes=timestamp_bytes,
+        channel_definition_count=channel_definition_count,
+        channel_definition_bytes=channel_definition_bytes,
+        other_count=other_count,
+        other_bytes=other_bytes,
+        per_format=rows,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
 class NumericWithDecimals:
     value: float
     decimals: int
