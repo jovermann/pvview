@@ -131,6 +131,8 @@ The number of decimals of the input data is preserved, except that values with >
 
 Files containing Series Array Entries (after the header) only contain Series Array Entries and no MetaInfoEntries, no TimeEntries, no ValueEntries, no ChannelDefinitionEntries and no End of File marker.
 
+An encoder should encode sequences of void values as void chunks if the void sequence is two or more elements long and as void value if the void chunk is shorter.
+
 End of File Marker
 ------------------
 uint8_t type = 0xfe; // End of file marker. The presence of this byte marks the file as complete. No more data will be appended.
