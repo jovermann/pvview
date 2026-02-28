@@ -97,10 +97,51 @@ key dsBucketMs, value N (any integer format): Global meta-info: If this is prese
     Bucket N on the UTC day of the file is associated with all timestamps [N*dsBucketMs, (N+1)*dsBucketMs) of that UTC day.
     Empty buckets are omitted. Their center timestamp is not present in the file.
 
-SpecialEntries
---------------
+Series Array Entry
+------------------
+A Series Array Entry contains all information for a series for a whole day. It is used to achieve compact completed day files. It is not suitable for incremental writing.
+A day is split into numElements time slots. Each time slot is 24h / numElements long. The time stamp of each time slot is its center time stamp, rounded down to the nearest ms.
+Each time slot either contains exactly one element (non-void, either a plain value or a min/avg/max triplet), or it does not contain any element (void).
+
+uint8_t type = 0xf8;    // Series Array: All values of a series, covering the whole day.
+LEB128 entrySize;       // Size of this entry in bytes including the type byte. This allows to skip the section.
+LEB128 nameLen;         // Length of the series name.
+uint8_t name[nameLen];  // Series name in UTF-8. Each series name must occur only once in a file.
+LEB128 numElements;     // Number of elements in the array. A single element may either be a plain value or a min/avg/max triplet. Both count 1 in arrayLen.
+uint8_t nDecimals;      // Number of decimals of each value. 0 means real_value = value, 1 means real_value = value / 10, 2 means real_value = value / 100 and so on.
+uint8_t elemSize;       // Number of values per element: 1 means plain value, 3 means min/avg/max triplet (downsampled data).
+LEB128 voidElement;     // This value is used to indicate "no value present at this index" in the array. For min/avg/max either all three must be void or non-void.
+SeriesArrayChunk chunks[]; // Array of run length encoding chunks.
+
+SeriesArrayChunk: Each SeriesArrayChunk either represents a sequence of void elements or a sequence of non void elements:
+
+ZigZag chunkLen; // Number of array elements represented by this chunk.
+                 // chunkLen < 0: This chunk represents -chunkLen void elements.
+                 // chunkLen > 0: This chunk represents chunkLen elements. These elements follow.
+ZigZag data[chunkLen * elemSize]; // Array of plain values or array of min/avg/max triplets.
+                 // The values are ZigZag and LEB128 encoded delta values.
+
+The sum of all chunkLen of all chunks is numElements.
+
+All values in each series array are delta encoded to make the numbers small. The starting "last" value per series is 0 and all values of all chunks are iteratively added to the last value to get the actual value and then this becomes the last value. This delta encoding happens across chunk boundaries (no reset to 0 at the start of chunks) and across min/avg/max (as if these were 3 sequential values).
+
+Series Array Entry can only represent numeric values. Strings are discarded upon conversion.
+
+The number of decimals of the input data is preserved, except that values with > 3 decimals get rounded to 3 decimals.
+
+Files containing Series Array Entries (after the header) only contain Series Array Entries and no MetaInfoEntries, no TimeEntries, no ValueEntries, no ChannelDefinitionEntries and no End of File marker.
+
+End of File Marker
+------------------
 uint8_t type = 0xfe; // End of file marker. The presence of this byte marks the file as complete. No more data will be appended.
                      // It is ok if this is missing. This indicates to a reader that a writer may still append data to this file at any time. This is usually the case for the current file for the current day.
+
+Downsampling
+------------
+
+When downsampling data into bucket or Series Arrays, the following applies:
+When downsampling into a time slot with just one value, this should be the arithmetic average, rounded to the same precision (decimals) as the input values.
+When downsampling into min/avg/max, min and max should be the minimum and maximum values of the input values, and avh should be the arithmetic average, rounded to the same precision (decimals) as the input values.
 
 Format ids
 ----------
@@ -156,6 +197,14 @@ Format ids
 0xd1: uint64_t x; double value = x / 10.0;
 0xd2: uint64_t x; double value = x / 100.0;
 0xd3: uint64_t x; double value = x / 1000.0;
+
+LEB128
+------
+LEB128 is the usual encoding of unsigned integers of arbitrary size. Each bytes encode 7 bit of the integer, lowest bits first. All bytes except the last byte of such an encoding have bit 7 set.
+
+ZigZag
+------
+ZigZag is the usual ZigZag encoding to encode signed integers of arbitrary size into an unsigned integer. The output of ZigZag is LEB128 encoded.
 
 Constraints
 -----------
