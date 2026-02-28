@@ -54,9 +54,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 14  # Increment when API endpoints or payload schemas change.
+API_VERSION = 15  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
-STATS_MAX_EVENTS = 1200
+DEFAULT_MAX_EVENTS = 1200
 
 from tsdb import (
     Event,
@@ -1075,6 +1075,10 @@ def _virtual_series_name_set(data_dir: str) -> set[str]:
     return {d.name for d in load_virtual_series_defs(data_dir)}
 
 
+def _virtual_series_def_map(data_dir: str) -> Dict[str, VirtualSeriesDef]:
+    return {d.name: d for d in load_virtual_series_defs(data_dir)}
+
+
 def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit_overrides: List[Dict[str, Any]], align_window_ms: int = 10000) -> None:
     path = _virtual_series_file_path(data_dir)
     tmp = f"{path}.tmp"
@@ -1959,6 +1963,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         data_dir = self.server.data_dir  # type: ignore[attr-defined]
         start_raw = self._query_param(params, "start", required=True)
         end_raw = self._query_param(params, "end", required=True)
+        max_events_raw = self._query_param(params, "maxEvents")
         series_values = [str(s) for s in params.get("series", []) if str(s)]
         if not series_values:
             raise ValueError("Missing required query parameter: series")
@@ -1966,18 +1971,23 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
         start_ms = parse_timestamp(start_raw)
         end_ms = parse_timestamp(end_raw)
+        max_events = int(max_events_raw) if max_events_raw is not None else DEFAULT_MAX_EVENTS
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
+        if max_events <= 0:
+            raise ValueError("maxEvents must be > 0")
         virtual_names = _virtual_series_name_set(data_dir)
+        virtual_defs = _virtual_series_def_map(data_dir)
         if len(series_values) == 1:
-            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms, virtual_names))
+            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms, max_events, virtual_names, virtual_defs))
             return
-        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms, virtual_names) for s in series_values]
+        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms, max_events, virtual_names, virtual_defs) for s in series_values]
         self._send_json(
             200,
             {
                 "start": start_ms,
                 "end": end_ms,
+                "requestedMaxEvents": max_events,
                 "requestedSeries": series_values,
                 "stats": stats_list,
             },
@@ -1989,12 +1999,14 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         series: str,
         start_ms: int,
         end_ms: int,
+        max_events: int,
         virtual_names: Optional[set[str]] = None,
+        virtual_defs: Optional[Dict[str, VirtualSeriesDef]] = None,
     ) -> Dict[str, Any]:
         t0 = time.perf_counter()
         _REQUEST_TRACE.series_reads = []
         is_virtual = series in (virtual_names if virtual_names is not None else _virtual_series_name_set(data_dir))
-        event_data = self._events_for_series(data_dir, series, start_ms, end_ms, STATS_MAX_EVENTS)
+        event_data = self._events_for_series(data_dir, series, start_ms, end_ms, max_events)
         points = list(event_data.get("points") or [])
         downsampled = bool(event_data.get("downsampled"))
         current_ts: Optional[int] = None
@@ -2062,8 +2074,15 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if trace_reads:
             source_cache = "hit" if cache_misses == 0 else ("miss" if cache_hits == 0 else f"mixed({cache_hits}/{cache_misses})")
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        virtual_op = None
+        if is_virtual:
+            defs_map = virtual_defs if virtual_defs is not None else _virtual_series_def_map(data_dir)
+            definition = defs_map.get(series)
+            if definition is not None:
+                virtual_op = definition.op
         response["debug"] = {
             "virtual": is_virtual,
+            "operator": virtual_op,
             "sourceCache": source_cache,
             "elapsedMs": elapsed_ms,
             "seriesReads": trace_reads if isinstance(trace_reads, list) else [],

@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 14;
+  const FRONTEND_API_VERSION = 15;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -37,6 +37,7 @@
   const unitOverridesTabPane = document.getElementById('unitOverridesTabPane');
   const dashboardSettingsTabPane = document.getElementById('dashboardSettingsTabPane');
   const visibilityRefreshEnabledInput = document.getElementById('visibilityRefreshEnabled');
+  const dashboardMaxEventsInput = document.getElementById('dashboardMaxEvents');
   const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -102,6 +103,7 @@
   let lastForegroundRefreshMs = 0;
   let refreshGetCallCount = 0;
   let visibilityRefreshEnabled = true;
+  let dashboardMaxEvents = 1200;
 
   function htmlEscape(value) {
     return String(value)
@@ -170,6 +172,48 @@
     lastForegroundRefreshMs = t;
     appendConsoleLine(`foreground refresh trigger reason=${reason}`);
     refreshAllCharts(`foreground-${reason}`).catch((err) => console.error(err));
+  }
+
+  function normalizeMaxEvents(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 1) return 1200;
+    return Math.max(1, Math.floor(n));
+  }
+
+  function bucketLabelShort(bucketMs) {
+    const n = Number(bucketMs);
+    if (!Number.isFinite(n) || n <= 0) return 'raw';
+    if (n === 5000) return '5s';
+    if (n === 15000) return '15s';
+    if (n === 60000) return '1m';
+    if (n === 300000) return '5m';
+    if (n === 900000) return '15m';
+    return `${Math.round(n / 1000)}s`;
+  }
+
+  function summarizeBucketMode(items, countKey, ignorePredicate = null) {
+    const bucketCounts = new Map();
+    let rawCount = 0;
+    let totalBuckets = 0;
+    for (const item of (items || [])) {
+      if (!item || typeof item !== 'object') continue;
+      if (typeof ignorePredicate === 'function' && ignorePredicate(item)) continue;
+      const buckets = Number(item[countKey]);
+      if (Number.isFinite(buckets) && buckets > 0) totalBuckets += buckets;
+      const bucketMs = Number(item.bucketMs);
+      if (Number.isFinite(bucketMs) && bucketMs > 0) {
+        bucketCounts.set(bucketMs, (bucketCounts.get(bucketMs) || 0) + 1);
+      } else {
+        rawCount += 1;
+      }
+    }
+    if (bucketCounts.size === 0) return { label: 'raw', buckets: totalBuckets };
+    if (rawCount === 0 && bucketCounts.size === 1) {
+      return { label: bucketLabelShort(Array.from(bucketCounts.keys())[0]), buckets: totalBuckets };
+    }
+    const labels = Array.from(bucketCounts.keys()).sort((a, b) => a - b).map((ms) => bucketLabelShort(ms));
+    if (rawCount > 0) labels.unshift('raw');
+    return { label: labels.join('/'), buckets: totalBuckets };
   }
 
   function alignedNowMs(stepMs) {
@@ -360,6 +404,7 @@
     return {
       dashboard: String(currentDashboardName || 'Default'),
       visibilityRefreshEnabled: !!visibilityRefreshEnabled,
+      maxEvents: normalizeMaxEvents(dashboardMaxEvents),
       range: {
         preset: activePreset || 'custom',
         start: startInput.value,
@@ -1059,7 +1104,7 @@
       return;
     }
 
-    const maxEvents = 1200;
+    const maxEvents = normalizeMaxEvents(dashboardMaxEvents);
     const displaySeries = cfg.series.map((s) => displaySeriesName(s));
     const prefix = displayPrefixForSeries(displaySeries);
     const batchQ = new URLSearchParams({
@@ -1231,9 +1276,9 @@
     }));
 
     const axisCount = yAxes.length;
-    const totalReturnedPoints = eventItems.reduce((sum, it) => sum + Number(it && it.returnedPoints || 0), 0);
-    const anyDownsampled = eventItems.some((it) => !!(it && it.downsampled));
-    setPanelTitleMeta(id, `${totalReturnedPoints} pts, ${anyDownsampled ? 'ds' : 'raw'}, ${batchReqElapsedMs} ms`);
+    const chartBucketSummary = summarizeBucketMode(eventItems, 'returnedPoints');
+    appendConsoleLine(`chart ${id} request buckets mode=${chartBucketSummary.label} buckets=${chartBucketSummary.buckets}`);
+    setPanelTitleMeta(id, `${chartBucketSummary.label} ${chartBucketSummary.buckets}, ${batchReqElapsedMs} ms`);
     const dots = dotVisual(cfg.dotStyle);
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
     const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
@@ -1350,7 +1395,11 @@
       }
     }
     const uniqueSiblingNames = Array.from(new Set(allSiblingNames));
-    const statsQ = new URLSearchParams({ start: String(start), end: String(end) });
+    const statsQ = new URLSearchParams({
+      start: String(start),
+      end: String(end),
+      maxEvents: String(normalizeMaxEvents(dashboardMaxEvents)),
+    });
     for (const s of uniqueSiblingNames) statsQ.append('series', s);
     const statsReqT0 = performance.now();
     appendConsoleLine(`stat ${id} request start batch series=${uniqueSiblingNames.length}`);
@@ -1370,6 +1419,12 @@
       `stat ${id} request done batch series=${uniqueSiblingNames.length} returned=${statsItems.length} `
       + `elapsed=${Math.round(performance.now() - statsReqT0)}ms downsampled=${downsampledCount}/${statsItems.length}${bucketSummary}`
     );
+    const statBucketSummary = summarizeBucketMode(
+      statsItems,
+      'count',
+      (item) => item && item.debug && item.debug.operator === 'yesterday'
+    );
+    appendConsoleLine(`stat ${id} request buckets mode=${statBucketSummary.label} buckets=${statBucketSummary.buckets}`);
     for (const item of statsItems) {
       if (!item || typeof item !== 'object' || typeof item.series !== 'string') continue;
       const debug = (item.debug && typeof item.debug === 'object') ? item.debug : {};
@@ -1393,7 +1448,7 @@
         );
       }
     }
-    setPanelTitleMeta(id, `${Math.round(performance.now() - statsReqT0)} ms`);
+    setPanelTitleMeta(id, `${statBucketSummary.label} ${statBucketSummary.buckets}, ${Math.round(performance.now() - statsReqT0)} ms`);
 
     const rows = await Promise.all(cfg.series.map(async (seriesName) => {
       const parts = splitSeriesParentSuffix(seriesName);
@@ -2518,6 +2573,16 @@
       queueSaveSettings();
     });
   }
+  if (dashboardMaxEventsInput) {
+    dashboardMaxEventsInput.value = String(dashboardMaxEvents);
+  }
+  if (dashboardMaxEventsInput) {
+    dashboardMaxEventsInput.addEventListener('change', () => {
+      dashboardMaxEvents = normalizeMaxEvents(dashboardMaxEventsInput.value);
+      dashboardMaxEventsInput.value = String(dashboardMaxEvents);
+      queueSaveSettings();
+    });
+  }
 
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
     virtualSeriesDialog.close();
@@ -2723,8 +2788,14 @@
     visibilityRefreshEnabled = settings && Object.prototype.hasOwnProperty.call(settings, 'visibilityRefreshEnabled')
       ? !!settings.visibilityRefreshEnabled
       : true;
+    dashboardMaxEvents = settings && Object.prototype.hasOwnProperty.call(settings, 'maxEvents')
+      ? normalizeMaxEvents(settings.maxEvents)
+      : 1200;
     if (visibilityRefreshEnabledInput) {
       visibilityRefreshEnabledInput.checked = visibilityRefreshEnabled;
+    }
+    if (dashboardMaxEventsInput) {
+      dashboardMaxEventsInput.value = String(dashboardMaxEvents);
     }
     if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
       currentDashboardName = desiredDashboard;
