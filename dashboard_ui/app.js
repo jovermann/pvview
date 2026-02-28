@@ -6,6 +6,10 @@
     margin: 2,
     minRow: 1,
     float: true,
+    draggable: {
+      handle: '.panel-header',
+      cancel: 'input,textarea,button,select,option,pre,.console-view,.chart,.stat-wrap,.stat-table',
+    },
   }, document.getElementById('dashboard'));
 
   const charts = new Map();
@@ -32,6 +36,7 @@
   const virtualSeriesTabPane = document.getElementById('virtualSeriesTabPane');
   const unitOverridesTabPane = document.getElementById('unitOverridesTabPane');
   const dashboardSettingsTabPane = document.getElementById('dashboardSettingsTabPane');
+  const visibilityRefreshEnabledInput = document.getElementById('visibilityRefreshEnabled');
   const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -96,6 +101,7 @@
   let virtualDialogActiveTab = 'virtual';
   let lastForegroundRefreshMs = 0;
   let refreshGetCallCount = 0;
+  let visibilityRefreshEnabled = true;
 
   function htmlEscape(value) {
     return String(value)
@@ -157,6 +163,7 @@
   }
 
   function refreshOnForeground(reason) {
+    if (!visibilityRefreshEnabled) return;
     if (document.hidden) return;
     const t = nowMs();
     if ((t - lastForegroundRefreshMs) < 1500) return;
@@ -352,6 +359,7 @@
   function currentSettingsPayload() {
     return {
       dashboard: String(currentDashboardName || 'Default'),
+      visibilityRefreshEnabled: !!visibilityRefreshEnabled,
       range: {
         preset: activePreset || 'custom',
         start: startInput.value,
@@ -2504,6 +2512,12 @@
   if (dashboardSettingsTabBtn) {
     dashboardSettingsTabBtn.addEventListener('click', () => setVirtualDialogTab('dashboards'));
   }
+  if (visibilityRefreshEnabledInput) {
+    visibilityRefreshEnabledInput.addEventListener('change', () => {
+      visibilityRefreshEnabled = !!visibilityRefreshEnabledInput.checked;
+      queueSaveSettings();
+    });
+  }
 
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
     virtualSeriesDialog.close();
@@ -2706,6 +2720,12 @@
     const desiredDashboard = (settings && typeof settings.dashboard === 'string' && settings.dashboard.trim())
       ? settings.dashboard.trim()
       : 'Default';
+    visibilityRefreshEnabled = settings && Object.prototype.hasOwnProperty.call(settings, 'visibilityRefreshEnabled')
+      ? !!settings.visibilityRefreshEnabled
+      : true;
+    if (visibilityRefreshEnabledInput) {
+      visibilityRefreshEnabledInput.checked = visibilityRefreshEnabled;
+    }
     if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
       currentDashboardName = desiredDashboard;
       dashboardSelect.value = desiredDashboard;
