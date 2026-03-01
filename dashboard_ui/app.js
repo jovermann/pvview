@@ -96,6 +96,7 @@
     '#9a60b4',
     '#ea7ccc',
   ];
+  const AUTO_DARK_COLOR = '__auto_dark__';
   let settingsSaveTimer = null;
   let currentDashboardName = 'Default';
   let virtualSeriesDefs = [];
@@ -119,6 +120,18 @@
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+
+  function darkenHex(color, factor = 0.5) {
+    const hex = String(color || '').trim();
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+    if (!m) return hex;
+    const raw = m[1];
+    const parts = [0, 2, 4].map((i) => parseInt(raw.slice(i, i + 2), 16));
+    const scaled = parts.map((v) => Math.max(0, Math.min(255, Math.round(v * factor))));
+    return `#${scaled.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  }
+
+  const seriesPaletteDark = seriesPalette.map((color) => darkenHex(color, 0.5));
 
   function renderVersionError(details) {
     const topbar = document.querySelector('.topbar');
@@ -1386,7 +1399,9 @@
         const overrideColor = (cfg.seriesColorByName && typeof cfg.seriesColorByName[s.name] === 'string')
           ? String(cfg.seriesColorByName[s.name]).trim()
           : '';
-        const lineColor = overrideColor || seriesPalette[i % seriesPalette.length];
+        const lineColor = overrideColor === AUTO_DARK_COLOR
+          ? seriesPaletteDark[i % seriesPaletteDark.length]
+          : (overrideColor || seriesPalette[i % seriesPalette.length]);
         const seriesAreaStyle = areaOpacity > 0 ? {
           origin: 'auto',
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -1999,9 +2014,21 @@
       <div class="series-item">
         <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
         <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
-        <span class="chart-color-row" title="Series color">
+        <span class="chart-color-grid" title="Series color">
           <button type="button" class="chart-color-box ${!String(chartSettingsSeriesColorDraft[String(name)] || '').trim() ? 'active auto' : 'auto'}" data-action="chart-series-color-set" data-series="${htmlEscape(String(name))}" data-color="" title="Auto"></button>
           ${seriesPalette.map((color) => `
+            <button
+              type="button"
+              class="chart-color-box ${String(chartSettingsSeriesColorDraft[String(name)] || '').trim() === color ? 'active' : ''}"
+              data-action="chart-series-color-set"
+              data-series="${htmlEscape(String(name))}"
+              data-color="${htmlEscape(color)}"
+              title="${htmlEscape(color)}"
+              style="border-color:${htmlEscape(color)};background:${htmlEscape(rgbaFromHex(color, 0.3))}"
+            ></button>
+          `).join('')}
+          <button type="button" class="chart-color-box ${String(chartSettingsSeriesColorDraft[String(name)] || '').trim() === AUTO_DARK_COLOR ? 'active auto dark' : 'auto dark'}" data-action="chart-series-color-set" data-series="${htmlEscape(String(name))}" data-color="${AUTO_DARK_COLOR}" title="Auto dark"></button>
+          ${seriesPaletteDark.map((color) => `
             <button
               type="button"
               class="chart-color-box ${String(chartSettingsSeriesColorDraft[String(name)] || '').trim() === color ? 'active' : ''}"

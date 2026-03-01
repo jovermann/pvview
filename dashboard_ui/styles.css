@@ -232,11 +232,12 @@ main { padding: 2px; }
 
 .icon-btn.danger { color: #ffb4b4; }
 
-.chart-color-row {
-  display: inline-flex;
-  align-items: center;
+.chart-color-grid {
+  display: inline-grid;
+  grid-template-columns: repeat(10, 12px);
+  grid-template-rows: repeat(2, 12px);
   gap: 3px;
-  flex-wrap: nowrap;
+  align-items: center;
 }
 
 .chart-color-box {
@@ -265,6 +266,13 @@ main { padding: 2px; }
   background:
     repeating-linear-gradient(45deg, rgba(108,122,140,0.28), rgba(108,122,140,0.28) 2px, transparent 2px, transparent 4px),
     #111721;
+}
+
+.chart-color-box.auto.dark {
+  border-color: #46515f;
+  background:
+    repeating-linear-gradient(45deg, rgba(70,81,95,0.3), rgba(70,81,95,0.3) 2px, transparent 2px, transparent 4px),
+    #0c1017;
 }
 
 .settings-gadget {
