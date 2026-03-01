@@ -223,6 +223,7 @@
         <button type="button" class="dialog-tab active" id="virtualSeriesTabBtn" data-tab="virtual">Virtual Series</button>
         <button type="button" class="dialog-tab" id="unitOverridesTabBtn" data-tab="units">Units</button>
         <button type="button" class="dialog-tab" id="dashboardSettingsTabBtn" data-tab="dashboards">Dashboards</button>
+        <button type="button" class="dialog-tab" id="debugSettingsTabBtn" data-tab="debug">Debug</button>
       </div>
       <div id="virtualSeriesTabPane" class="dialog-tab-pane active">
         <div class="settings-grid">
@@ -248,6 +249,24 @@
         </div>
         <div id="dashboardManageList" class="series-list"></div>
         <button id="clearCurrentDashboard" type="button" class="btn danger">Clear current dashboard</button>
+      </div>
+      <div id="debugSettingsTabPane" class="dialog-tab-pane">
+        <div class="settings-grid">
+          <div class="settings-label"></div>
+          <div>
+            <label class="panel-check settings-check">
+              <input id="showMinPointsDebug" type="checkbox" />
+              <span>Show min points in title and points in chart legend</span>
+            </label>
+          </div>
+          <div class="settings-label"></div>
+          <div>
+            <label class="panel-check settings-check">
+              <input id="showRefreshDurationDebug" type="checkbox" />
+              <span>Show refresh duration in charts and stat</span>
+            </label>
+          </div>
+        </div>
       </div>
       <datalist id="virtualSeriesCandidates"></datalist>
       <menu>

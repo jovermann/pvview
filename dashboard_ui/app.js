@@ -34,10 +34,14 @@
   const virtualSeriesTabBtn = document.getElementById('virtualSeriesTabBtn');
   const unitOverridesTabBtn = document.getElementById('unitOverridesTabBtn');
   const dashboardSettingsTabBtn = document.getElementById('dashboardSettingsTabBtn');
+  const debugSettingsTabBtn = document.getElementById('debugSettingsTabBtn');
   const virtualSeriesTabPane = document.getElementById('virtualSeriesTabPane');
   const unitOverridesTabPane = document.getElementById('unitOverridesTabPane');
   const dashboardSettingsTabPane = document.getElementById('dashboardSettingsTabPane');
+  const debugSettingsTabPane = document.getElementById('debugSettingsTabPane');
   const visibilityRefreshEnabledInput = document.getElementById('visibilityRefreshEnabled');
+  const showMinPointsDebugInput = document.getElementById('showMinPointsDebug');
+  const showRefreshDurationDebugInput = document.getElementById('showRefreshDurationDebug');
   const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -104,6 +108,8 @@
   let refreshGetCallCount = 0;
   let visibilityRefreshEnabled = true;
   let globalGranularity = 'auto';
+  let showMinPointsDebug = false;
+  let showRefreshDurationDebug = false;
 
   function htmlEscape(value) {
     return String(value)
@@ -422,6 +428,8 @@
       dashboard: String(currentDashboardName || 'Default'),
       visibilityRefreshEnabled: !!visibilityRefreshEnabled,
       granularity: normalizeChartGranularity(globalGranularity),
+      showMinPointsDebug: !!showMinPointsDebug,
+      showRefreshDurationDebug: !!showRefreshDurationDebug,
       range: {
         preset: activePreset || 'custom',
         start: startInput.value,
@@ -836,13 +844,15 @@
   }
 
   function setVirtualDialogTab(tab) {
-    virtualDialogActiveTab = (tab === 'units' || tab === 'dashboards') ? tab : 'virtual';
+    virtualDialogActiveTab = (tab === 'units' || tab === 'dashboards' || tab === 'debug') ? tab : 'virtual';
     if (virtualSeriesTabBtn) virtualSeriesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'virtual');
     if (unitOverridesTabBtn) unitOverridesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'units');
     if (dashboardSettingsTabBtn) dashboardSettingsTabBtn.classList.toggle('active', virtualDialogActiveTab === 'dashboards');
+    if (debugSettingsTabBtn) debugSettingsTabBtn.classList.toggle('active', virtualDialogActiveTab === 'debug');
     if (virtualSeriesTabPane) virtualSeriesTabPane.classList.toggle('active', virtualDialogActiveTab === 'virtual');
     if (unitOverridesTabPane) unitOverridesTabPane.classList.toggle('active', virtualDialogActiveTab === 'units');
     if (dashboardSettingsTabPane) dashboardSettingsTabPane.classList.toggle('active', virtualDialogActiveTab === 'dashboards');
+    if (debugSettingsTabPane) debugSettingsTabPane.classList.toggle('active', virtualDialogActiveTab === 'debug');
   }
 
   async function openVirtualSeriesDialog(initialTab = null) {
@@ -1316,7 +1326,10 @@
       `chart ${id} request buckets mode=${chartBucketSummary.label} `
       + `buckets=${chartBucketSummary.buckets}/${chartBucketSummary.potentialBuckets}`
     );
-    setPanelTitleMeta(id, `min ${minPoints}, ${batchReqElapsedMs} ms`);
+    const chartMetaParts = [];
+    if (showMinPointsDebug) chartMetaParts.push(`min ${minPoints}`);
+    if (showRefreshDurationDebug) chartMetaParts.push(`${batchReqElapsedMs} ms`);
+    setPanelTitleMeta(id, chartMetaParts.join(', '));
     const dots = dotVisual(cfg.dotStyle);
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
     const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
@@ -1343,13 +1356,14 @@
           const bucketMode = bucketModeByLegendName.get(name) || 'raw';
           const pointsText = `${pointsCount} pts, ${bucketMode}`;
           const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
+          const addDebug = (base) => showMinPointsDebug ? `${base}, ${pointsText}` : base;
           if (hideMax) {
-            if (curValue === undefined || !curFresh) return `${name} (${pointsText})`;
-            return `${name} (${formatValueWithUnit(curValue, unit, decimals)}, ${pointsText})`;
+            if (curValue === undefined || !curFresh) return showMinPointsDebug ? `${name} (${pointsText})` : name;
+            return `${name} (${addDebug(formatValueWithUnit(curValue, unit, decimals))})`;
           }
-          if (maxValue === undefined) return `${name} (${pointsText})`;
-          if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit, decimals)}, ${pointsText})`;
-          return `${name} (${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)}, ${pointsText})`;
+          if (maxValue === undefined) return showMinPointsDebug ? `${name} (${pointsText})` : name;
+          if (curValue === undefined || !curFresh) return `${name} (${addDebug(`max ${formatValueWithUnit(maxValue, unit, decimals)}`)})`;
+          return `${name} (${addDebug(`${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)}`)})`;
         },
       },
       tooltip: { trigger: 'axis' },
@@ -1484,7 +1498,10 @@
       }
     }
     const firstSeriesCount = statsItems.length ? Number(statsItems[0] && statsItems[0].count) || 0 : 0;
-    setPanelTitleMeta(id, `min 10, ${firstSeriesCount} pts, ${Math.round(performance.now() - statsReqT0)} ms`);
+    const statMetaParts = [];
+    if (showMinPointsDebug) statMetaParts.push(`min 10`, `${firstSeriesCount} pts`);
+    if (showRefreshDurationDebug) statMetaParts.push(`${Math.round(performance.now() - statsReqT0)} ms`);
+    setPanelTitleMeta(id, statMetaParts.join(', '));
 
     const rows = await Promise.all(cfg.series.map(async (seriesName) => {
       const parts = splitSeriesParentSuffix(seriesName);
@@ -2606,10 +2623,27 @@
   if (dashboardSettingsTabBtn) {
     dashboardSettingsTabBtn.addEventListener('click', () => setVirtualDialogTab('dashboards'));
   }
+  if (debugSettingsTabBtn) {
+    debugSettingsTabBtn.addEventListener('click', () => setVirtualDialogTab('debug'));
+  }
   if (visibilityRefreshEnabledInput) {
     visibilityRefreshEnabledInput.addEventListener('change', () => {
       visibilityRefreshEnabled = !!visibilityRefreshEnabledInput.checked;
       queueSaveSettings();
+    });
+  }
+  if (showMinPointsDebugInput) {
+    showMinPointsDebugInput.addEventListener('change', () => {
+      showMinPointsDebug = !!showMinPointsDebugInput.checked;
+      queueSaveSettings();
+      refreshAllCharts('debug-visibility-change').catch((err) => console.error(err));
+    });
+  }
+  if (showRefreshDurationDebugInput) {
+    showRefreshDurationDebugInput.addEventListener('change', () => {
+      showRefreshDurationDebug = !!showRefreshDurationDebugInput.checked;
+      queueSaveSettings();
+      refreshAllCharts('debug-visibility-change').catch((err) => console.error(err));
     });
   }
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
@@ -2828,11 +2862,23 @@
     globalGranularity = settings && Object.prototype.hasOwnProperty.call(settings, 'granularity')
       ? normalizeChartGranularity(settings.granularity)
       : 'auto';
+    showMinPointsDebug = settings && Object.prototype.hasOwnProperty.call(settings, 'showMinPointsDebug')
+      ? !!settings.showMinPointsDebug
+      : false;
+    showRefreshDurationDebug = settings && Object.prototype.hasOwnProperty.call(settings, 'showRefreshDurationDebug')
+      ? !!settings.showRefreshDurationDebug
+      : false;
     if (visibilityRefreshEnabledInput) {
       visibilityRefreshEnabledInput.checked = visibilityRefreshEnabled;
     }
     if (globalGranularitySelect) {
       globalGranularitySelect.value = globalGranularity;
+    }
+    if (showMinPointsDebugInput) {
+      showMinPointsDebugInput.checked = showMinPointsDebug;
+    }
+    if (showRefreshDurationDebugInput) {
+      showRefreshDurationDebugInput.checked = showRefreshDurationDebug;
     }
     if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
       currentDashboardName = desiredDashboard;
