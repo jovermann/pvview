@@ -54,7 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 15  # Increment when API endpoints or payload schemas change.
+API_VERSION = 16  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 DEFAULT_MAX_EVENTS = 1200
 
@@ -124,6 +124,8 @@ _ALL_DOWNSAMPLE_BUCKETS: List[Tuple[int, str, int]] = [
     (900_000, "15m", 3),
     (3_600_000, "1h", 3),
 ]
+
+_DOWNSAMPLE_LABEL_TO_MS: Dict[str, int] = {label: bucket_ms for bucket_ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS}
 
 
 @dataclass
@@ -215,6 +217,20 @@ def _choose_fixed_bucket_ms(start_ms: int, end_ms: int, max_events: int) -> int:
         if (span + bucket_ms - 1) // bucket_ms <= max_events:
             return bucket_ms
     return _DOWNSAMPLE_BUCKETS[-1][0]
+
+
+def _parse_granularity_override(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text or text == "auto":
+        return None
+    if text == "raw":
+        return 0
+    bucket_ms = _DOWNSAMPLE_LABEL_TO_MS.get(text)
+    if bucket_ms is None:
+        raise ValueError(f"Unsupported granularity: {value}")
+    return bucket_ms
 
 
 def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, bucket_ms: int) -> DownsampledDayCacheEntry:
@@ -1880,6 +1896,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         start_ms = parse_timestamp(start_raw)
         end_ms = parse_timestamp(end_raw)
         max_events = int(max_events_raw)
+        granularity = _parse_granularity_override(self._query_param(params, "granularity"))
 
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
@@ -1887,25 +1904,29 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("maxEvents must be > 0")
 
         if len(series_values) == 1:
-            self._send_json(200, self._events_for_series(data_dir, series_values[0], start_ms, end_ms, max_events))
+            self._send_json(200, self._events_for_series(data_dir, series_values[0], start_ms, end_ms, max_events, granularity))
             return
-        items = [self._events_for_series(data_dir, s, start_ms, end_ms, max_events) for s in series_values]
+        items = [self._events_for_series(data_dir, s, start_ms, end_ms, max_events, granularity) for s in series_values]
         self._send_json(
             200,
             {
                 "start": start_ms,
                 "end": end_ms,
                 "requestedMaxEvents": max_events,
+                "requestedGranularity": "auto" if granularity is None else ("raw" if granularity == 0 else next((label for ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity), str(granularity))),
                 "requestedSeries": series_values,
                 "events": items,
             },
         )
 
-    def _events_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int, max_events: int) -> Dict[str, Any]:
+    def _events_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int, max_events: int, granularity: Optional[int] = None) -> Dict[str, Any]:
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
-        virtual_bucket_ms = 0 if (end_ms - start_ms + 1) < _DOWNSAMPLE_BUCKETS[0][0] else _choose_fixed_bucket_ms(start_ms, end_ms, max_events)
+        if granularity is None:
+            virtual_bucket_ms = 0 if (end_ms - start_ms + 1) < _DOWNSAMPLE_BUCKETS[0][0] else _choose_fixed_bucket_ms(start_ms, end_ms, max_events)
+        else:
+            virtual_bucket_ms = int(granularity)
         virtual = get_virtual_series_points(data_dir, series, start_ms, end_ms, virtual_bucket_ms) if virtual_bucket_ms > 0 else None
         if virtual is None:
             virtual = get_virtual_series_events_cached(data_dir, series)
@@ -1945,11 +1966,14 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         all_numeric = all(isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool) for ev in events)
         files_used = [os.path.basename(p) for p in files]
 
-        if len(events) <= max_events:
+        if granularity == 0:
+            downsampled = False
+            points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
+        elif granularity is None and len(events) <= max_events:
             downsampled = False
             points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
         else:
-            bucket_ms = _choose_fixed_bucket_ms(start_ms, end_ms, max_events)
+            bucket_ms = int(granularity) if granularity not in (None, 0) else _choose_fixed_bucket_ms(start_ms, end_ms, max_events)
             if virtual is not None:
                 if all_numeric:
                     points = _downsample_fixed_numeric_events(
@@ -2002,6 +2026,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             "start": start_ms,
             "end": end_ms,
             "requestedMaxEvents": max_events,
+            "requestedGranularity": "auto" if granularity is None else ("raw" if granularity == 0 else next((label for ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity), str(granularity))),
             "returnedPoints": len(points),
             "downsampled": downsampled,
             "files": files_used,

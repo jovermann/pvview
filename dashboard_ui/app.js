@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 15;
+  const FRONTEND_API_VERSION = 16;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -20,6 +20,7 @@
   const endInput = document.getElementById('endTime');
   const rangePresetSelect = document.getElementById('rangePreset');
   const autoRefreshSelect = document.getElementById('autoRefresh');
+  const globalGranularitySelect = document.getElementById('globalGranularity');
   const dashboardSelect = document.getElementById('dashboardSelect');
   const saveDashboardBtn = document.getElementById('saveDashboard');
   const manageVirtualSeriesBtn = document.getElementById('manageVirtualSeries');
@@ -104,6 +105,7 @@
   let refreshGetCallCount = 0;
   let visibilityRefreshEnabled = true;
   let dashboardMaxEvents = 1200;
+  let globalGranularity = 'auto';
 
   function htmlEscape(value) {
     return String(value)
@@ -183,12 +185,21 @@
   function bucketLabelShort(bucketMs) {
     const n = Number(bucketMs);
     if (!Number.isFinite(n) || n <= 0) return 'raw';
+    if (n === 1000) return '1s';
     if (n === 5000) return '5s';
     if (n === 15000) return '15s';
     if (n === 60000) return '1m';
     if (n === 300000) return '5m';
     if (n === 900000) return '15m';
+    if (n === 3600000) return '1h';
     return `${Math.round(n / 1000)}s`;
+  }
+
+  const chartGranularityOptions = ['auto', 'raw', '1s', '5s', '15s', '1m', '5m', '15m', '1h'];
+
+  function normalizeChartGranularity(value) {
+    const text = String(value || '').trim().toLowerCase();
+    return chartGranularityOptions.includes(text) ? text : 'auto';
   }
 
   function summarizeBucketMode(items, countKey, startMs, endMs, ignorePredicate = null) {
@@ -407,6 +418,7 @@
       dashboard: String(currentDashboardName || 'Default'),
       visibilityRefreshEnabled: !!visibilityRefreshEnabled,
       maxEvents: normalizeMaxEvents(dashboardMaxEvents),
+      granularity: normalizeChartGranularity(globalGranularity),
       range: {
         preset: activePreset || 'custom',
         start: startInput.value,
@@ -1107,6 +1119,7 @@
     }
 
     const maxEvents = normalizeMaxEvents(dashboardMaxEvents);
+    const granularity = normalizeChartGranularity(globalGranularity);
     const displaySeries = cfg.series.map((s) => displaySeriesName(s));
     const prefix = displayPrefixForSeries(displaySeries);
     const batchQ = new URLSearchParams({
@@ -1114,9 +1127,12 @@
       end: String(end),
       maxEvents: String(maxEvents),
     });
+    if (granularity !== 'auto') {
+      batchQ.set('granularity', granularity);
+    }
     for (const name of cfg.series) batchQ.append('series', name);
     const batchReqT0 = performance.now();
-    appendConsoleLine(`chart ${id} request start batch series=${cfg.series.length}`);
+    appendConsoleLine(`chart ${id} request start batch series=${cfg.series.length} granularity=${granularity}`);
     const batchResp = await apiJson(`/events?${batchQ}`);
     const eventItems = Array.isArray(batchResp && batchResp.events)
       ? batchResp.events
@@ -2282,14 +2298,17 @@
 
   document.addEventListener('change', (ev) => {
     const target = ev.target;
-    if (!(target instanceof HTMLInputElement)) return;
-    if (target.dataset.action !== 'api-trace') return;
-    const id = target.dataset.id;
-    const panel = charts.get(id);
-    if (!panel || panel.kind !== 'console') return;
-    panel.apiTrace = !!target.checked;
-    apiTraceEnabled = !!target.checked;
-    appendConsoleLine(`console api logging ${apiTraceEnabled ? 'enabled' : 'disabled'}`);
+    if (!(target instanceof HTMLElement)) return;
+    if (target.dataset.action === 'api-trace') {
+      if (!(target instanceof HTMLInputElement)) return;
+      const id = target.dataset.id;
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'console') return;
+      panel.apiTrace = !!target.checked;
+      apiTraceEnabled = !!target.checked;
+      appendConsoleLine(`console api logging ${apiTraceEnabled ? 'enabled' : 'disabled'}`);
+      return;
+    }
   });
 
   document.getElementById('chartSettingsForm').addEventListener('submit', (e) => {
@@ -2753,6 +2772,15 @@
     configureAutoRefresh();
   });
 
+  if (globalGranularitySelect) {
+    globalGranularitySelect.addEventListener('change', () => {
+      globalGranularity = normalizeChartGranularity(globalGranularitySelect.value);
+      globalGranularitySelect.value = globalGranularity;
+      queueSaveSettings();
+      refreshAllCharts('granularity-change').catch((err) => console.error(err));
+    });
+  }
+
   dashboardSelect.addEventListener('change', () => {
     const name = String(dashboardSelect.value || '').trim();
     if (!name) return;
@@ -2817,11 +2845,17 @@
     dashboardMaxEvents = settings && Object.prototype.hasOwnProperty.call(settings, 'maxEvents')
       ? normalizeMaxEvents(settings.maxEvents)
       : 1200;
+    globalGranularity = settings && Object.prototype.hasOwnProperty.call(settings, 'granularity')
+      ? normalizeChartGranularity(settings.granularity)
+      : 'auto';
     if (visibilityRefreshEnabledInput) {
       visibilityRefreshEnabledInput.checked = visibilityRefreshEnabled;
     }
     if (dashboardMaxEventsInput) {
       dashboardMaxEventsInput.value = String(dashboardMaxEvents);
+    }
+    if (globalGranularitySelect) {
+      globalGranularitySelect.value = globalGranularity;
     }
     if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
       currentDashboardName = desiredDashboard;
