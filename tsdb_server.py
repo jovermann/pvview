@@ -62,13 +62,14 @@ from tsdb import (
     Event,
     TsdbParseError,
     decimal_places_from_format_id,
+    downsample_series_points,
     get_cached_tsdb_file,
     get_series_format_id_in_file,
     is_numeric_format_id,
     is_string_format_id,
     list_series_in_file,
     read_tsdb_events_for_series,
-    write_downsampled_timeseries_db,
+    write_series_array_timeseries_db,
 )
 
 
@@ -111,6 +112,17 @@ _DOWNSAMPLE_BUCKETS: List[Tuple[int, str]] = [
     (60_000, "1m"),
     (300_000, "5m"),
     (900_000, "15m"),
+    (3_600_000, "1h"),
+]
+
+_ALL_DOWNSAMPLE_BUCKETS: List[Tuple[int, str, int]] = [
+    (1_000, "1s", 1),
+    (5_000, "5s", 3),
+    (15_000, "15s", 3),
+    (60_000, "1m", 3),
+    (300_000, "5m", 3),
+    (900_000, "15m", 3),
+    (3_600_000, "1h", 3),
 ]
 
 
@@ -182,10 +194,10 @@ def _original_file_for_day(data_dir: str, day: datetime.date) -> str:
 
 
 def _downsampled_file_for_day(data_dir: str, day: datetime.date, bucket_ms: int) -> str:
-    label = next((name for ms, name in _DOWNSAMPLE_BUCKETS if ms == bucket_ms), None)
+    label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == bucket_ms), None)
     if label is None:
         raise ValueError(f"Unsupported bucket size: {bucket_ms}")
-    return os.path.join(data_dir, f"data{label}_{day.isoformat()}.tsdb")
+    return os.path.join(data_dir, f"dsda_{day.isoformat()}.{label}.tsdb")
 
 
 def _day_start_ms(day: datetime.date) -> int:
@@ -421,16 +433,61 @@ def _update_current_day_downsampled_cache_from_original(
 
 
 def _write_downsampled_day_cache(path: str, entry: DownsampledDayCacheEntry) -> None:
-    series_order = sorted(entry.series_format_ids.keys())
+    series_order = sorted(entry.numeric_series.keys())
+    series_decimals = {
+        name: min(3, decimal_places_from_format_id(entry.series_format_ids.get(name)))
+        for name in series_order
+    }
     numeric_points = {
-        name: [(int(p["timestamp"]), p["min"], p["avg"], p["max"]) for p in points]
+        name: [
+            (
+                int(p["timestamp"]),
+                {"min": float(p["min"]), "avg": float(p["avg"]), "max": float(p["max"])},
+            )
+            for p in points
+        ]
         for name, points in entry.numeric_series.items()
     }
-    string_points = {
-        name: [(int(p["timestamp"]), str(p["value"])) for p in points]
-        for name, points in entry.string_series.items()
+    write_series_array_timeseries_db(path, entry.day, entry.bucket_ms, series_order, series_decimals, numeric_points, 3)
+
+
+def _build_all_downsampled_day_files(data_dir: str, day: datetime.date) -> None:
+    original_path = _original_file_for_day(data_dir, day)
+    cache = get_cached_tsdb_file(original_path)
+    series_names = [
+        name
+        for name, fmt in cache.series_format_ids.items()
+        if is_numeric_format_id(fmt) and cache.series_events.get(name)
+    ]
+    series_names.sort()
+    series_decimals = {
+        name: min(3, decimal_places_from_format_id(cache.series_format_ids.get(name)))
+        for name in series_names
     }
-    write_downsampled_timeseries_db(path, entry.bucket_ms, series_order, entry.series_format_ids, numeric_points, string_points)
+    current_points_by_series: Dict[str, List[Tuple[int, Any]]] = {
+        name: [(ev.timestamp_ms, ev.value) for ev in cache.series_events.get(name, [])]
+        for name in series_names
+    }
+    for bucket_ms, _label, elem_size in _ALL_DOWNSAMPLE_BUCKETS:
+        next_points_by_series: Dict[str, List[Tuple[int, Any]]] = {}
+        for series_name in series_names:
+            next_points_by_series[series_name] = downsample_series_points(
+                current_points_by_series.get(series_name, []),
+                day,
+                bucket_ms,
+                elem_size,
+                series_decimals.get(series_name, 0),
+            )
+        write_series_array_timeseries_db(
+            _downsampled_file_for_day(data_dir, day, bucket_ms),
+            day,
+            bucket_ms,
+            series_names,
+            series_decimals,
+            next_points_by_series,
+            elem_size,
+        )
+        current_points_by_series = next_points_by_series
 
 
 def _downsampled_points_from_day_cache(
@@ -528,9 +585,8 @@ def _get_or_build_downsampled_day_points(
             _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, bucket_ms, series_name, start_ms, end_ms)
             return [os.path.basename(ds_path)], points
 
-    entry = _build_downsampled_day_cache_from_original(original_path, day, bucket_ms)
-    _write_downsampled_day_cache(ds_path, entry)
-    _downsampled, points = _downsampled_points_from_day_cache(entry, series_name, start_ms, end_ms)
+    _build_all_downsampled_day_files(data_dir, day)
+    _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, bucket_ms, series_name, start_ms, end_ms)
     return [os.path.basename(ds_path)], points
 
 

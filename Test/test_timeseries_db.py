@@ -160,6 +160,24 @@ def test_current_day_downsampling_updates_incrementally_for_completed_buckets(tm
     assert points[0]["max"] == pytest.approx(14.0)
 
 
+def test_server_past_day_downsampling_builds_all_dsda_variants(tmp_path):
+    day = datetime.date(2026, 2, 20)
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    path = tmp_path / f"data_{day.isoformat()}.tsdb"
+
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.0, timestamp_ms=day_start_ms + 1000)
+    writer.addValue("pv.power", 12.0, timestamp_ms=day_start_ms + 2000)
+    writer.addValue("pv.power", 20.0, timestamp_ms=day_start_ms + 6000)
+    writer.close(mark_complete=True)
+
+    files, points = _get_or_build_downsampled_day_points(str(tmp_path), day, 5000, "pv.power", day_start_ms, day_start_ms + 10000)
+    assert files == [f"dsda_{day.isoformat()}.5s.tsdb"]
+    assert points
+    for label in ("1s", "5s", "15s", "1m", "5m", "15m", "1h"):
+        assert (tmp_path / f"dsda_{day.isoformat()}.{label}.tsdb").exists()
+
+
 def test_virtual_series_uses_bucketed_source_data(tmp_path):
     day = datetime.date(2026, 2, 20)
     day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
@@ -181,7 +199,7 @@ def test_virtual_series_uses_bucketed_source_data(tmp_path):
     assert result is not None
     points, decimal_places, files = result
     assert decimal_places == 0
-    assert files == [f"data5s_{day.isoformat()}.tsdb"]
+    assert files == [f"dsda_{day.isoformat()}.5s.tsdb"]
     assert len(points) == 2
     assert points[0]["timestamp"] == day_start_ms + 2500
     assert points[0]["min"] == pytest.approx(11.0)
@@ -215,7 +233,7 @@ def test_virtual_yesterday_uses_bucketed_source_data(tmp_path):
     result = get_virtual_series_points(str(tmp_path), "yday", start2, start2 + 4999, 5000)
     assert result is not None
     points, _decimal_places, files = result
-    assert files == [f"data5s_{day1.isoformat()}.tsdb", f"data5s_{day2.isoformat()}.tsdb"]
+    assert files == [f"dsda_{day1.isoformat()}.5s.tsdb", f"dsda_{day2.isoformat()}.5s.tsdb"]
     assert len(points) == 1
     assert points[0]["timestamp"] == start2 + 2500
     assert points[0]["avg"] == pytest.approx(25.0)
