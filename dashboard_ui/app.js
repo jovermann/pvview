@@ -1174,6 +1174,8 @@
         displayRule,
         latestTimestampMs: Number.isFinite(latestTimestampMs) ? latestTimestampMs : undefined,
         downsampled: !!data.downsampled,
+        returnedPoints: Number.isFinite(Number(data.returnedPoints)) ? Number(data.returnedPoints) : points.length,
+        bucketMs: Number.isFinite(Number(data.bucketMs)) ? Number(data.bucketMs) : null,
       };
     }));
 
@@ -1191,6 +1193,8 @@
     const unitByLegendName = new Map();
     const decimalsByLegendName = new Map();
     const hideMaxByLegendName = new Map();
+    const pointsByLegendName = new Map();
+    const bucketModeByLegendName = new Map();
     for (const s of seriesResponses) {
       let maxValue = s.legendMax;
       let curValue;
@@ -1233,6 +1237,15 @@
         const prev = decimalsByLegendName.get(s.displayName);
         const next = normalizeDecimalPlaces(s.displayRule.decimals);
         decimalsByLegendName.set(s.displayName, Math.max(prev, next));
+      }
+      pointsByLegendName.set(
+        s.displayName,
+        Number(pointsByLegendName.get(s.displayName) || 0) + Number(s.returnedPoints || 0)
+      );
+      const existingBucketMode = bucketModeByLegendName.get(s.displayName);
+      const nextBucketMode = Number.isFinite(s.bucketMs) ? bucketLabelShort(s.bucketMs) : 'raw';
+      if (!existingBucketMode || existingBucketMode === 'raw') {
+        bucketModeByLegendName.set(s.displayName, nextBucketMode);
       }
     }
     const displayNameToSeries = new Map();
@@ -1283,7 +1296,7 @@
       `chart ${id} request buckets mode=${chartBucketSummary.label} `
       + `buckets=${chartBucketSummary.buckets}/${chartBucketSummary.potentialBuckets}`
     );
-    setPanelTitleMeta(id, `${chartBucketSummary.label} ${chartBucketSummary.buckets}/${chartBucketSummary.potentialBuckets}, ${batchReqElapsedMs} ms`);
+    setPanelTitleMeta(id, `${batchReqElapsedMs} ms`);
     const dots = dotVisual(cfg.dotStyle);
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
     const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
@@ -1306,14 +1319,17 @@
           const unit = unitByLegendName.get(name);
           const decimals = decimalsByLegendName.get(name);
           const hideMax = !!hideMaxByLegendName.get(name);
+          const pointsCount = Number(pointsByLegendName.get(name) || 0);
+          const bucketMode = bucketModeByLegendName.get(name) || 'raw';
+          const pointsText = `${pointsCount} pts, ${bucketMode}`;
           const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
           if (hideMax) {
-            if (curValue === undefined || !curFresh) return name;
-            return `${name} (${formatValueWithUnit(curValue, unit, decimals)})`;
+            if (curValue === undefined || !curFresh) return `${name} (${pointsText})`;
+            return `${name} (${formatValueWithUnit(curValue, unit, decimals)}, ${pointsText})`;
           }
-          if (maxValue === undefined) return name;
-          if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit, decimals)})`;
-          return `${name} (${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)})`;
+          if (maxValue === undefined) return `${name} (${pointsText})`;
+          if (curValue === undefined || !curFresh) return `${name} (max ${formatValueWithUnit(maxValue, unit, decimals)}, ${pointsText})`;
+          return `${name} (${formatValueWithUnit(curValue, unit, decimals)}, max ${formatValueWithUnit(maxValue, unit, decimals)}, ${pointsText})`;
         },
       },
       tooltip: { trigger: 'axis' },
