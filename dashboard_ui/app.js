@@ -1514,7 +1514,11 @@
     }
     const firstSeriesCount = statsItems.length ? Number(statsItems[0] && statsItems[0].count) || 0 : 0;
     const statMetaParts = [];
-    if (showMinPointsDebug) statMetaParts.push(`min 10`, `${firstSeriesCount} pts`);
+    if (showMinPointsDebug) {
+      const bucketLabels = Array.from(bucketSet).sort((a, b) => a - b).map((ms) => bucketLabelShort(ms));
+      const granularityLabel = bucketLabels.length === 0 ? 'raw' : (bucketLabels.length === 1 ? bucketLabels[0] : bucketLabels.join('/'));
+      statMetaParts.push(`min 10`, `${firstSeriesCount} pts`, granularityLabel);
+    }
     if (showRefreshDurationDebug) statMetaParts.push(`${Math.round(performance.now() - statsReqT0)} ms`);
     setPanelTitleMeta(id, statMetaParts.join(', '));
 
