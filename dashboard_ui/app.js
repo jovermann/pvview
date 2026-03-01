@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 16;
+  const FRONTEND_API_VERSION = 17;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -38,7 +38,6 @@
   const unitOverridesTabPane = document.getElementById('unitOverridesTabPane');
   const dashboardSettingsTabPane = document.getElementById('dashboardSettingsTabPane');
   const visibilityRefreshEnabledInput = document.getElementById('visibilityRefreshEnabled');
-  const dashboardMaxEventsInput = document.getElementById('dashboardMaxEvents');
   const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -104,7 +103,6 @@
   let lastForegroundRefreshMs = 0;
   let refreshGetCallCount = 0;
   let visibilityRefreshEnabled = true;
-  let dashboardMaxEvents = 1200;
   let globalGranularity = 'auto';
 
   function htmlEscape(value) {
@@ -176,10 +174,16 @@
     refreshAllCharts(`foreground-${reason}`).catch((err) => console.error(err));
   }
 
-  function normalizeMaxEvents(value) {
+  function normalizeMinPoints(value, fallback = 10) {
     const n = Number(value);
-    if (!Number.isFinite(n) || n < 1) return 1200;
+    if (!Number.isFinite(n) || n < 1) return fallback;
     return Math.max(1, Math.floor(n));
+  }
+
+  function chartMinPointsForPanel(id) {
+    const chartEl = document.getElementById(`chart-${id}`);
+    const width = chartEl instanceof HTMLElement ? chartEl.getBoundingClientRect().width : 0;
+    return normalizeMinPoints(Math.floor(width / 2), 10);
   }
 
   function bucketLabelShort(bucketMs) {
@@ -417,7 +421,6 @@
     return {
       dashboard: String(currentDashboardName || 'Default'),
       visibilityRefreshEnabled: !!visibilityRefreshEnabled,
-      maxEvents: normalizeMaxEvents(dashboardMaxEvents),
       granularity: normalizeChartGranularity(globalGranularity),
       range: {
         preset: activePreset || 'custom',
@@ -922,7 +925,8 @@
             series: seriesName,
             start: '0',
             end: '9999999999999',
-            maxEvents: '1',
+            minPoints: '1',
+            granularity: 'raw',
           });
           const data = await apiJson(`/events?${q}`);
           const first = Array.isArray(data.points) && data.points.length ? data.points[0] : null;
@@ -1118,21 +1122,21 @@
       return;
     }
 
-    const maxEvents = normalizeMaxEvents(dashboardMaxEvents);
+    const minPoints = chartMinPointsForPanel(id);
     const granularity = normalizeChartGranularity(globalGranularity);
     const displaySeries = cfg.series.map((s) => displaySeriesName(s));
     const prefix = displayPrefixForSeries(displaySeries);
     const batchQ = new URLSearchParams({
       start: String(start),
       end: String(end),
-      maxEvents: String(maxEvents),
+      minPoints: String(minPoints),
     });
     if (granularity !== 'auto') {
       batchQ.set('granularity', granularity);
     }
     for (const name of cfg.series) batchQ.append('series', name);
     const batchReqT0 = performance.now();
-    appendConsoleLine(`chart ${id} request start batch series=${cfg.series.length} granularity=${granularity}`);
+    appendConsoleLine(`chart ${id} request start batch series=${cfg.series.length} granularity=${granularity} minPoints=${minPoints}`);
     const batchResp = await apiJson(`/events?${batchQ}`);
     const eventItems = Array.isArray(batchResp && batchResp.events)
       ? batchResp.events
@@ -1312,7 +1316,7 @@
       `chart ${id} request buckets mode=${chartBucketSummary.label} `
       + `buckets=${chartBucketSummary.buckets}/${chartBucketSummary.potentialBuckets}`
     );
-    setPanelTitleMeta(id, `${batchReqElapsedMs} ms`);
+    setPanelTitleMeta(id, `min ${minPoints}, ${batchReqElapsedMs} ms`);
     const dots = dotVisual(cfg.dotStyle);
     const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
     const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
@@ -1435,11 +1439,11 @@
     const statsQ = new URLSearchParams({
       start: String(start),
       end: String(end),
-      maxEvents: String(normalizeMaxEvents(dashboardMaxEvents)),
+      minPoints: '10',
     });
     for (const s of uniqueSiblingNames) statsQ.append('series', s);
     const statsReqT0 = performance.now();
-    appendConsoleLine(`stat ${id} request start batch series=${uniqueSiblingNames.length}`);
+    appendConsoleLine(`stat ${id} request start batch series=${uniqueSiblingNames.length} minPoints=10`);
     const statsResp = await apiJson(`/stats?${statsQ}`);
     const statsItems = Array.isArray(statsResp && statsResp.stats)
       ? statsResp.stats
@@ -1455,17 +1459,6 @@
     appendConsoleLine(
       `stat ${id} request done batch series=${uniqueSiblingNames.length} returned=${statsItems.length} `
       + `elapsed=${Math.round(performance.now() - statsReqT0)}ms downsampled=${downsampledCount}/${statsItems.length}${bucketSummary}`
-    );
-    const statBucketSummary = summarizeBucketMode(
-      statsItems,
-      'count',
-      start,
-      end,
-      (item) => item && item.debug && item.debug.operator === 'yesterday'
-    );
-    appendConsoleLine(
-      `stat ${id} request buckets mode=${statBucketSummary.label} `
-      + `buckets=${statBucketSummary.buckets}/${statBucketSummary.potentialBuckets}`
     );
     for (const item of statsItems) {
       if (!item || typeof item !== 'object' || typeof item.series !== 'string') continue;
@@ -1490,7 +1483,8 @@
         );
       }
     }
-    setPanelTitleMeta(id, `${statBucketSummary.label} ${statBucketSummary.buckets}/${statBucketSummary.potentialBuckets}, ${Math.round(performance.now() - statsReqT0)} ms`);
+    const firstSeriesCount = statsItems.length ? Number(statsItems[0] && statsItems[0].count) || 0 : 0;
+    setPanelTitleMeta(id, `min 10, ${firstSeriesCount} pts, ${Math.round(performance.now() - statsReqT0)} ms`);
 
     const rows = await Promise.all(cfg.series.map(async (seriesName) => {
       const parts = splitSeriesParentSuffix(seriesName);
@@ -2618,17 +2612,6 @@
       queueSaveSettings();
     });
   }
-  if (dashboardMaxEventsInput) {
-    dashboardMaxEventsInput.value = String(dashboardMaxEvents);
-  }
-  if (dashboardMaxEventsInput) {
-    dashboardMaxEventsInput.addEventListener('change', () => {
-      dashboardMaxEvents = normalizeMaxEvents(dashboardMaxEventsInput.value);
-      dashboardMaxEventsInput.value = String(dashboardMaxEvents);
-      queueSaveSettings();
-    });
-  }
-
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
     virtualSeriesDialog.close();
   });
@@ -2842,17 +2825,11 @@
     visibilityRefreshEnabled = settings && Object.prototype.hasOwnProperty.call(settings, 'visibilityRefreshEnabled')
       ? !!settings.visibilityRefreshEnabled
       : true;
-    dashboardMaxEvents = settings && Object.prototype.hasOwnProperty.call(settings, 'maxEvents')
-      ? normalizeMaxEvents(settings.maxEvents)
-      : 1200;
     globalGranularity = settings && Object.prototype.hasOwnProperty.call(settings, 'granularity')
       ? normalizeChartGranularity(settings.granularity)
       : 'auto';
     if (visibilityRefreshEnabledInput) {
       visibilityRefreshEnabledInput.checked = visibilityRefreshEnabled;
-    }
-    if (dashboardMaxEventsInput) {
-      dashboardMaxEventsInput.value = String(dashboardMaxEvents);
     }
     if (globalGranularitySelect) {
       globalGranularitySelect.value = globalGranularity;

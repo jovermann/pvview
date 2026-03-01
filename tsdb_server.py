@@ -4,7 +4,7 @@
 API:
 - GET /health
 - GET /series?start=<ts>&end=<ts>
-- GET /events?series=<name>&start=<ts>&end=<ts>&maxEvents=<n>
+- GET /events?series=<name>&start=<ts>&end=<ts>&minPoints=<n>
   (or repeated series params for batched response)
 - GET /stats?series=<name>&start=<ts>&end=<ts>
 - GET /virtual-series
@@ -27,7 +27,7 @@ Response for /events:
   "series": "...",
   "start": <ms>,
   "end": <ms>,
-  "requestedMaxEvents": <n>,
+  "requestedMinPoints": <n>,
   "returnedPoints": <n>,
   "downsampled": <bool>,
   "points": [...]
@@ -54,9 +54,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 16  # Increment when API endpoints or payload schemas change.
+API_VERSION = 17  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
-DEFAULT_MAX_EVENTS = 1200
+DEFAULT_MIN_POINTS = 10
 
 from tsdb import (
     Event,
@@ -211,12 +211,12 @@ def _bucket_center_ms(bucket_start_ms: int, bucket_ms: int) -> int:
     return bucket_start_ms + (bucket_ms // 2)
 
 
-def _choose_fixed_bucket_ms(start_ms: int, end_ms: int, max_events: int) -> int:
+def _choose_auto_bucket_ms(start_ms: int, end_ms: int, min_points: int) -> int:
     span = max(1, end_ms - start_ms + 1)
-    for bucket_ms, _name in _DOWNSAMPLE_BUCKETS:
-        if (span + bucket_ms - 1) // bucket_ms <= max_events:
+    for bucket_ms, _name, _elem_size in reversed(_ALL_DOWNSAMPLE_BUCKETS):
+        if (span + bucket_ms - 1) // bucket_ms >= min_points:
             return bucket_ms
-    return _DOWNSAMPLE_BUCKETS[-1][0]
+    return 0
 
 
 def _parse_granularity_override(value: Optional[str]) -> Optional[int]:
@@ -1890,41 +1890,41 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Missing required query parameter: series")
         start_raw = self._query_param(params, "start", required=True)
         end_raw = self._query_param(params, "end", required=True)
-        max_events_raw = self._query_param(params, "maxEvents", required=True)
-        assert start_raw is not None and end_raw is not None and max_events_raw is not None
+        min_points_raw = self._query_param(params, "minPoints", required=True)
+        assert start_raw is not None and end_raw is not None and min_points_raw is not None
 
         start_ms = parse_timestamp(start_raw)
         end_ms = parse_timestamp(end_raw)
-        max_events = int(max_events_raw)
+        min_points = int(min_points_raw)
         granularity = _parse_granularity_override(self._query_param(params, "granularity"))
 
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
-        if max_events <= 0:
-            raise ValueError("maxEvents must be > 0")
+        if min_points <= 0:
+            raise ValueError("minPoints must be > 0")
 
         if len(series_values) == 1:
-            self._send_json(200, self._events_for_series(data_dir, series_values[0], start_ms, end_ms, max_events, granularity))
+            self._send_json(200, self._events_for_series(data_dir, series_values[0], start_ms, end_ms, min_points, granularity))
             return
-        items = [self._events_for_series(data_dir, s, start_ms, end_ms, max_events, granularity) for s in series_values]
+        items = [self._events_for_series(data_dir, s, start_ms, end_ms, min_points, granularity) for s in series_values]
         self._send_json(
             200,
             {
                 "start": start_ms,
                 "end": end_ms,
-                "requestedMaxEvents": max_events,
+                "requestedMinPoints": min_points,
                 "requestedGranularity": "auto" if granularity is None else ("raw" if granularity == 0 else next((label for ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity), str(granularity))),
                 "requestedSeries": series_values,
                 "events": items,
             },
         )
 
-    def _events_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int, max_events: int, granularity: Optional[int] = None) -> Dict[str, Any]:
+    def _events_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int, min_points: int, granularity: Optional[int] = None) -> Dict[str, Any]:
         files = find_candidate_files(data_dir, start_ms, end_ms)
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
         if granularity is None:
-            virtual_bucket_ms = 0 if (end_ms - start_ms + 1) < _DOWNSAMPLE_BUCKETS[0][0] else _choose_fixed_bucket_ms(start_ms, end_ms, max_events)
+            virtual_bucket_ms = _choose_auto_bucket_ms(start_ms, end_ms, min_points)
         else:
             virtual_bucket_ms = int(granularity)
         virtual = get_virtual_series_points(data_dir, series, start_ms, end_ms, virtual_bucket_ms) if virtual_bucket_ms > 0 else None
@@ -1941,7 +1941,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                     "series": series,
                     "start": start_ms,
                     "end": end_ms,
-                    "requestedMaxEvents": max_events,
+                    "requestedMinPoints": min_points,
                     "returnedPoints": len(points),
                     "downsampled": downsampled,
                     "files": files_used,
@@ -1966,14 +1966,11 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         all_numeric = all(isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool) for ev in events)
         files_used = [os.path.basename(p) for p in files]
 
-        if granularity == 0:
-            downsampled = False
-            points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-        elif granularity is None and len(events) <= max_events:
+        bucket_ms = int(granularity) if granularity not in (None, 0) else (virtual_bucket_ms if virtual_bucket_ms > 0 else 0)
+        if granularity == 0 or bucket_ms <= 0:
             downsampled = False
             points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
         else:
-            bucket_ms = int(granularity) if granularity not in (None, 0) else _choose_fixed_bucket_ms(start_ms, end_ms, max_events)
             if virtual is not None:
                 if all_numeric:
                     points = _downsample_fixed_numeric_events(
@@ -1984,7 +1981,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                         decimal_places=max_decimal_places if max_decimal_places is not None else 3,
                     )
                 else:
-                    points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events[:max_events]]
+                    points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
                     bucket_ms = 0
                 downsampled = bucket_ms > 0
             else:
@@ -1999,7 +1996,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                             decimal_places=max_decimal_places if max_decimal_places is not None else 3,
                         )
                     else:
-                        points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events[:max_events]]
+                        points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
                         bucket_ms = 0
                     downsampled = bucket_ms > 0
                 else:
@@ -2025,7 +2022,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             "series": series,
             "start": start_ms,
             "end": end_ms,
-            "requestedMaxEvents": max_events,
+            "requestedMinPoints": min_points,
             "requestedGranularity": "auto" if granularity is None else ("raw" if granularity == 0 else next((label for ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity), str(granularity))),
             "returnedPoints": len(points),
             "downsampled": downsampled,
@@ -2036,15 +2033,15 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             response["decimalPlaces"] = max_decimal_places
         if downsampled:
             response["bucketMs"] = bucket_ms
-        if not all_numeric and len(events) > max_events and virtual is not None:
-            response["note"] = "Series is non-numeric; returned first maxEvents without min/avg/max aggregation."
+        if not all_numeric and bucket_ms > 0 and virtual is not None:
+            response["note"] = "Series is non-numeric; returned raw values without min/avg/max aggregation."
         return response
 
     def _handle_stats(self, params: Dict[str, List[str]]) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]
         start_raw = self._query_param(params, "start", required=True)
         end_raw = self._query_param(params, "end", required=True)
-        max_events_raw = self._query_param(params, "maxEvents")
+        min_points_raw = self._query_param(params, "minPoints")
         series_values = [str(s) for s in params.get("series", []) if str(s)]
         if not series_values:
             raise ValueError("Missing required query parameter: series")
@@ -2052,23 +2049,23 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
         start_ms = parse_timestamp(start_raw)
         end_ms = parse_timestamp(end_raw)
-        max_events = int(max_events_raw) if max_events_raw is not None else DEFAULT_MAX_EVENTS
+        min_points = int(min_points_raw) if min_points_raw is not None else DEFAULT_MIN_POINTS
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
-        if max_events <= 0:
-            raise ValueError("maxEvents must be > 0")
+        if min_points <= 0:
+            raise ValueError("minPoints must be > 0")
         virtual_names = _virtual_series_name_set(data_dir)
         virtual_defs = _virtual_series_def_map(data_dir)
         if len(series_values) == 1:
-            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms, max_events, virtual_names, virtual_defs))
+            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms, min_points, virtual_names, virtual_defs))
             return
-        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms, max_events, virtual_names, virtual_defs) for s in series_values]
+        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms, min_points, virtual_names, virtual_defs) for s in series_values]
         self._send_json(
             200,
             {
                 "start": start_ms,
                 "end": end_ms,
-                "requestedMaxEvents": max_events,
+                "requestedMinPoints": min_points,
                 "requestedSeries": series_values,
                 "stats": stats_list,
             },
@@ -2080,14 +2077,14 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         series: str,
         start_ms: int,
         end_ms: int,
-        max_events: int,
+        min_points: int,
         virtual_names: Optional[set[str]] = None,
         virtual_defs: Optional[Dict[str, VirtualSeriesDef]] = None,
     ) -> Dict[str, Any]:
         t0 = time.perf_counter()
         _REQUEST_TRACE.series_reads = []
         is_virtual = series in (virtual_names if virtual_names is not None else _virtual_series_name_set(data_dir))
-        event_data = self._events_for_series(data_dir, series, start_ms, end_ms, max_events)
+        event_data = self._events_for_series(data_dir, series, start_ms, end_ms, min_points)
         points = list(event_data.get("points") or [])
         downsampled = bool(event_data.get("downsampled"))
         current_ts: Optional[int] = None
