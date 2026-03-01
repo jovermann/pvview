@@ -1185,7 +1185,7 @@
         name,
         displayName: compactSeriesLabel(displaySeriesName(name), prefix),
         axisKey: axisGroupKeyForSuffix(String(name).split('/').pop() || String(name)),
-        points: breakLongGaps(points, 3600000),
+        points: breakLongGaps(points, 3960000),
         legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
         displayRule,
         latestTimestampMs: Number.isFinite(latestTimestampMs) ? latestTimestampMs : undefined,
