@@ -92,6 +92,16 @@ class VirtualSeriesCacheEntry:
 
 
 @dataclass
+class VirtualPointsCacheEntry:
+    definition: Tuple[Any, ...]
+    left_sig: Tuple[Any, ...]
+    right_sig: Tuple[Any, ...]
+    points: List[Dict[str, Any]]
+    decimal_places: int
+    files: List[str]
+
+
+@dataclass
 class SeriesAllFilesCacheEntry:
     file_signatures: Tuple[Tuple[Any, ...], ...]
     events: List[Event]
@@ -101,6 +111,7 @@ class SeriesAllFilesCacheEntry:
 
 _VIRTUAL_SERIES_CACHE_LOCK = threading.Lock()
 _VIRTUAL_SERIES_RESULT_CACHE: Dict[Tuple[str, str], VirtualSeriesCacheEntry] = {}
+_VIRTUAL_POINTS_CACHE: Dict[Tuple[str, str, int, int, int], VirtualPointsCacheEntry] = {}
 
 _SERIES_ALL_FILES_CACHE_LOCK = threading.Lock()
 _SERIES_ALL_FILES_CACHE: Dict[Tuple[str, str], SeriesAllFilesCacheEntry] = {}
@@ -936,43 +947,55 @@ def _real_series_points_for_virtual(
     start_ms: int,
     end_ms: int,
     bucket_ms: int,
-) -> Tuple[List[Dict[str, Any]], int, List[str]]:
+) -> Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     files = find_candidate_files(data_dir, start_ms, end_ms)
     max_decimal_places: Optional[int] = None
     if bucket_ms <= 0:
         events: List[Event] = []
+        source_sig_parts: List[Tuple[Any, ...]] = []
         for path in files:
+            cache = get_cached_tsdb_file(path)
+            source_sig_parts.append((os.path.basename(path), cache.parsed_offset, cache.mtime_ns, cache.size))
             events.extend(read_tsdb_events_for_series(path, series_name, start_ms, end_ms))
-            fmt = get_series_format_id_in_file(path, series_name)
+            fmt = cache.series_format_ids.get(series_name)
             if is_numeric_format_id(fmt):
                 d = decimal_places_from_format_id(fmt)
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
         events.sort(key=lambda e: e.timestamp_ms)
-        return [{"timestamp": e.timestamp_ms, "value": e.value} for e in events], max_decimal_places if max_decimal_places is not None else 3, [os.path.basename(p) for p in files]
+        points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
+        return points, max_decimal_places if max_decimal_places is not None else 3, [os.path.basename(p) for p in files], _points_signature("real", series_name, bucket_ms, tuple(source_sig_parts), points)
 
     has_daily_files = bool(files) and all(os.path.basename(path).startswith("data_") for path in files)
     if not has_daily_files:
         events = []
+        source_sig_parts = []
         for path in files:
+            cache = get_cached_tsdb_file(path)
+            source_sig_parts.append((os.path.basename(path), cache.parsed_offset, cache.mtime_ns, cache.size))
             events.extend(read_tsdb_events_for_series(path, series_name, start_ms, end_ms))
-            fmt = get_series_format_id_in_file(path, series_name)
+            fmt = cache.series_format_ids.get(series_name)
             if is_numeric_format_id(fmt):
                 d = decimal_places_from_format_id(fmt)
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
         events.sort(key=lambda e: e.timestamp_ms)
+        points = _downsample_fixed_numeric_events(events, bucket_ms, start_ms, end_ms, decimal_places=max_decimal_places if max_decimal_places is not None else 3)
         return (
-            _downsample_fixed_numeric_events(events, bucket_ms, start_ms, end_ms, decimal_places=max_decimal_places if max_decimal_places is not None else 3),
+            points,
             max_decimal_places if max_decimal_places is not None else 3,
             [os.path.basename(p) for p in files],
+            _points_signature("real", series_name, bucket_ms, tuple(source_sig_parts), points),
         )
 
     points: List[Dict[str, Any]] = []
     files_used: List[str] = []
+    source_sig_parts = []
     for day in day_range_utc(start_ms, end_ms):
         day_files, day_points = _get_or_build_downsampled_day_points(data_dir, day, bucket_ms, series_name, start_ms, end_ms)
         for name in day_files:
             if name not in files_used:
                 files_used.append(name)
+        if day_files:
+            source_sig_parts.append((day.isoformat(), tuple(day_files), len(day_points), int(day_points[-1]["timestamp"]) if day_points else None))
         points.extend(day_points)
     for path in files:
         fmt = get_series_format_id_in_file(path, series_name)
@@ -980,7 +1003,7 @@ def _real_series_points_for_virtual(
             d = decimal_places_from_format_id(fmt)
             max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
     points.sort(key=lambda p: int(p.get("timestamp", 0)))
-    return points, max_decimal_places if max_decimal_places is not None else 3, files_used
+    return points, max_decimal_places if max_decimal_places is not None else 3, files_used, _points_signature("real", series_name, bucket_ms, tuple(source_sig_parts), points)
 
 
 def build_error(status: int, code: str, message: str) -> Tuple[int, Dict[str, Any]]:
@@ -1180,6 +1203,7 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit
     os.replace(tmp, path)
     with _VIRTUAL_SERIES_CACHE_LOCK:
         _VIRTUAL_SERIES_RESULT_CACHE.clear()
+        _VIRTUAL_POINTS_CACHE.clear()
 
 
 def save_virtual_series_defs(data_dir: str, defs: List[VirtualSeriesDef]) -> None:
@@ -1443,6 +1467,46 @@ def _virtual_result_signature(entry: VirtualSeriesCacheEntry) -> Tuple[Any, ...]
     return ("virtual", entry.definition, entry.left_sig, entry.right_sig)
 
 
+def _virtual_points_result_signature(entry: VirtualPointsCacheEntry) -> Tuple[Any, ...]:
+    return ("virtual-points", entry.definition, entry.left_sig, entry.right_sig)
+
+
+def _points_signature(kind: str, name: str, bucket_ms: int, source_sig: Tuple[Any, ...], points: List[Dict[str, Any]]) -> Tuple[Any, ...]:
+    last_ts = None
+    if points:
+        try:
+            last_ts = int(points[-1].get("timestamp", 0))
+        except Exception:
+            last_ts = None
+    return (kind, name, int(bucket_ms), source_sig, len(points), last_ts)
+
+
+def _signature_append_info(sig: Tuple[Any, ...]) -> Tuple[Tuple[Any, ...], int, Optional[int]]:
+    if not isinstance(sig, tuple) or len(sig) < 6:
+        return (sig,), 0, None
+    return sig[:-2], int(sig[-2]), (int(sig[-1]) if sig[-1] is not None else None)
+
+
+def _point_timestamp_ms(point: Dict[str, Any]) -> int:
+    return int(point.get("timestamp", 0))
+
+
+def _slice_points_from_timestamp(points: List[Dict[str, Any]], timestamp_ms: int) -> List[Dict[str, Any]]:
+    idx = bisect.bisect_left([_point_timestamp_ms(p) for p in points], int(timestamp_ms))
+    return list(points[idx:])
+
+
+def _prefix_points_before_timestamp(points: List[Dict[str, Any]], timestamp_ms: int) -> List[Dict[str, Any]]:
+    idx = bisect.bisect_left([_point_timestamp_ms(p) for p in points], int(timestamp_ms))
+    return list(points[:idx])
+
+
+def _local_day_start_ms_for_point(timestamp_ms: int) -> int:
+    dt = datetime.datetime.fromtimestamp(int(timestamp_ms) / 1000.0).astimezone()
+    local_midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(local_midnight.timestamp() * 1000)
+
+
 def _resolve_virtual_operand(
     data_dir: str,
     operand: str,
@@ -1462,31 +1526,31 @@ def _resolve_virtual_operand(
 def _resolve_virtual_operand_points(
     data_dir: str,
     operand: str,
-    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str]]],
+    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]],
     start_ms: int,
     end_ms: int,
     bucket_ms: int,
-) -> Tuple[bool, Optional[float], List[Dict[str, Any]], int, List[str]]:
+) -> Tuple[bool, Optional[float], List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     const = _parse_virtual_constant(operand)
     if const is not None:
-        return True, float(const), [], 3, []
+        return True, float(const), [], 3, [], ("const", const)
     prior = prior_virtuals.get(str(operand))
     if prior is not None:
-        points, dp, files = prior
-        return False, None, list(points), int(dp), list(files)
-    points, dp, files = _real_series_points_for_virtual(data_dir, operand, start_ms, end_ms, bucket_ms)
-    return False, None, points, dp, files
+        points, dp, files, sig = prior
+        return False, None, list(points), int(dp), list(files), sig
+    points, dp, files, sig = _real_series_points_for_virtual(data_dir, operand, start_ms, end_ms, bucket_ms)
+    return False, None, points, dp, files, sig
 
 
 def _compute_one_virtual_series_points(
     data_dir: str,
     d: VirtualSeriesDef,
-    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str]]],
+    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]],
     start_ms: int,
     end_ms: int,
     bucket_ms: int,
     align_window_ms: int,
-) -> Tuple[List[Dict[str, Any]], int, List[str]]:
+) -> Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     operand_start_ms = start_ms
     operand_end_ms = end_ms
     if d.op in {"today", "yesterday"}:
@@ -1496,32 +1560,215 @@ def _compute_one_virtual_series_points(
             start_day = start_day - datetime.timedelta(days=1)
         operand_start_ms = _day_start_ms(start_day)
         operand_end_ms = _day_start_ms(end_day) + 86_400_000 - 1
-    left_is_const, left_const, left_points, left_dp, left_files = _resolve_virtual_operand_points(
+    left_is_const, left_const, left_points, left_dp, left_files, left_sig = _resolve_virtual_operand_points(
         data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, bucket_ms
     )
     if d.op in {"today", "yesterday"}:
         if left_is_const:
-            return [], 3, []
+            entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), [], 3, [])
+            return [], 3, [], _virtual_points_result_signature(entry)
         decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
         points = _compute_virtual_points_today(left_points, decimal_places) if d.op == "today" else _compute_virtual_points_yesterday(left_points, decimal_places)
         points = [p for p in points if start_ms <= int(p.get("timestamp", 0)) <= end_ms]
-        return points, decimal_places, sorted(set(left_files))
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), list(points), decimal_places, sorted(set(left_files)))
+        return points, decimal_places, sorted(set(left_files)), _virtual_points_result_signature(entry)
 
-    right_is_const, right_const, right_points, right_dp, right_files = _resolve_virtual_operand_points(
+    right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
         data_dir, d.right, prior_virtuals, start_ms, end_ms, bucket_ms
     )
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     if left_is_const and right_is_const:
-        return [], 3, []
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, [], 3, [])
+        return [], 3, [], _virtual_points_result_signature(entry)
     if left_is_const:
-        return _combine_numeric_points_with_constant(right_points, float(left_const), d.op, True, decimal_places), decimal_places, sorted(set(right_files))
+        points = _combine_numeric_points_with_constant(right_points, float(left_const), d.op, True, decimal_places)
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(right_files)))
+        return points, decimal_places, sorted(set(right_files)), _virtual_points_result_signature(entry)
     if right_is_const:
-        return _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places), decimal_places, sorted(set(left_files))
-    return (
-        _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places),
+        points = _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places)
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files)))
+        return points, decimal_places, sorted(set(left_files)), _virtual_points_result_signature(entry)
+    points = _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places)
+    entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files + right_files)))
+    return points, decimal_places, sorted(set(left_files + right_files)), _virtual_points_result_signature(entry)
+
+
+def _compute_virtual_points_full(
+    d: VirtualSeriesDef,
+    left_points: List[Dict[str, Any]],
+    right_points: List[Dict[str, Any]],
+    left_is_const: bool,
+    left_const: Optional[float],
+    right_is_const: bool,
+    right_const: Optional[float],
+    decimal_places: int,
+    start_ms: int,
+    end_ms: int,
+    align_window_ms: int,
+) -> List[Dict[str, Any]]:
+    if d.op in {"today", "yesterday"}:
+        if left_is_const:
+            return []
+        points = _compute_virtual_points_today(left_points, decimal_places) if d.op == "today" else _compute_virtual_points_yesterday(left_points, decimal_places)
+        return [p for p in points if start_ms <= int(p.get("timestamp", 0)) <= end_ms]
+    if left_is_const and right_is_const:
+        return []
+    if left_is_const:
+        return _combine_numeric_points_with_constant(right_points, float(left_const), d.op, True, decimal_places)
+    if right_is_const:
+        return _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places)
+    return _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places)
+
+
+def _compute_virtual_points_incremental(
+    existing: VirtualPointsCacheEntry,
+    d: VirtualSeriesDef,
+    left_points: List[Dict[str, Any]],
+    right_points: List[Dict[str, Any]],
+    left_is_const: bool,
+    left_const: Optional[float],
+    right_is_const: bool,
+    right_const: Optional[float],
+    decimal_places: int,
+    start_ms: int,
+    end_ms: int,
+    bucket_ms: int,
+    align_window_ms: int,
+    left_sig: Tuple[Any, ...],
+    right_sig: Tuple[Any, ...],
+) -> Optional[List[Dict[str, Any]]]:
+    if not existing.points:
+        return None
+    left_prefix, left_old_count, _left_old_last = _signature_append_info(existing.left_sig)
+    left_new_prefix, left_new_count, _left_new_last = _signature_append_info(left_sig)
+    right_prefix, right_old_count, _right_old_last = _signature_append_info(existing.right_sig)
+    right_new_prefix, right_new_count, _right_new_last = _signature_append_info(right_sig)
+    if left_prefix != left_new_prefix or right_prefix != right_new_prefix:
+        return None
+    if left_new_count < left_old_count or right_new_count < right_old_count:
+        return None
+    if left_new_count == left_old_count and right_new_count == right_old_count:
+        return list(existing.points)
+
+    recompute_from_ts: Optional[int] = None
+    if d.op in {"today", "yesterday"}:
+        changed_idx = max(0, min(left_old_count, max(0, left_new_count - 1)))
+        if changed_idx >= len(left_points):
+            changed_idx = max(0, len(left_points) - 1)
+        if changed_idx < 0 or not left_points:
+            return None
+        recompute_from_ts = _local_day_start_ms_for_point(_point_timestamp_ms(left_points[changed_idx]))
+    else:
+        candidate_ts: List[int] = []
+        if not left_is_const and left_new_count > left_old_count and left_old_count < len(left_points):
+            candidate_ts.append(_point_timestamp_ms(left_points[left_old_count]))
+        if not right_is_const and right_new_count > right_old_count and right_old_count < len(right_points):
+            candidate_ts.append(_point_timestamp_ms(right_points[right_old_count]))
+        if not candidate_ts:
+            return list(existing.points)
+        recompute_from_ts = min(candidate_ts) - max(int(align_window_ms), int(bucket_ms), 0)
+        if recompute_from_ts < start_ms:
+            recompute_from_ts = start_ms
+
+    prefix = _prefix_points_before_timestamp(existing.points, recompute_from_ts)
+    left_tail = left_points if left_is_const else _slice_points_from_timestamp(left_points, recompute_from_ts)
+    right_tail = right_points if right_is_const else _slice_points_from_timestamp(right_points, recompute_from_ts)
+    suffix = _compute_virtual_points_full(
+        d,
+        left_tail,
+        right_tail,
+        left_is_const,
+        left_const,
+        right_is_const,
+        right_const,
         decimal_places,
-        sorted(set(left_files + right_files)),
+        start_ms,
+        end_ms,
+        align_window_ms,
     )
+    return prefix + suffix
+
+
+def _compute_one_virtual_series_points_cached(
+    data_dir: str,
+    d: VirtualSeriesDef,
+    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]],
+    start_ms: int,
+    end_ms: int,
+    bucket_ms: int,
+    align_window_ms: int,
+) -> Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
+    cache_key = (os.path.abspath(data_dir), d.name, int(start_ms), int(end_ms), int(bucket_ms))
+    definition = (d.name, d.left, d.op, d.right, int(align_window_ms), int(start_ms), int(end_ms), int(bucket_ms))
+    operand_start_ms = start_ms
+    operand_end_ms = end_ms
+    if d.op in {"today", "yesterday"}:
+        start_day = datetime.datetime.fromtimestamp(start_ms / 1000.0, tz=datetime.timezone.utc).date()
+        end_day = datetime.datetime.fromtimestamp(end_ms / 1000.0, tz=datetime.timezone.utc).date()
+        if d.op == "yesterday":
+            start_day = start_day - datetime.timedelta(days=1)
+        operand_start_ms = _day_start_ms(start_day)
+        operand_end_ms = _day_start_ms(end_day) + 86_400_000 - 1
+
+    left_is_const, left_const, left_points, left_dp, left_files, left_sig = _resolve_virtual_operand_points(
+        data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, bucket_ms
+    )
+    if d.op in {"today", "yesterday"}:
+        right_is_const, right_const, right_points, right_dp, right_files, right_sig = True, None, [], 0, [], (d.op,)
+    else:
+        right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
+            data_dir, d.right, prior_virtuals, start_ms, end_ms, bucket_ms
+        )
+    decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
+    with _VIRTUAL_SERIES_CACHE_LOCK:
+        existing = _VIRTUAL_POINTS_CACHE.get(cache_key)
+    if existing is not None and existing.definition == definition and existing.left_sig == left_sig and existing.right_sig == right_sig:
+        return list(existing.points), existing.decimal_places, list(existing.files), _virtual_points_result_signature(existing)
+
+    points: List[Dict[str, Any]]
+    if existing is not None and existing.definition == definition:
+        incremental = _compute_virtual_points_incremental(
+            existing,
+            d,
+            left_points,
+            right_points,
+            left_is_const,
+            left_const,
+            right_is_const,
+            right_const,
+            decimal_places,
+            start_ms,
+            end_ms,
+            bucket_ms,
+            align_window_ms,
+            left_sig,
+            right_sig,
+        )
+        if incremental is not None:
+            points = incremental
+        else:
+            points = _compute_virtual_points_full(
+                d, left_points, right_points, left_is_const, left_const, right_is_const, right_const,
+                decimal_places, start_ms, end_ms, align_window_ms
+            )
+    else:
+        points = _compute_virtual_points_full(
+            d, left_points, right_points, left_is_const, left_const, right_is_const, right_const,
+            decimal_places, start_ms, end_ms, align_window_ms
+        )
+
+    files = sorted(set(left_files + right_files))
+    entry = VirtualPointsCacheEntry(
+        definition=definition,
+        left_sig=left_sig,
+        right_sig=right_sig,
+        points=list(points),
+        decimal_places=decimal_places,
+        files=list(files),
+    )
+    with _VIRTUAL_SERIES_CACHE_LOCK:
+        _VIRTUAL_POINTS_CACHE[cache_key] = entry
+    return list(points), decimal_places, list(files), _virtual_points_result_signature(entry)
 
 
 def _compute_one_virtual_series_cached(
@@ -1652,9 +1899,9 @@ def get_virtual_series_points(
             break
     if target_idx is None:
         return None
-    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str]]] = {}
+    prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]] = {}
     for d in defs[:target_idx + 1]:
-        points, decimal_places, files = _compute_one_virtual_series_points(
+        points, decimal_places, files, sig = _compute_one_virtual_series_points_cached(
             data_dir,
             d,
             prior_virtuals,
@@ -1663,8 +1910,8 @@ def get_virtual_series_points(
             bucket_ms,
             align_window_ms,
         )
-        prior_virtuals[d.name] = (points, decimal_places, files)
-    points, decimal_places, files = prior_virtuals[series_name]
+        prior_virtuals[d.name] = (points, decimal_places, files, sig)
+    points, decimal_places, files, _sig = prior_virtuals[series_name]
     return list(points), int(decimal_places), list(files)
 
 
