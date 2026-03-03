@@ -611,10 +611,15 @@ def _get_or_build_downsampled_day_points(
         if ds_stat.st_mtime_ns >= original_stat.st_mtime_ns:
             _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, bucket_ms, series_name, start_ms, end_ms)
             return [os.path.basename(ds_path)], points
-
-    _build_all_downsampled_day_files(data_dir, day)
-    _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, bucket_ms, series_name, start_ms, end_ms)
-    return [os.path.basename(ds_path)], points
+    events = read_tsdb_events_for_series(original_path, series_name, start_ms, end_ms)
+    if not events:
+        return [os.path.basename(original_path)], []
+    fmt = get_series_format_id_in_file(original_path, series_name)
+    if is_numeric_format_id(fmt):
+        decimals = decimal_places_from_format_id(fmt)
+        points = _downsample_fixed_numeric_events(events, bucket_ms, start_ms, end_ms, decimal_places=decimals)
+        return [os.path.basename(original_path)], points
+    return [os.path.basename(original_path)], [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
 
 
 def downsample_numeric_events(

@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tsdb_collector import (
+    _downsample_file,
     TimeSeriesDbAppender,
     compress_timeseries_db_file,
     create_timeseries_db_writer,
@@ -170,6 +171,7 @@ def test_server_past_day_downsampling_builds_all_dsda_variants(tmp_path):
     writer.addValue("pv.power", 12.0, timestamp_ms=day_start_ms + 2000)
     writer.addValue("pv.power", 20.0, timestamp_ms=day_start_ms + 6000)
     writer.close(mark_complete=True)
+    _downsample_file(str(path))
 
     files, points = _get_or_build_downsampled_day_points(str(tmp_path), day, 5000, "pv.power", day_start_ms, day_start_ms + 10000)
     assert files == [f"dsda_{day.isoformat()}.5s.tsdb"]
@@ -193,6 +195,7 @@ def test_virtual_series_uses_bucketed_source_data(tmp_path):
     writer.addValue("b", 3.0, timestamp_ms=day_start_ms + 6200)
     writer.addValue("b", 4.0, timestamp_ms=day_start_ms + 8200)
     writer.close(mark_complete=True)
+    _downsample_file(str(path))
 
     save_virtual_series_config(str(tmp_path), [VirtualSeriesDef(name="sum", left="a", op="+", right="b")], [], 10000)
     result = get_virtual_series_points(str(tmp_path), "sum", day_start_ms, day_start_ms + 9999, 5000)
@@ -223,11 +226,13 @@ def test_virtual_yesterday_uses_bucketed_source_data(tmp_path):
     writer1.addValue("yieldtotal", 100.0, timestamp_ms=start1 + 1000)
     writer1.addValue("yieldtotal", 110.0, timestamp_ms=start1 + 3000)
     writer1.close(mark_complete=True)
+    _downsample_file(str(path1))
 
     writer2 = create_timeseries_db_writer(str(path2))
     writer2.addValue("yieldtotal", 125.0, timestamp_ms=start2 + 1000)
     writer2.addValue("yieldtotal", 135.0, timestamp_ms=start2 + 3000)
     writer2.close(mark_complete=True)
+    _downsample_file(str(path2))
 
     save_virtual_series_config(str(tmp_path), [VirtualSeriesDef(name="yday", left="yieldtotal", op="yesterday", right="")], [], 10000)
     result = get_virtual_series_points(str(tmp_path), "yday", start2, start2 + 4999, 5000)

@@ -14,6 +14,7 @@ from typing import Any, Optional
 import json
 import fnmatch
 import re
+import queue as queue_mod
 from urllib.parse import unquote, urlparse
 import urllib.request
 
@@ -103,10 +104,47 @@ def collect_to_tsdb(
             print("paho-mqtt v2 is required. Please upgrade paho-mqtt.")
             return 2
 
-    queue: list[tuple[int, str, Any]] = []
+    pending_events: list[tuple[int, str, Any]] = []
     lock = threading.Lock()
     appenders: dict[datetime.date, TimeSeriesDbAppender] = {}
     os.makedirs(data_dir, exist_ok=True)
+    downsample_queue: "queue_mod.Queue[Optional[tuple[datetime.date, str]]]" = queue_mod.Queue()
+    downsample_pending: set[datetime.date] = set()
+    downsample_lock = threading.Lock()
+
+    def schedule_downsample(day: datetime.date) -> None:
+        path = os.path.join(data_dir, _tsdb_filename_for_utc_day(day))
+        if not os.path.isfile(path):
+            return
+        with downsample_lock:
+            if day in downsample_pending:
+                return
+            downsample_pending.add(day)
+        downsample_queue.put((day, path))
+
+    def downsample_worker() -> None:
+        while True:
+            job = downsample_queue.get()
+            try:
+                if job is None:
+                    return
+                day, path = job
+                if verbose:
+                    print(f"downsample worker start: {path}")
+                try:
+                    _downsample_file(path)
+                    if verbose:
+                        print(f"downsample worker done: {path}")
+                except Exception as exc:
+                    print(f"downsample worker failed for {path!r}: {exc}")
+                finally:
+                    with downsample_lock:
+                        downsample_pending.discard(day)
+            finally:
+                downsample_queue.task_done()
+
+    worker = threading.Thread(target=downsample_worker, name="tsdb-downsample", daemon=True)
+    worker.start()
 
     if mqtt is not None:
         client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -133,7 +171,7 @@ def collect_to_tsdb(
             if verbose >= 2:
                 print(f"received: {msg.topic}={value_for_log}")
             with lock:
-                queue.append((ts_ms, msg.topic, value))
+                pending_events.append((ts_ms, msg.topic, value))
 
         client.on_connect = on_connect
         client.on_message = on_message
@@ -159,6 +197,11 @@ def collect_to_tsdb(
                     print(f"{action} TSDB file: {path}")
                 appenders[day] = TimeSeriesDbAppender(path)
             appenders[day].append_events(day_events)
+        if appenders:
+            newest_day = max(appenders.keys())
+            for day in list(appenders.keys()):
+                if day < newest_day:
+                    schedule_downsample(day)
         if verbose and batch:
             print(f"flushed {len(batch)} events")
 
@@ -209,15 +252,15 @@ def collect_to_tsdb(
                     ts_ms = _quantize_timestamp_ms(int(time.time() * 1000), quantize_timestamps_ms)
                     http_events = [(ts_ms, topic, value) for topic, value in http_pending_values]
                     with lock:
-                        queue.extend(http_events)
+                        pending_events.extend(http_events)
                 if verbose and http_urls:
                     print(f"http poll done urls={len(http_urls)} emitted={emitted}")
                 next_http_poll = now + (http_poll_interval_ms / 1000.0)
 
             if now - last_flush >= 10.0:
                 with lock:
-                    batch = list(queue)
-                    queue.clear()
+                    batch = list(pending_events)
+                    pending_events.clear()
                 flush_batch(batch)
                 last_flush = now
             time.sleep(0.2)
@@ -225,9 +268,18 @@ def collect_to_tsdb(
         pass
     finally:
         with lock:
-            batch = list(queue)
-            queue.clear()
+            batch = list(pending_events)
+            pending_events.clear()
         flush_batch(batch)
+        if appenders:
+            newest_day = max(appenders.keys())
+            for day in list(appenders.keys()):
+                if day < newest_day:
+                    schedule_downsample(day)
+        downsample_queue.join()
+        downsample_queue.put(None)
+        downsample_queue.join()
+        worker.join(timeout=1.0)
         if client is not None:
             client.loop_stop()
             client.disconnect()
@@ -348,11 +400,8 @@ def _downsample_output_path(input_path: str, day: datetime.date, label: str) -> 
     return os.path.join(os.path.dirname(input_path), f"dsda_{day.isoformat()}.{label}.tsdb")
 
 
-def _downsample_file(path: str) -> None:
-    source_path = os.path.abspath(path)
-    day, source_bucket_ms = _parse_downsample_input_path(source_path)
-    db = read_timeseries_db(source_path)
-    source_points_by_series = {
+def _numeric_series_points_from_db(db: Any) -> dict[str, list[tuple[int, Any]]]:
+    return {
         series_name: [
             (ts_ms, value)
             for ts_ms, value in db.get_series_values(series_name)
@@ -360,6 +409,35 @@ def _downsample_file(path: str) -> None:
         ]
         for series_name in db.list_series()
     }
+
+
+def _write_series_array_timeseries_db_atomic(
+    output_path: str,
+    day: datetime.date,
+    bucket_ms: int,
+    series_names: list[str],
+    series_decimals: dict[str, int],
+    points_by_series: dict[str, list[tuple[int, Any]]],
+    elem_size: int,
+) -> None:
+    tmp_path = f"{output_path}.tmp"
+    write_series_array_timeseries_db(
+        tmp_path,
+        day,
+        bucket_ms,
+        series_names,
+        series_decimals,
+        points_by_series,
+        elem_size,
+    )
+    os.replace(tmp_path, output_path)
+
+
+def _downsample_file(path: str) -> None:
+    source_path = os.path.abspath(path)
+    day, source_bucket_ms = _parse_downsample_input_path(source_path)
+    db = read_timeseries_db(source_path)
+    source_points_by_series = _numeric_series_points_from_db(db)
     series_names = [series_name for series_name in db.list_series() if source_points_by_series.get(series_name)]
     series_decimals = {
         series_name: min(3, decimal_places_from_format_id(db.get_series_format_id(series_name)))
@@ -372,6 +450,10 @@ def _downsample_file(path: str) -> None:
     current_points_by_series = source_points_by_series
     for bucket_ms, label, elem_size in next_levels:
         output_path = _downsample_output_path(source_path, day, label)
+        if os.path.exists(output_path):
+            print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) already exists, skipping")
+            current_points_by_series = _numeric_series_points_from_db(read_timeseries_db(output_path))
+            continue
         print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label})")
         next_points_by_series: dict[str, list[tuple[int, Any]]] = {}
         for idx, series_name in enumerate(series_names, start=1):
@@ -383,7 +465,7 @@ def _downsample_file(path: str) -> None:
                 elem_size,
                 series_decimals.get(series_name, 0),
             )
-        write_series_array_timeseries_db(
+        _write_series_array_timeseries_db_atomic(
             output_path,
             day,
             bucket_ms,
