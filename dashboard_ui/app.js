@@ -1468,11 +1468,11 @@
     const statsQ = new URLSearchParams({
       start: String(start),
       end: String(end),
-      minPoints: '10',
+      minPoints: '600',
     });
     for (const s of uniqueSiblingNames) statsQ.append('series', s);
     const statsReqT0 = performance.now();
-    appendConsoleLine(`stat ${id} request start batch series=${uniqueSiblingNames.length} minPoints=10`);
+    appendConsoleLine(`stat ${id} request start batch series=${uniqueSiblingNames.length} minPoints=600`);
     const statsResp = await apiJson(`/stats?${statsQ}`);
     const statsItems = Array.isArray(statsResp && statsResp.stats)
       ? statsResp.stats
@@ -1517,7 +1517,7 @@
     if (showMinPointsDebug) {
       const bucketLabels = Array.from(bucketSet).sort((a, b) => a - b).map((ms) => bucketLabelShort(ms));
       const granularityLabel = bucketLabels.length === 0 ? 'raw' : (bucketLabels.length === 1 ? bucketLabels[0] : bucketLabels.join('/'));
-      statMetaParts.push(`min 10`, `${firstSeriesCount} pts`, granularityLabel);
+      statMetaParts.push(`min 600`, `${firstSeriesCount} pts`, granularityLabel);
     }
     if (showRefreshDurationDebug) statMetaParts.push(`${Math.round(performance.now() - statsReqT0)} ms`);
     setPanelTitleMeta(id, statMetaParts.join(', '));
