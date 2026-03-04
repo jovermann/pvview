@@ -424,6 +424,20 @@
     }
   }
 
+  function alignRangeEndToNow() {
+    const end = alignedNowMs(5000);
+    if (activePreset) {
+      setRangeByPreset(activePreset);
+      return;
+    }
+    const current = getRange();
+    const span = (Number.isFinite(current.start) && Number.isFinite(current.end) && current.end > current.start)
+      ? (current.end - current.start)
+      : (24 * 3600 * 1000);
+    startInput.value = toDatetimeLocalValue(end - span);
+    endInput.value = toDatetimeLocalValue(end);
+  }
+
   function shiftRangeWindow(direction) {
     const { start, end } = getRange();
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
@@ -2699,9 +2713,7 @@
     }
 
     if (target.id === 'refreshAll') {
-      if (activePreset) {
-        setRangeByPreset(activePreset);
-      }
+      alignRangeEndToNow();
       refreshAllCharts('manual-refresh').catch((err) => console.error(err));
       return;
     }
