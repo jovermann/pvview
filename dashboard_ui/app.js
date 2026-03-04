@@ -1293,8 +1293,14 @@
         return;
       }
       const dayMs = 24 * 60 * 60 * 1000;
-      const cellSize = Math.max(8, Math.floor(Math.max(180, cfg.hostEl.clientHeight - 48) / 24));
-      const dayColumns = Math.max(1, Math.floor(Math.max(120, cfg.hostEl.clientWidth - 76) / cellSize));
+      const gridLeft = 50;
+      const gridRight = 50;
+      const gridTop = 8;
+      const gridBottom = 24;
+      const plotHeight = Math.max(24, cfg.hostEl.clientHeight - gridTop - gridBottom);
+      const plotWidth = Math.max(24, cfg.hostEl.clientWidth - gridLeft - gridRight);
+      const targetCellSize = plotHeight / 24;
+      const dayColumns = Math.max(1, Math.round(plotWidth / targetCellSize));
       const rightDay = new Date(end);
       rightDay.setHours(0, 0, 0, 0);
       const visibleStart = rightDay.getTime() - (dayColumns - 1) * dayMs;
@@ -1372,10 +1378,10 @@
           },
         },
         grid: {
-          left: 50,
-          right: 50,
-          top: 8,
-          bottom: 24,
+          left: gridLeft,
+          right: gridRight,
+          top: gridTop,
+          bottom: gridBottom,
         },
         xAxis: {
           type: 'category',
