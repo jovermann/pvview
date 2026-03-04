@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 17;
+  const FRONTEND_API_VERSION = 18;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
@@ -540,12 +540,7 @@
   }
 
   function axisGroupKeyForSuffix(suffix) {
-    const raw = String(suffix || '');
-    const lower = raw.toLowerCase();
-    if (lower === 'power' || lower === 'p1' || lower === 'p2' || lower === 'p3') {
-      return 'power';
-    }
-    return raw;
+    return String(suffix || '');
   }
 
   function isYieldSuffix(suffix) {
@@ -611,6 +606,7 @@
       scaleOp: (r && String(r.scaleOp || '*') === '/') ? '/' : '*',
       decimals: r ? normalizeDecimalPlaces(r.decimals) : normalizeDecimalPlaces(defaultDecimals),
       maxMode: (r && (r.maxMode === 'max' || r.maxMode === 'nomax')) ? r.maxMode : 'max',
+      axisKey: (r && typeof r.axisKey === 'string' && r.axisKey.trim()) ? r.axisKey.trim() : '',
     };
   }
 
@@ -778,6 +774,7 @@
         maxMode: (String(d.maxMode || 'max') === 'max' || String(d.maxMode || 'max') === 'nomax')
           ? String(d.maxMode || 'max')
           : 'max',
+        axisKey: String(d.axisKey || '').trim(),
       }))
       .filter((d) => d.suffix.length > 0 && d.decimals >= 0 && d.decimals <= 6 && d.scale > 0);
     appendConsoleLine(`virtual series load done count=${virtualSeriesDefs.length} unitOverrides=${unitOverrideDefs.length} alignWindowMs=${virtualAlignWindowMs}`);
@@ -844,6 +841,7 @@
         <select data-field="maxMode">
           ${['max', 'nomax'].map((m) => `<option value="${m}" ${String(d.maxMode || 'max') === m ? 'selected' : ''}>${m}</option>`).join('')}
         </select>
+        <input type="text" data-field="axisKey" placeholder="axis key" value="${htmlEscape(d.axisKey || '')}" />
         <button type="button" class="icon-btn" data-action="unit-override-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button type="button" class="icon-btn" data-action="unit-override-down" data-index="${i}" ${i === unitOverrideDialogDraft.length - 1 ? 'disabled' : ''}>↓</button>
         <button type="button" class="icon-btn danger" data-action="delete-unit-override-row" data-index="${i}">🗑️</button>
@@ -852,7 +850,7 @@
   }
 
   function addUnitOverrideDraftRow() {
-    unitOverrideDialogDraft.push({ suffix: '', unit: '', scale: 1, scaleOp: '*', decimals: 3, maxMode: 'max' });
+    unitOverrideDialogDraft.push({ suffix: '', unit: '', scale: 1, scaleOp: '*', decimals: 3, maxMode: 'max', axisKey: '' });
     renderUnitOverrideRows();
   }
 
@@ -1211,10 +1209,10 @@
       return {
         name,
         displayName: compactSeriesLabel(displaySeriesName(name), prefix),
-        axisKey: axisGroupKeyForSuffix(String(name).split('/').pop() || String(name)),
         points: breakLongGaps(points, 3960000),
         legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
         displayRule,
+        axisKey: (displayRule && displayRule.axisKey) || axisGroupKeyForSuffix(String(name).split('/').pop() || String(name)),
         latestTimestampMs: Number.isFinite(latestTimestampMs) ? latestTimestampMs : undefined,
         downsampled: !!data.downsampled,
         returnedPoints: Number.isFinite(Number(data.returnedPoints)) ? Number(data.returnedPoints) : points.length,
@@ -2719,6 +2717,7 @@
         maxMode: (String(d.maxMode || 'max') === 'max' || String(d.maxMode || 'max') === 'nomax')
           ? String(d.maxMode || 'max')
           : 'max',
+        axisKey: String(d.axisKey || '').trim(),
       }))
       .filter((d) => d.suffix);
     const seenSuffixes = new Set();

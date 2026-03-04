@@ -54,7 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 17  # Increment when API endpoints or payload schemas change.
+API_VERSION = 18  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 DEFAULT_MIN_POINTS = 10
 
@@ -1098,6 +1098,7 @@ def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
         return None
     suffix = str(obj.get("suffix", "")).strip().strip("/")
     unit = str(obj.get("unit", "")).strip()
+    axis_key = str(obj.get("axisKey", "")).strip()
     scale_op = str(obj.get("scaleOp", obj.get("op", "*"))).strip()
     max_mode = str(obj.get("maxMode", "")).strip().lower()
     try:
@@ -1116,6 +1117,7 @@ def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
         "scaleOp": scale_op,
         "decimals": decimals,
         "maxMode": "max" if max_mode in {"", "auto"} else max_mode,
+        "axisKey": axis_key,
     }
 
 
@@ -1198,6 +1200,7 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit
                 "scaleOp": str(d.get("scaleOp", "*")),
                 "decimals": int(d["decimals"]),
                 "maxMode": str(d.get("maxMode", "max")),
+                "axisKey": str(d.get("axisKey", "")),
             }
             for d in unit_overrides
         ],
@@ -2481,7 +2484,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         for item in overrides_raw:
             d = _normalize_unit_override_def(item)
             if d is None:
-                raise ValueError("Each unit override must include suffix, unit, scale, scaleOp, decimals")
+                raise ValueError("Each unit override must include suffix, unit, scale, scaleOp, decimals, maxMode, and optional axisKey")
             key = str(d["suffix"]).lower()
             if key in seen_suffixes:
                 raise ValueError(f"Duplicate unit override suffix: {d['suffix']}")

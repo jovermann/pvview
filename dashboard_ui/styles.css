@@ -395,6 +395,7 @@ main { padding: 2px; }
 }
 
 #virtualSeriesDialog {
+  width: min(842px, 77vw);
   margin: 56px auto auto auto;
 }
 
@@ -454,10 +455,20 @@ main { padding: 2px; }
 
 .unit-override-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px 72px auto auto auto;
+  grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px 72px minmax(140px, 0.9fr) auto auto auto;
   gap: 4px;
   align-items: center;
   padding: 2px 1px;
+}
+
+.unit-override-head {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px 72px minmax(140px, 0.9fr) auto auto auto;
+  gap: 4px;
+  align-items: center;
+  padding: 0 9px 2px 9px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .unit-override-row input,
