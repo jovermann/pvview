@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 18;
+  const FRONTEND_API_VERSION = 20;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const NEW_EMPTY_DASHBOARD_VALUE = '__new_empty_dashboard__';
   const grid = GridStack.init({
@@ -1838,47 +1838,13 @@
       ? statsResp.stats
       : ((statsResp && typeof statsResp.series === 'string') ? [statsResp] : []);
     const statsBySeries = new Map(statsItems.filter((x) => x && typeof x === 'object' && typeof x.series === 'string').map((x) => [x.series, x]));
-    const downsampledCount = statsItems.filter((x) => x && x.downsampled).length;
-    const bucketSet = new Set(
-      statsItems
-        .map((x) => (x && Number.isFinite(Number(x.bucketMs)) && Number(x.bucketMs) > 0) ? Number(x.bucketMs) : null)
-        .filter((x) => x !== null)
-    );
-    const bucketSummary = bucketSet.size ? ` buckets=${Array.from(bucketSet).sort((a, b) => a - b).join(',')}` : '';
+    const requestedValues = Number(statsResp && statsResp.requestedValues) || (uniqueSiblingNames.length * 2);
+    const cachedValues = Number(statsResp && statsResp.cachedValues) || 0;
     appendConsoleLine(
       `stat ${id} request done batch series=${uniqueSiblingNames.length} returned=${statsItems.length} `
-      + `elapsed=${Math.round(performance.now() - statsReqT0)}ms downsampled=${downsampledCount}/${statsItems.length}${bucketSummary}`
+      + `elapsed=${Math.round(performance.now() - statsReqT0)}ms cache=${cachedValues}/${requestedValues}`
     );
-    for (const item of statsItems) {
-      if (!item || typeof item !== 'object' || typeof item.series !== 'string') continue;
-      const debug = (item.debug && typeof item.debug === 'object') ? item.debug : {};
-      const sourceCache = (typeof debug.sourceCache === 'string' && debug.sourceCache) ? debug.sourceCache : 'n/a';
-      const elapsedMs = Number.isFinite(Number(debug.elapsedMs)) ? Number(debug.elapsedMs) : null;
-      appendConsoleLine(
-        `stat ${id} series=${item.series} virtual=${debug.virtual ? 'yes' : 'no'} `
-        + `downsampled=${item.downsampled ? 'yes' : 'no'} bucket=${Number(item.bucketMs) > 0 ? Number(item.bucketMs) : 0} `
-        + `points=${Number.isFinite(Number(item.count)) ? Number(item.count) : 0} `
-        + `sourceCache=${sourceCache}${elapsedMs !== null ? ` elapsed=${elapsedMs}ms` : ''}`
-      );
-      const reads = Array.isArray(debug.seriesReads) ? debug.seriesReads : [];
-      for (const read of reads) {
-        if (!read || typeof read !== 'object' || typeof read.series !== 'string') continue;
-        appendConsoleLine(
-          `stat ${id} read series=${read.series} cache=${read.cacheHit ? 'hit' : 'miss'} `
-          + `files=${Number.isFinite(Number(read.files)) ? Number(read.files) : 0} `
-          + `points=${Number.isFinite(Number(read.points)) ? Number(read.points) : 0} `
-          + `prefixReuse=${Number.isFinite(Number(read.prefixFiles)) ? Number(read.prefixFiles) : 0} `
-          + `elapsed=${Number.isFinite(Number(read.elapsedMs)) ? Number(read.elapsedMs) : 0}ms`
-        );
-      }
-    }
-    const firstSeriesCount = statsItems.length ? Number(statsItems[0] && statsItems[0].count) || 0 : 0;
     const statMetaParts = [];
-    if (showMinPointsDebug) {
-      const bucketLabels = Array.from(bucketSet).sort((a, b) => a - b).map((ms) => bucketLabelShort(ms));
-      const granularityLabel = bucketLabels.length === 0 ? 'raw' : (bucketLabels.length === 1 ? bucketLabels[0] : bucketLabels.join('/'));
-      statMetaParts.push(`min 600`, `${firstSeriesCount} pts`, granularityLabel);
-    }
     if (showRefreshDurationDebug) statMetaParts.push(`${Math.round(performance.now() - statsReqT0)} ms`);
     setPanelTitleMeta(id, statMetaParts.join(', '));
 
@@ -1888,8 +1854,6 @@
         const siblingName = `${parts.parent}${suffix}`;
         const data = statsBySeries.get(siblingName) || {
           series: siblingName,
-          count: 0,
-          files: [],
           currentValue: null,
           maxValue: null,
           decimalPlaces: undefined,

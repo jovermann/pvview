@@ -54,7 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 18  # Increment when API endpoints or payload schemas change.
+API_VERSION = 20  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 DEFAULT_MIN_POINTS = 10
 
@@ -109,6 +109,15 @@ class SeriesAllFilesCacheEntry:
     files: List[str]
 
 
+@dataclass
+class SeriesStatSummaryCacheEntry:
+    start_ms: int
+    end_ms: int
+    current_value: float
+    max_value: float
+    decimal_places: int
+
+
 _VIRTUAL_SERIES_CACHE_LOCK = threading.Lock()
 _VIRTUAL_SERIES_RESULT_CACHE: Dict[Tuple[str, str], VirtualSeriesCacheEntry] = {}
 _VIRTUAL_POINTS_CACHE: Dict[Tuple[str, str, int, int, int], VirtualPointsCacheEntry] = {}
@@ -116,6 +125,9 @@ _VIRTUAL_POINTS_CACHE: Dict[Tuple[str, str, int, int, int], VirtualPointsCacheEn
 _SERIES_ALL_FILES_CACHE_LOCK = threading.Lock()
 _SERIES_ALL_FILES_CACHE: Dict[Tuple[str, str], SeriesAllFilesCacheEntry] = {}
 _REQUEST_TRACE = threading.local()
+
+_SERIES_STATS_CACHE_LOCK = threading.Lock()
+_SERIES_STATS_CACHE: Dict[Tuple[str, str], SeriesStatSummaryCacheEntry] = {}
 
 _DOWNSAMPLE_BUCKETS: List[Tuple[int, str]] = [
     (5_000, "5s"),
@@ -1212,6 +1224,8 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit
     with _VIRTUAL_SERIES_CACHE_LOCK:
         _VIRTUAL_SERIES_RESULT_CACHE.clear()
         _VIRTUAL_POINTS_CACHE.clear()
+    with _SERIES_STATS_CACHE_LOCK:
+        _SERIES_STATS_CACHE.clear()
 
 
 def save_virtual_series_defs(data_dir: str, defs: List[VirtualSeriesDef]) -> None:
@@ -1513,6 +1527,81 @@ def _local_day_start_ms_for_point(timestamp_ms: int) -> int:
     dt = datetime.datetime.fromtimestamp(int(timestamp_ms) / 1000.0).astimezone()
     local_midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
     return int(local_midnight.timestamp() * 1000)
+
+
+def _numeric_stat_summary_from_points(
+    points: List[Dict[str, Any]],
+    downsampled: bool,
+) -> Optional[Tuple[float, float]]:
+    current_value: Optional[float] = None
+    max_value: Optional[float] = None
+    numeric_points = 0
+    total_points = 0
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        total_points += 1
+        if downsampled:
+            ts_raw = point.get("timestamp")
+            value_raw = point.get("avg") if "avg" in point else point.get("value")
+            max_raw = point.get("max") if "max" in point else point.get("value")
+        else:
+            value_raw = point.get("value")
+            max_raw = value_raw
+        if isinstance(value_raw, (int, float)) and not isinstance(value_raw, bool):
+            current_value = float(value_raw)
+        if isinstance(max_raw, (int, float)) and not isinstance(max_raw, bool):
+            numeric_points += 1
+            v = float(max_raw)
+            if max_value is None or v > max_value:
+                max_value = v
+    if total_points <= 0 or numeric_points != total_points or current_value is None or max_value is None:
+        return None
+    return (current_value, max_value)
+
+
+def _update_series_stat_cache_from_event_response(
+    data_dir: str,
+    series: str,
+    start_ms: int,
+    end_ms: int,
+    event_response: Dict[str, Any],
+) -> None:
+    summary = _numeric_stat_summary_from_points(
+        list(event_response.get("points") or []),
+        bool(event_response.get("downsampled")),
+    )
+    key = (os.path.abspath(data_dir), str(series))
+    if summary is None:
+        with _SERIES_STATS_CACHE_LOCK:
+            if key in _SERIES_STATS_CACHE:
+                del _SERIES_STATS_CACHE[key]
+        return
+    current_value, max_value = summary
+    with _SERIES_STATS_CACHE_LOCK:
+        _SERIES_STATS_CACHE[key] = SeriesStatSummaryCacheEntry(
+            start_ms=int(start_ms),
+            end_ms=int(end_ms),
+            current_value=float(current_value),
+            max_value=float(max_value),
+            decimal_places=int(event_response.get("decimalPlaces") or 3),
+        )
+
+
+def _get_series_stat_cache(
+    data_dir: str,
+    series: str,
+    start_ms: int,
+    end_ms: int,
+) -> Optional[SeriesStatSummaryCacheEntry]:
+    key = (os.path.abspath(data_dir), str(series))
+    with _SERIES_STATS_CACHE_LOCK:
+        entry = _SERIES_STATS_CACHE.get(key)
+    if entry is None:
+        return None
+    if entry.start_ms != int(start_ms) or entry.end_ms != int(end_ms):
+        return None
+    return entry
 
 
 def _resolve_virtual_operand(
@@ -2205,6 +2294,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 if max_decimal_places is not None:
                     response["decimalPlaces"] = max_decimal_places
                 response["bucketMs"] = bucket_ms
+                _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
                 return response
             all_events, max_decimal_places, virtual_files = virtual
             events = [e for e in all_events if start_ms <= e.timestamp_ms <= end_ms]
@@ -2290,6 +2380,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             response["bucketMs"] = bucket_ms
         if not all_numeric and bucket_ms > 0 and virtual is not None:
             response["note"] = "Series is non-numeric; returned raw values without min/avg/max aggregation."
+        _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
         return response
 
     def _handle_stats(self, params: Dict[str, List[str]]) -> None:
@@ -2309,12 +2400,14 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("end must be >= start")
         if min_points <= 0:
             raise ValueError("minPoints must be > 0")
-        virtual_names = _virtual_series_name_set(data_dir)
-        virtual_defs = _virtual_series_def_map(data_dir)
-        if len(series_values) == 1:
-            self._send_json(200, self._stats_for_series(data_dir, series_values[0], start_ms, end_ms, min_points, virtual_names, virtual_defs))
-            return
-        stats_list = [self._stats_for_series(data_dir, s, start_ms, end_ms, min_points, virtual_names, virtual_defs) for s in series_values]
+        stats_list: List[Dict[str, Any]] = []
+        cache_hits = 0
+        for series in series_values:
+            item, from_cache = self._stats_for_series(data_dir, series, start_ms, end_ms, min_points)
+            if item is not None:
+                stats_list.append(item)
+            if from_cache:
+                cache_hits += 1
         self._send_json(
             200,
             {
@@ -2322,6 +2415,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 "end": end_ms,
                 "requestedMinPoints": min_points,
                 "requestedSeries": series_values,
+                "requestedValues": len(series_values) * 2,
+                "cachedValues": cache_hits * 2,
                 "stats": stats_list,
             },
         )
@@ -2333,95 +2428,35 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         start_ms: int,
         end_ms: int,
         min_points: int,
-        virtual_names: Optional[set[str]] = None,
-        virtual_defs: Optional[Dict[str, VirtualSeriesDef]] = None,
-    ) -> Dict[str, Any]:
-        t0 = time.perf_counter()
-        _REQUEST_TRACE.series_reads = []
-        is_virtual = series in (virtual_names if virtual_names is not None else _virtual_series_name_set(data_dir))
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
+        cached = _get_series_stat_cache(data_dir, series, start_ms, end_ms)
+        if cached is not None:
+            return (
+                {
+                    "series": series,
+                    "currentValue": cached.current_value,
+                    "maxValue": cached.max_value,
+                    "decimalPlaces": cached.decimal_places,
+                },
+                True,
+            )
         event_data = self._events_for_series(data_dir, series, start_ms, end_ms, min_points)
-        points = list(event_data.get("points") or [])
-        downsampled = bool(event_data.get("downsampled"))
-        current_ts: Optional[int] = None
-        current_value: Any = None
-        max_value: Optional[float] = None
-        numeric_count = 0
-
-        if downsampled:
-            for point in points:
-                if not isinstance(point, dict):
-                    continue
-                current_ts = point.get("timestamp")
-                if "avg" in point:
-                    current_value = point.get("avg")
-                else:
-                    current_value = point.get("value")
-                if "max" in point and isinstance(point.get("max"), (int, float)) and not isinstance(point.get("max"), bool):
-                    numeric_count += 1
-                    v = float(point["max"])
-                    if max_value is None or v > max_value:
-                        max_value = v
-                elif isinstance(point.get("value"), (int, float)) and not isinstance(point.get("value"), bool):
-                    numeric_count += 1
-                    v = float(point["value"])
-                    if max_value is None or v > max_value:
-                        max_value = v
-        else:
-            for point in points:
-                if not isinstance(point, dict):
-                    continue
-                current_ts = point.get("timestamp")
-                current_value = point.get("value")
-                if isinstance(current_value, (int, float)) and not isinstance(current_value, bool):
-                    numeric_count += 1
-                    v = float(current_value)
-                    if max_value is None or v > max_value:
-                        max_value = v
-
-        count = len(points)
-        response = {
-            "series": series,
-            "start": start_ms,
-            "end": end_ms,
-            "count": count,
-            "numericCount": numeric_count,
-            "isNumeric": numeric_count == count and count > 0,
-            "currentTimestamp": current_ts,
-            "currentValue": current_value,
-            "maxValue": max_value,
-            "decimalPlaces": event_data.get("decimalPlaces"),
-            "files": list(event_data.get("files") or []),
-            "downsampled": downsampled,
-            "bucketMs": event_data.get("bucketMs"),
-        }
-        trace_reads = getattr(_REQUEST_TRACE, "series_reads", [])
-        cache_hits = 0
-        cache_misses = 0
-        if isinstance(trace_reads, list):
-            for item in trace_reads:
-                if item.get("cacheHit"):
-                    cache_hits += 1
-                else:
-                    cache_misses += 1
-        source_cache = "n/a"
-        if trace_reads:
-            source_cache = "hit" if cache_misses == 0 else ("miss" if cache_hits == 0 else f"mixed({cache_hits}/{cache_misses})")
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        virtual_op = None
-        if is_virtual:
-            defs_map = virtual_defs if virtual_defs is not None else _virtual_series_def_map(data_dir)
-            definition = defs_map.get(series)
-            if definition is not None:
-                virtual_op = definition.op
-        response["debug"] = {
-            "virtual": is_virtual,
-            "operator": virtual_op,
-            "sourceCache": source_cache,
-            "elapsedMs": elapsed_ms,
-            "seriesReads": trace_reads if isinstance(trace_reads, list) else [],
-        }
-        _REQUEST_TRACE.series_reads = []
-        return response
+        summary = _numeric_stat_summary_from_points(
+            list(event_data.get("points") or []),
+            bool(event_data.get("downsampled")),
+        )
+        if summary is None:
+            return None, False
+        current_value, max_value = summary
+        return (
+            {
+                "series": series,
+                "currentValue": current_value,
+                "maxValue": max_value,
+                "decimalPlaces": int(event_data.get("decimalPlaces") or 3),
+            },
+            False,
+        )
 
     def _handle_virtual_series_get(self) -> None:
         data_dir = self.server.data_dir  # type: ignore[attr-defined]
