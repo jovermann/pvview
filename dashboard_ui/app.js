@@ -101,7 +101,7 @@
     { id: 'hotmetal', label: 'Hot Metal', colors: ['#120a0a', '#4f120e', '#8f2411', '#d14f11', '#ff9d19', '#ffe28c', '#fff7e2', '#ffffff'] },
     { id: 'inferno', label: 'Inferno', colors: ['#000004', '#320a5e', '#781c6d', '#bc3754', '#ed6925', '#fbb41a', '#fcffa4', '#ffffff'] },
     { id: 'magma', label: 'Magma', colors: ['#000004', '#221150', '#5f187f', '#982d80', '#d3436e', '#f8765c', '#fcfdbf', '#ffffff'] },
-    { id: 'plasma', label: 'Plasma', colors: ['#0d0887', '#5c01a6', '#9c179e', '#cc4778', '#ed7953', '#fdb42f', '#f0f921', '#ffffff'] },
+    { id: 'plasma', label: 'Plasma', colors: ['#000000', '#0d0887', '#5c01a6', '#9c179e', '#cc4778', '#ed7953', '#fdb42f', '#f0f921', '#ffffff'] },
     { id: 'viridis', label: 'Viridis', colors: ['#440154', '#414487', '#2a788e', '#22a884', '#7ad151', '#bddf26', '#fde725', '#ffffff'] },
     { id: 'cividis', label: 'Cividis', colors: ['#00224e', '#274d7e', '#4f6d8a', '#768b6d', '#a59c55', '#d2b746', '#fee838', '#ffffff'] },
     { id: 'greys', label: 'Greys', colors: ['#111111', '#2d2d2d', '#525252', '#737373', '#969696', '#bdbdbd', '#f0f0f0', '#ffffff'] },
@@ -1135,10 +1135,12 @@
           <select class="heatmap-series-select" id="heatmap-palette-${id}" data-action="heatmap-palette" data-id="${id}" title="Palette">
             ${heatmapPalettes.map((p) => `<option value="${p.id}">${htmlEscape(p.label)}</option>`).join('')}
           </select>
-          <label class="panel-check" title="Use logarithmic color scale">
-            <input type="checkbox" id="heatmap-log-${id}" data-action="heatmap-log" data-id="${id}" />
-            <span>Log</span>
-          </label>
+          <select class="heatmap-series-select" id="heatmap-scale-${id}" data-action="heatmap-scale" data-id="${id}" title="Value scale">
+            <option value="normal">Normal</option>
+            <option value="sqrt">Sqr</option>
+            <option value="cbrt">Cube</option>
+            <option value="log">Log</option>
+          </select>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="icon-btn danger" data-action="remove-heatmap" data-id="${id}" title="Remove window">🗑️</button>
         </div>
@@ -1221,6 +1223,26 @@
     return palette ? palette.colors : heatmapPalettes[0].colors;
   }
 
+  function normalizeHeatmapScale(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    if (mode === 'sqrt' || mode === 'cbrt' || mode === 'log') return mode;
+    return 'normal';
+  }
+
+  function transformHeatmapValue(value, scaleMode) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    switch (normalizeHeatmapScale(scaleMode)) {
+      case 'sqrt':
+        return value >= 0 ? Math.sqrt(value) : null;
+      case 'cbrt':
+        return Math.cbrt(value);
+      case 'log':
+        return value > 0 ? Math.log10(value) : null;
+      default:
+        return value;
+    }
+  }
+
   async function refreshHeatmap(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'heatmap' || !cfg.instance || !(cfg.hostEl instanceof HTMLElement)) return;
@@ -1265,6 +1287,8 @@
       const values = new Map();
       let minValue = null;
       let maxValue = null;
+      let minColorValue = null;
+      let maxColorValue = null;
       for (const p of points) {
         if (!p || typeof p !== 'object') continue;
         const bucketStart = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
@@ -1277,9 +1301,17 @@
         const x = Math.floor((dayStart.getTime() - visibleStart) / dayMs);
         const y = d.getHours();
         if (x < 0 || x >= dayColumns || y < 0 || y > 23) continue;
-        values.set(`${x}:${y}`, roundNumeric(value));
+        const colorValue = transformHeatmapValue(value, cfg.heatmapScale);
+        values.set(`${x}:${y}`, {
+          realValue: roundNumeric(value),
+          colorValue: (typeof colorValue === 'number' && Number.isFinite(colorValue)) ? roundNumeric(colorValue) : null,
+        });
         if (minValue === null || value < minValue) minValue = value;
         if (maxValue === null || value > maxValue) maxValue = value;
+        if (typeof colorValue === 'number' && Number.isFinite(colorValue)) {
+          if (minColorValue === null || colorValue < minColorValue) minColorValue = colorValue;
+          if (maxColorValue === null || colorValue > maxColorValue) maxColorValue = colorValue;
+        }
       }
 
       const xLabels = [];
@@ -1289,11 +1321,14 @@
       }
       const yLabels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
       const heatData = [];
-      values.forEach((value, key) => {
+      values.forEach((entry, key) => {
         const [x, y] = key.split(':').map((n) => Number(n));
-        heatData.push([x, y, value]);
+        if (!entry || typeof entry !== 'object') return;
+        heatData.push([x, y, entry.colorValue, entry.realValue]);
       });
       const displayRule = effectiveDisplayRuleForSeries(cfg.activeSeries, unitForSeriesName(cfg.activeSeries), resp.decimalPlaces);
+      const visualMin = minColorValue === null ? 0 : minColorValue;
+      const visualMax = maxColorValue === null ? 1 : maxColorValue;
 
       setPanelTitleMeta(id, showRefreshDurationDebug ? `${reqMs} ms` : '');
       cfg.instance.setOption({
@@ -1304,7 +1339,7 @@
           formatter: (params) => {
             const x = Number(params.value[0]);
             const y = Number(params.value[1]);
-            return `${htmlEscape(displaySeriesName(cfg.activeSeries))}<br/>${xLabels[x] || ''} ${yLabels[y] || ''}<br/>${formatValueWithUnit(params.value[2], displayRule.unit, displayRule.decimals)}`;
+            return `${htmlEscape(displaySeriesName(cfg.activeSeries))}<br/>${xLabels[x] || ''} ${yLabels[y] || ''}<br/>${formatValueWithUnit(params.value[3], displayRule.unit, displayRule.decimals)}`;
           },
         },
         grid: {
@@ -1328,8 +1363,9 @@
           axisLabel: { color: '#aebbc9' },
         },
         visualMap: {
-          min: minValue === null ? 0 : minValue,
-          max: maxValue === null ? 1 : maxValue,
+          min: visualMin,
+          max: visualMax,
+          dimension: 2,
           orient: 'vertical',
           right: 4,
           top: 'middle',
@@ -1949,6 +1985,9 @@
         ? options.activeSeries
         : (initialSeries[0] || ''),
       heatmapPalette: normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'hotmetal'),
+      heatmapScale: normalizeHeatmapScale(
+        options.heatmapScale || (options.logScale ? 'log' : 'normal')
+      ),
       label: options.label || null,
       busyCount: 0,
       titleMeta: '',
@@ -1957,6 +1996,12 @@
     const paletteSelect = document.getElementById(`heatmap-palette-${id}`);
     if (paletteSelect instanceof HTMLSelectElement) {
       paletteSelect.value = normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'hotmetal');
+    }
+    const scaleSelect = document.getElementById(`heatmap-scale-${id}`);
+    if (scaleSelect instanceof HTMLSelectElement) {
+      scaleSelect.value = normalizeHeatmapScale(
+        options.heatmapScale || (options.logScale ? 'log' : 'normal')
+      );
     }
     appendConsoleLine(`heatmap ${id} created series=${initialSeries.length}`);
     updateTitle(id);
@@ -2078,6 +2123,7 @@
           series: Array.isArray(c.series) ? [...c.series] : [],
           activeSeries: typeof c.activeSeries === 'string' ? c.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'hotmetal'),
+          heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
           label: c.label || null,
         });
         continue;
@@ -2149,6 +2195,7 @@
           h: Number(ch.h) || 4,
           activeSeries: typeof ch.activeSeries === 'string' ? ch.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'hotmetal'),
+          heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -2684,6 +2731,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'heatmap') return;
       panel.heatmapPalette = normalizeHeatmapPalette(target.value || 'hotmetal');
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'heatmap-scale') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.heatmapScale = normalizeHeatmapScale(target.value || 'normal');
       refreshHeatmap(id).catch((err) => console.error(err));
       return;
     }
