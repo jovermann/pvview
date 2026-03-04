@@ -1170,6 +1170,13 @@
             <option value="cbrt">Cube</option>
             <option value="log">Log</option>
           </select>
+          <select class="heatmap-series-select" id="heatmap-cells-${id}" data-action="heatmap-cells" data-id="${id}" title="Rows per day">
+            <option value="24">24 (1h)</option>
+            <option value="48">48 (30m)</option>
+            <option value="96">96 (15m)</option>
+            <option value="144">144 (10m)</option>
+            <option value="288">288 (5m)</option>
+          </select>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="settings-gadget" data-action="heatmap-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -1258,6 +1265,12 @@
     return 'normal';
   }
 
+  function normalizeHeatmapCells(value) {
+    const n = Number(value);
+    if (n === 48 || n === 96 || n === 144 || n === 288) return n;
+    return 24;
+  }
+
   function transformHeatmapValue(value, scaleMode) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
     switch (normalizeHeatmapScale(scaleMode)) {
@@ -1293,14 +1306,22 @@
         return;
       }
       const dayMs = 24 * 60 * 60 * 1000;
+      const cellsPerDay = normalizeHeatmapCells(cfg.cellsPerDay);
       const gridLeft = 50;
       const gridRight = 50;
       const gridTop = 8;
       const gridBottom = 24;
-      const plotHeight = Math.max(24, cfg.hostEl.clientHeight - gridTop - gridBottom);
+      const plotHeight = Math.max(cellsPerDay, cfg.hostEl.clientHeight - gridTop - gridBottom);
       const plotWidth = Math.max(24, cfg.hostEl.clientWidth - gridLeft - gridRight);
-      const targetCellSize = plotHeight / 24;
+      const targetCellSize = plotHeight / cellsPerDay;
       const dayColumns = Math.max(1, Math.round(plotWidth / targetCellSize));
+      const cellMs = dayMs / cellsPerDay;
+      const fetchBucketMs = (() => {
+        if (cellsPerDay <= 24) return 3600000;
+        if (cellsPerDay <= 96) return 900000;
+        return 300000;
+      })();
+      const fetchGranularity = bucketLabelShort(fetchBucketMs);
       const rightDay = new Date(end);
       rightDay.setHours(0, 0, 0, 0);
       const visibleStart = rightDay.getTime() - (dayColumns - 1) * dayMs;
@@ -1308,12 +1329,12 @@
       const q = new URLSearchParams({
         start: String(visibleStart),
         end: String(visibleEnd),
-        minPoints: String(dayColumns * 24),
-        granularity: '1h',
+        minPoints: String(dayColumns * cellsPerDay),
+        granularity: fetchGranularity,
         series: cfg.activeSeries,
       });
       const reqT0 = performance.now();
-      appendConsoleLine(`heatmap ${id} request start series=${cfg.activeSeries} days=${dayColumns} granularity=1h`);
+      appendConsoleLine(`heatmap ${id} request start series=${cfg.activeSeries} days=${dayColumns} granularity=${fetchGranularity} cells=${cellsPerDay}`);
       const resp = await apiJson(`/events?${q}`);
       const reqMs = Math.round(performance.now() - reqT0);
       const points = Array.isArray(resp && resp.points) ? resp.points : [];
@@ -1324,6 +1345,8 @@
       let maxValue = null;
       let minColorValue = null;
       let maxColorValue = null;
+      const slotSums = new Map();
+      const slotCounts = new Map();
       for (const p of points) {
         if (!p || typeof p !== 'object') continue;
         const bucketStart = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
@@ -1334,10 +1357,18 @@
         const dayStart = new Date(d);
         dayStart.setHours(0, 0, 0, 0);
         const x = Math.floor((dayStart.getTime() - visibleStart) / dayMs);
-        const y = d.getHours();
-        if (x < 0 || x >= dayColumns || y < 0 || y > 23) continue;
+        const y = Math.floor((bucketStart - dayStart.getTime()) / cellMs);
+        if (x < 0 || x >= dayColumns || y < 0 || y >= cellsPerDay) continue;
+        const key = `${x}:${y}`;
+        slotSums.set(key, Number(slotSums.get(key) || 0) + value);
+        slotCounts.set(key, Number(slotCounts.get(key) || 0) + 1);
+      }
+      slotSums.forEach((sum, key) => {
+        const count = Number(slotCounts.get(key) || 0);
+        if (count <= 0) return;
+        const value = sum / count;
         const colorValue = transformHeatmapValue(value, cfg.heatmapScale);
-        values.set(`${x}:${y}`, {
+        values.set(key, {
           realValue: roundNumeric(value),
           colorValue: (typeof colorValue === 'number' && Number.isFinite(colorValue)) ? roundNumeric(colorValue) : null,
         });
@@ -1347,14 +1378,18 @@
           if (minColorValue === null || colorValue < minColorValue) minColorValue = colorValue;
           if (maxColorValue === null || colorValue > maxColorValue) maxColorValue = colorValue;
         }
-      }
+      });
 
       const xLabels = [];
       for (let i = 0; i < dayColumns; i += 1) {
         const d = new Date(visibleStart + i * dayMs);
         xLabels.push(`${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
       }
-      const yLabels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
+      const yLabels = Array.from({ length: cellsPerDay }, (_, i) => {
+        const hour = Math.floor(i * cellMs / 3600000);
+        const minute = Math.floor((i * cellMs % 3600000) / 60000);
+        return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+      });
       const heatData = [];
       values.forEach((entry, key) => {
         const [x, y] = key.split(':').map((n) => Number(n));
@@ -2027,6 +2062,7 @@
       heatmapScale: normalizeHeatmapScale(
         options.heatmapScale || (options.logScale ? 'log' : 'normal')
       ),
+      cellsPerDay: normalizeHeatmapCells(options.cellsPerDay),
       cellGap: (() => {
         const raw = Number(options.cellGap);
         if (!Number.isFinite(raw)) return 1;
@@ -2046,6 +2082,10 @@
       scaleSelect.value = normalizeHeatmapScale(
         options.heatmapScale || (options.logScale ? 'log' : 'normal')
       );
+    }
+    const cellsSelect = document.getElementById(`heatmap-cells-${id}`);
+    if (cellsSelect instanceof HTMLSelectElement) {
+      cellsSelect.value = String(normalizeHeatmapCells(options.cellsPerDay));
     }
     appendConsoleLine(`heatmap ${id} created series=${initialSeries.length}`);
     updateTitle(id);
@@ -2168,6 +2208,7 @@
           activeSeries: typeof c.activeSeries === 'string' ? c.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
+          cellsPerDay: normalizeHeatmapCells(c.cellsPerDay),
           cellGap: Math.max(0, Math.min(12, Math.floor(Number(c.cellGap || 1)))),
           label: c.label || null,
         });
@@ -2241,6 +2282,7 @@
           activeSeries: typeof ch.activeSeries === 'string' ? ch.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
+          cellsPerDay: normalizeHeatmapCells(ch.cellsPerDay),
           cellGap: Math.max(0, Math.min(12, Math.floor(Number(ch.cellGap || 1)))),
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
@@ -2804,6 +2846,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'heatmap') return;
       panel.heatmapScale = normalizeHeatmapScale(target.value || 'normal');
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'heatmap-cells') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.cellsPerDay = normalizeHeatmapCells(target.value || '24');
       refreshHeatmap(id).catch((err) => console.error(err));
       return;
     }
