@@ -190,6 +190,24 @@
     </form>
   </dialog>
 
+  <dialog id="heatmapSettingsDialog" class="modal">
+    <form method="dialog" class="modal-content" id="heatmapSettingsForm">
+      <h2>Heatmap Settings</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Name</div>
+        <div><input id="heatmapSettingsName" type="text" placeholder="Window name" /></div>
+
+        <div class="settings-label">Gap</div>
+        <div><input id="heatmapSettingsGap" type="number" min="0" max="12" step="1" placeholder="1" /></div>
+      </div>
+      <menu>
+        <button id="removeHeatmapSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="cancelHeatmapSettings" type="button" class="btn">Cancel</button>
+        <button id="saveHeatmapSettings" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
   <dialog id="statColumnsDialog" class="modal">
     <form method="dialog" class="modal-content" id="statColumnsForm">
       <h2>Select Columns</h2>

@@ -56,6 +56,9 @@
   const statSettingsDialog = document.getElementById('statSettingsDialog');
   const statSettingsName = document.getElementById('statSettingsName');
   const statSettingsSeriesList = document.getElementById('statSettingsSeriesList');
+  const heatmapSettingsDialog = document.getElementById('heatmapSettingsDialog');
+  const heatmapSettingsName = document.getElementById('heatmapSettingsName');
+  const heatmapSettingsGap = document.getElementById('heatmapSettingsGap');
   const statColumnsDialog = document.getElementById('statColumnsDialog');
   const columnsList = document.getElementById('columnsList');
   const columnsSearch = document.getElementById('columnsSearch');
@@ -68,6 +71,7 @@
   let chartSettingsSeriesColorDraft = {};
   let statSettingsSeriesDraft = [];
   let activeSettingsStatId = null;
+  let activeSettingsHeatmapId = null;
   let activeColumnsStatId = null;
   let consolePanelId = null;
   let apiTraceEnabled = false;
@@ -98,10 +102,10 @@
   ];
   const AUTO_DARK_COLOR = '__auto_dark__';
   const heatmapPalettes = [
+    { id: 'plasma', label: 'Plasma', colors: ['#000000', '#0d0887', '#5c01a6', '#9c179e', '#cc4778', '#ed7953', '#fdb42f', '#f0f921', '#ffffff'] },
     { id: 'hotmetal', label: 'Hot Metal', colors: ['#120a0a', '#4f120e', '#8f2411', '#d14f11', '#ff9d19', '#ffe28c', '#fff7e2', '#ffffff'] },
     { id: 'inferno', label: 'Inferno', colors: ['#000004', '#320a5e', '#781c6d', '#bc3754', '#ed6925', '#fbb41a', '#fcffa4', '#ffffff'] },
     { id: 'magma', label: 'Magma', colors: ['#000004', '#221150', '#5f187f', '#982d80', '#d3436e', '#f8765c', '#fcfdbf', '#ffffff'] },
-    { id: 'plasma', label: 'Plasma', colors: ['#000000', '#0d0887', '#5c01a6', '#9c179e', '#cc4778', '#ed7953', '#fdb42f', '#f0f921', '#ffffff'] },
     { id: 'viridis', label: 'Viridis', colors: ['#440154', '#414487', '#2a788e', '#22a884', '#7ad151', '#bddf26', '#fde725', '#ffffff'] },
     { id: 'cividis', label: 'Cividis', colors: ['#00224e', '#274d7e', '#4f6d8a', '#768b6d', '#a59c55', '#d2b746', '#fee838', '#ffffff'] },
     { id: 'greys', label: 'Greys', colors: ['#111111', '#2d2d2d', '#525252', '#737373', '#969696', '#bdbdbd', '#f0f0f0', '#ffffff'] },
@@ -1142,7 +1146,7 @@
             <option value="log">Log</option>
           </select>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
-          <button class="icon-btn danger" data-action="remove-heatmap" data-id="${id}" title="Remove window">🗑️</button>
+          <button class="settings-gadget" data-action="heatmap-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
       </div>
       <div class="heatmap" id="heatmap-${id}"></div>
@@ -1381,10 +1385,14 @@
           type: 'heatmap',
           data: heatData,
           progressive: 0,
+          itemStyle: {
+            borderWidth: Math.max(0, Number(cfg.cellGap || 0)),
+            borderColor: '#171b23',
+          },
           emphasis: {
             itemStyle: {
               borderColor: '#fff',
-              borderWidth: 1,
+              borderWidth: Math.max(1, Number(cfg.cellGap || 0)),
             },
           },
         }],
@@ -1988,6 +1996,11 @@
       heatmapScale: normalizeHeatmapScale(
         options.heatmapScale || (options.logScale ? 'log' : 'normal')
       ),
+      cellGap: (() => {
+        const raw = Number(options.cellGap);
+        if (!Number.isFinite(raw)) return 1;
+        return Math.max(0, Math.min(12, Math.floor(raw)));
+      })(),
       label: options.label || null,
       busyCount: 0,
       titleMeta: '',
@@ -2124,6 +2137,7 @@
           activeSeries: typeof c.activeSeries === 'string' ? c.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
+          cellGap: Math.max(0, Math.min(12, Math.floor(Number(c.cellGap || 1)))),
           label: c.label || null,
         });
         continue;
@@ -2196,6 +2210,7 @@
           activeSeries: typeof ch.activeSeries === 'string' ? ch.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
+          cellGap: Math.max(0, Math.min(12, Math.floor(Number(ch.cellGap || 1)))),
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -2422,6 +2437,18 @@
     statSettingsDialog.showModal();
   }
 
+  function openHeatmapSettingsDialog(id) {
+    const c = charts.get(id);
+    if (!c || c.kind !== 'heatmap') return;
+    activeSettingsHeatmapId = id;
+    heatmapSettingsName.value = c.label || '';
+    if (heatmapSettingsGap) {
+      const raw = Number(c.cellGap);
+      heatmapSettingsGap.value = String(Number.isFinite(raw) ? Math.max(0, Math.min(12, Math.floor(raw))) : 1);
+    }
+    heatmapSettingsDialog.showModal();
+  }
+
   function renderStatSettingsSeriesList() {
     if (!(statSettingsSeriesList instanceof HTMLElement)) return;
     if (!Array.isArray(statSettingsSeriesDraft) || statSettingsSeriesDraft.length === 0) {
@@ -2645,6 +2672,11 @@
       return;
     }
 
+    if (target.dataset.action === 'heatmap-settings') {
+      openHeatmapSettingsDialog(target.dataset.id);
+      return;
+    }
+
     if (target.dataset.action === 'stat-columns') {
       openStatColumnsDialog(target.dataset.id).catch((err) => console.error(err));
       return;
@@ -2863,6 +2895,46 @@
   statSettingsDialog.addEventListener('close', () => {
     activeSettingsStatId = null;
     statSettingsSeriesDraft = [];
+  });
+
+  document.getElementById('heatmapSettingsForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeSettingsHeatmapId) {
+      heatmapSettingsDialog.close();
+      return;
+    }
+    const c = charts.get(activeSettingsHeatmapId);
+    if (!c || c.kind !== 'heatmap') {
+      heatmapSettingsDialog.close();
+      return;
+    }
+    c.label = String(heatmapSettingsName.value || '').trim() || null;
+    c.cellGap = Math.max(0, Math.min(12, Math.floor(Number(heatmapSettingsGap ? heatmapSettingsGap.value : 1) || 0)));
+    appendConsoleLine(`heatmap ${activeSettingsHeatmapId} settings updated gap=${c.cellGap}`);
+    updateTitle(activeSettingsHeatmapId);
+    refreshHeatmap(activeSettingsHeatmapId).catch((err) => console.error(err));
+    activeSettingsHeatmapId = null;
+    heatmapSettingsDialog.close();
+  });
+
+  document.getElementById('cancelHeatmapSettings').addEventListener('click', () => {
+    activeSettingsHeatmapId = null;
+    heatmapSettingsDialog.close();
+  });
+
+  document.getElementById('removeHeatmapSettings').addEventListener('click', () => {
+    if (!activeSettingsHeatmapId) {
+      heatmapSettingsDialog.close();
+      return;
+    }
+    const removeId = activeSettingsHeatmapId;
+    activeSettingsHeatmapId = null;
+    heatmapSettingsDialog.close();
+    removePanel(removeId);
+  });
+
+  heatmapSettingsDialog.addEventListener('close', () => {
+    activeSettingsHeatmapId = null;
   });
 
   document.getElementById('statColumnsForm').addEventListener('submit', (e) => {
