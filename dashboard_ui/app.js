@@ -1,6 +1,7 @@
 (() => {
   const FRONTEND_API_VERSION = 18;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
+  const NEW_EMPTY_DASHBOARD_VALUE = '__new_empty_dashboard__';
   const grid = GridStack.init({
     cellHeight: 102,
     margin: 2,
@@ -125,6 +126,7 @@
   let showMinPointsDebug = false;
   let showRefreshDurationDebug = false;
   let heatmapResizeTimer = null;
+  let saveDashboardDialogMode = 'save';
 
   function htmlEscape(value) {
     return String(value)
@@ -934,17 +936,40 @@
   function updateDashboardDatalist() {
     const names = ['Default', ...Array.from(savedDashboardNames).sort()];
     const current = dashboardSelect.value || currentDashboardName || 'Default';
+    if (
+      currentDashboardName
+      && currentDashboardName !== 'Default'
+      && currentDashboardName !== SAVE_NEW_DASHBOARD_VALUE
+      && currentDashboardName !== NEW_EMPTY_DASHBOARD_VALUE
+      && !names.includes(currentDashboardName)
+    ) {
+      names.push(currentDashboardName);
+    }
     dashboardSelect.innerHTML = [
       ...names.map((name) => `<option value="${htmlEscape(name)}">${htmlEscape(name)}</option>`),
-      `<option value="${SAVE_NEW_DASHBOARD_VALUE}">Save new dashboard ...</option>`,
+      `<option value="${SAVE_NEW_DASHBOARD_VALUE}">Save dashboard as ...</option>`,
+      `<option value="${NEW_EMPTY_DASHBOARD_VALUE}">New empty dashboard ...</option>`,
     ].join('');
-    if (current === SAVE_NEW_DASHBOARD_VALUE || names.includes(current)) {
+    if (current === SAVE_NEW_DASHBOARD_VALUE || current === NEW_EMPTY_DASHBOARD_VALUE || names.includes(current)) {
       dashboardSelect.value = current;
     } else if (names.includes(currentDashboardName)) {
       dashboardSelect.value = currentDashboardName;
     } else {
       dashboardSelect.value = 'Default';
     }
+  }
+
+  function nextEmptyDashboardName() {
+    const used = new Set(['Default', ...Array.from(savedDashboardNames)]);
+    for (const cfg of charts.values()) {
+      if (cfg && typeof cfg.label === 'string') {
+        break;
+      }
+    }
+    if (currentDashboardName) used.add(String(currentDashboardName));
+    let n = 1;
+    while (used.has(`Dashboard ${n}`)) n += 1;
+    return `Dashboard ${n}`;
   }
 
   async function refreshDashboardNames() {
@@ -2274,7 +2299,8 @@
     appendConsoleLine(`dashboard save done name="${name}"`);
   }
 
-  function openSaveNewDashboardDialog(defaultName = '') {
+  function openSaveNewDashboardDialog(defaultName = '', mode = 'save') {
+    saveDashboardDialogMode = mode === 'new-empty' ? 'new-empty' : 'save';
     saveDashboardNameInput.value = defaultName;
     saveDashboardDialog.showModal();
     saveDashboardNameInput.focus();
@@ -3038,16 +3064,31 @@
       alert('Please enter a dashboard name.');
       return;
     }
-    saveCurrentDashboard(name).then(() => {
+    const action = saveDashboardDialogMode === 'new-empty'
+      ? Promise.resolve().then(() => {
+        appendConsoleLine(`dashboard new empty name="${name}"`);
+        clearAllCharts();
+        currentDashboardName = name;
+        updateDashboardDatalist();
+        dashboardSelect.value = name;
+        queueSaveSettings();
+      })
+      : saveCurrentDashboard(name);
+    action.then(() => {
       saveDashboardDialog.close();
     }).catch((err) => {
       console.error(err);
-      alert(`Failed to save dashboard: ${err.message || err}`);
+      alert(`Failed to ${saveDashboardDialogMode === 'new-empty' ? 'create' : 'save'} dashboard: ${err.message || err}`);
     });
   });
 
   document.getElementById('cancelSaveDashboard').addEventListener('click', () => {
+    saveDashboardDialogMode = 'save';
     saveDashboardDialog.close();
+  });
+
+  saveDashboardDialog.addEventListener('close', () => {
+    saveDashboardDialogMode = 'save';
   });
 
   if (virtualSeriesRows) {
@@ -3312,6 +3353,11 @@
     if (name === SAVE_NEW_DASHBOARD_VALUE) {
       dashboardSelect.value = currentDashboardName;
       openSaveNewDashboardDialog('');
+      return;
+    }
+    if (name === NEW_EMPTY_DASHBOARD_VALUE) {
+      dashboardSelect.value = currentDashboardName;
+      openSaveNewDashboardDialog(nextEmptyDashboardName(), 'new-empty');
       return;
     }
     if (name === 'Default') {
