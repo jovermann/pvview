@@ -205,6 +205,7 @@
     const t = nowMs();
     if ((t - lastForegroundRefreshMs) < 1500) return;
     lastForegroundRefreshMs = t;
+    alignRangeEndToNow();
     appendConsoleLine(`foreground refresh trigger reason=${reason}`);
     refreshAllCharts(`foreground-${reason}`).catch((err) => console.error(err));
   }
