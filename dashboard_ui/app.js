@@ -97,6 +97,18 @@
     '#ea7ccc',
   ];
   const AUTO_DARK_COLOR = '__auto_dark__';
+  const heatmapPalettes = [
+    { id: 'hotmetal', label: 'Hot Metal', colors: ['#120a0a', '#4f120e', '#8f2411', '#d14f11', '#ff9d19', '#ffe28c', '#fff7e2'] },
+    { id: 'inferno', label: 'Inferno', colors: ['#000004', '#320a5e', '#781c6d', '#bc3754', '#ed6925', '#fbb41a', '#fcffa4'] },
+    { id: 'magma', label: 'Magma', colors: ['#000004', '#221150', '#5f187f', '#982d80', '#d3436e', '#f8765c', '#fcfdbf'] },
+    { id: 'plasma', label: 'Plasma', colors: ['#0d0887', '#5c01a6', '#9c179e', '#cc4778', '#ed7953', '#fdb42f', '#f0f921'] },
+    { id: 'viridis', label: 'Viridis', colors: ['#440154', '#414487', '#2a788e', '#22a884', '#7ad151', '#bddf26', '#fde725'] },
+    { id: 'cividis', label: 'Cividis', colors: ['#00224e', '#274d7e', '#4f6d8a', '#768b6d', '#a59c55', '#d2b746', '#fee838'] },
+    { id: 'turbo', label: 'Turbo', colors: ['#30123b', '#4145ab', '#4685fa', '#33c3ba', '#90e03e', '#f9ba38', '#f05b12', '#7a0403'] },
+    { id: 'ylorrd', label: 'Yellow-Orange-Red', colors: ['#ffffcc', '#ffeda0', '#feb24c', '#fd8d3c', '#f03b20', '#bd0026'] },
+    { id: 'bluered', label: 'Blue-Red', colors: ['#081d58', '#225ea8', '#41b6c4', '#a1dab4', '#fee090', '#f46d43', '#a50026'] },
+    { id: 'greys', label: 'Greys', colors: ['#111111', '#2d2d2d', '#525252', '#737373', '#969696', '#bdbdbd', '#f0f0f0'] },
+  ];
   let settingsSaveTimer = null;
   let currentDashboardName = 'Default';
   let virtualSeriesDefs = [];
@@ -111,6 +123,7 @@
   let globalGranularity = 'auto';
   let showMinPointsDebug = false;
   let showRefreshDurationDebug = false;
+  let heatmapResizeTimer = null;
 
   function htmlEscape(value) {
     return String(value)
@@ -287,6 +300,20 @@
     panel.logEl.scrollTop = panel.logEl.scrollHeight;
   }
 
+  function scheduleHeatmapLayoutRefresh() {
+    if (heatmapResizeTimer !== null) {
+      clearTimeout(heatmapResizeTimer);
+    }
+    heatmapResizeTimer = setTimeout(() => {
+      heatmapResizeTimer = null;
+      charts.forEach((c) => {
+        if (c.kind === 'heatmap') {
+          refreshHeatmap(c.id).catch((err) => console.error(err));
+        }
+      });
+    }, 150);
+  }
+
   function refreshConsoleView() {
     if (!consolePanelId) return;
     const panel = charts.get(consolePanelId);
@@ -305,6 +332,16 @@
     const ids = [];
     for (const [id, cfg] of charts.entries()) {
       if (cfg && cfg.kind === 'chart') {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  function heatmapIds() {
+    const ids = [];
+    for (const [id, cfg] of charts.entries()) {
+      if (cfg && cfg.kind === 'heatmap') {
         ids.push(id);
       }
     }
@@ -418,22 +455,24 @@
 
   async function refreshAllCharts(reason = 'manual') {
     const ids = chartIds();
+    const heatmapPanelIds = heatmapIds();
     const statPanelIds = statIds();
     const t0 = performance.now();
     refreshGetCallCount = 0;
-    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} stats=${statPanelIds.length}`);
+    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length}`);
     const chartResults = await Promise.allSettled(ids.map((id) => refreshChart(id)));
+    const heatmapResults = await Promise.allSettled(heatmapPanelIds.map((id) => refreshHeatmap(id)));
     const statResults = await Promise.allSettled(statPanelIds.map((id) => refreshStat(id)));
-    const results = [...chartResults, ...statResults];
+    const results = [...chartResults, ...heatmapResults, ...statResults];
     const failed = results.filter((r) => r.status === 'rejected').length;
-    const allIds = [...ids, ...statPanelIds];
+    const allIds = [...ids, ...heatmapPanelIds, ...statPanelIds];
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         appendConsoleLine(`panel ${allIds[i]} refresh error ${r.reason}`);
       }
     });
     const elapsed = Math.round(performance.now() - t0);
-    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -1084,6 +1123,30 @@
     return wrapper;
   }
 
+  function createHeatmapPanel(id) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'panel';
+    wrapper.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">24h Heatmap ${id}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
+          <select class="heatmap-series-select" id="heatmap-series-${id}" data-action="heatmap-series" data-id="${id}"></select>
+          <select class="heatmap-series-select" id="heatmap-palette-${id}" data-action="heatmap-palette" data-id="${id}" title="Palette">
+            ${heatmapPalettes.map((p) => `<option value="${p.id}">${htmlEscape(p.label)}</option>`).join('')}
+          </select>
+          <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
+          <button class="icon-btn danger" data-action="remove-heatmap" data-id="${id}" title="Remove window">🗑️</button>
+        </div>
+      </div>
+      <div class="heatmap" id="heatmap-${id}"></div>
+    `;
+    return wrapper;
+  }
+
   function updateTitle(id) {
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
@@ -1091,6 +1154,11 @@
     if (!titleEl || !c) return;
     if (c.kind === 'stat') {
       titleEl.textContent = c.label || `Stat ${id}`;
+      if (metaEl) metaEl.textContent = c.titleMeta || '';
+      return;
+    }
+    if (c.kind === 'heatmap') {
+      titleEl.textContent = c.label || `24h Heatmap ${id}`;
       if (metaEl) metaEl.textContent = c.titleMeta || '';
       return;
     }
@@ -1119,6 +1187,174 @@
     const header = spinner ? spinner.closest('.panel-header') : null;
     if (header instanceof HTMLElement) {
       header.classList.toggle('busy', active);
+    }
+  }
+
+  function updateHeatmapSeriesSelect(id) {
+    const cfg = charts.get(id);
+    const select = document.getElementById(`heatmap-series-${id}`);
+    if (!cfg || cfg.kind !== 'heatmap' || !(select instanceof HTMLSelectElement)) return;
+    const series = Array.isArray(cfg.series) ? cfg.series.filter((s) => typeof s === 'string') : [];
+    if (!series.length) {
+      select.innerHTML = '<option value="">No series</option>';
+      select.value = '';
+      select.disabled = true;
+      return;
+    }
+    if (!series.includes(cfg.activeSeries)) {
+      cfg.activeSeries = series[0];
+    }
+    select.innerHTML = series.map((name) => `<option value="${htmlEscape(name)}">${htmlEscape(displaySeriesName(name))}</option>`).join('');
+    select.value = cfg.activeSeries;
+    select.disabled = false;
+  }
+
+  function normalizeHeatmapPalette(value) {
+    const id = String(value || '').trim().toLowerCase();
+    if (heatmapPalettes.some((p) => p.id === id)) return id;
+    return 'hotmetal';
+  }
+
+  function heatmapPaletteColors(id) {
+    const palette = heatmapPalettes.find((p) => p.id === normalizeHeatmapPalette(id));
+    return palette ? palette.colors : heatmapPalettes[0].colors;
+  }
+
+  async function refreshHeatmap(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'heatmap' || !cfg.instance || !(cfg.hostEl instanceof HTMLElement)) return;
+    setPanelBusy(id, true);
+    try {
+      const panelName = cfg.label || `24h Heatmap ${id}`;
+      appendConsoleLine(`heatmap ${id} refresh start name="${panelName}" series=${cfg.series.length}`);
+      updateHeatmapSeriesSelect(id);
+      const { end } = getRange();
+      await ensureInverterNames(cfg.series);
+      if (!cfg.series.length || !cfg.activeSeries) {
+        setPanelTitleMeta(id, '');
+        cfg.instance.clear();
+        cfg.instance.setOption({
+          backgroundColor: 'transparent',
+          title: { text: 'No series selected', left: 'center', top: 'middle', textStyle: { color: '#8ca0b8' } },
+        });
+        appendConsoleLine(`heatmap ${id} refresh done (no series)`);
+        return;
+      }
+      const dayMs = 24 * 60 * 60 * 1000;
+      const cellSize = Math.max(8, Math.floor(Math.max(180, cfg.hostEl.clientHeight - 48) / 24));
+      const dayColumns = Math.max(1, Math.floor(Math.max(120, cfg.hostEl.clientWidth - 76) / cellSize));
+      const rightDay = new Date(end);
+      rightDay.setHours(0, 0, 0, 0);
+      const visibleStart = rightDay.getTime() - (dayColumns - 1) * dayMs;
+      const visibleEnd = rightDay.getTime() + dayMs;
+      const q = new URLSearchParams({
+        start: String(visibleStart),
+        end: String(visibleEnd),
+        minPoints: String(dayColumns * 24),
+        granularity: '1h',
+        series: cfg.activeSeries,
+      });
+      const reqT0 = performance.now();
+      appendConsoleLine(`heatmap ${id} request start series=${cfg.activeSeries} days=${dayColumns} granularity=1h`);
+      const resp = await apiJson(`/events?${q}`);
+      const reqMs = Math.round(performance.now() - reqT0);
+      const points = Array.isArray(resp && resp.points) ? resp.points : [];
+      appendConsoleLine(`heatmap ${id} request done points=${points.length} elapsed=${reqMs}ms`);
+
+      const values = new Map();
+      let minValue = null;
+      let maxValue = null;
+      for (const p of points) {
+        if (!p || typeof p !== 'object') continue;
+        const bucketStart = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
+        const value = Number(Object.prototype.hasOwnProperty.call(p, 'avg') ? p.avg : p.value);
+        if (!Number.isFinite(bucketStart) || !Number.isFinite(value)) continue;
+        if (bucketStart < visibleStart || bucketStart >= visibleEnd) continue;
+        const d = new Date(bucketStart);
+        const dayStart = new Date(d);
+        dayStart.setHours(0, 0, 0, 0);
+        const x = Math.floor((dayStart.getTime() - visibleStart) / dayMs);
+        const y = d.getHours();
+        if (x < 0 || x >= dayColumns || y < 0 || y > 23) continue;
+        values.set(`${x}:${y}`, roundNumeric(value));
+        if (minValue === null || value < minValue) minValue = value;
+        if (maxValue === null || value > maxValue) maxValue = value;
+      }
+
+      const xLabels = [];
+      for (let i = 0; i < dayColumns; i += 1) {
+        const d = new Date(visibleStart + i * dayMs);
+        xLabels.push(`${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+      }
+      const yLabels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
+      const heatData = [];
+      values.forEach((value, key) => {
+        const [x, y] = key.split(':').map((n) => Number(n));
+        heatData.push([x, y, value]);
+      });
+      const displayRule = effectiveDisplayRuleForSeries(cfg.activeSeries, unitForSeriesName(cfg.activeSeries), resp.decimalPlaces);
+
+      setPanelTitleMeta(id, showRefreshDurationDebug ? `${reqMs} ms` : '');
+      cfg.instance.setOption({
+        backgroundColor: 'transparent',
+        animation: false,
+        tooltip: {
+          position: 'top',
+          formatter: (params) => {
+            const x = Number(params.value[0]);
+            const y = Number(params.value[1]);
+            return `${htmlEscape(displaySeriesName(cfg.activeSeries))}<br/>${xLabels[x] || ''} ${yLabels[y] || ''}<br/>${formatValueWithUnit(params.value[2], displayRule.unit, displayRule.decimals)}`;
+          },
+        },
+        grid: {
+          left: 50,
+          right: 50,
+          top: 8,
+          bottom: 24,
+        },
+        xAxis: {
+          type: 'category',
+          data: xLabels,
+          axisLine: { lineStyle: { color: '#4d5b70' } },
+          axisLabel: { color: '#aebbc9', interval: 'auto' },
+          splitArea: { show: false },
+        },
+        yAxis: {
+          type: 'category',
+          data: yLabels,
+          inverse: true,
+          axisLine: { lineStyle: { color: '#4d5b70' } },
+          axisLabel: { color: '#aebbc9' },
+        },
+        visualMap: {
+          min: minValue === null ? 0 : minValue,
+          max: maxValue === null ? 1 : maxValue,
+          orient: 'vertical',
+          right: 4,
+          top: 'middle',
+          itemHeight: 120,
+          calculable: false,
+          textStyle: { color: '#aebbc9' },
+          inRange: {
+            color: heatmapPaletteColors(cfg.heatmapPalette),
+          },
+        },
+        series: [{
+          name: displaySeriesName(cfg.activeSeries),
+          type: 'heatmap',
+          data: heatData,
+          progressive: 0,
+          emphasis: {
+            itemStyle: {
+              borderColor: '#fff',
+              borderWidth: 1,
+            },
+          },
+        }],
+      }, true);
+      appendConsoleLine(`heatmap ${id} refresh done name="${panelName}" days=${dayColumns} points=${heatData.length}`);
+    } finally {
+      setPanelBusy(id, false);
     }
   }
 
@@ -1686,11 +1922,54 @@
     return id;
   }
 
+  function addHeatmap(initialSeries = [], options = {}) {
+    chartCounter += 1;
+    const id = String(chartCounter);
+    const widgetEl = document.createElement('div');
+    widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 6,
+      h: options.h || 4,
+    });
+    const panel = createHeatmapPanel(id);
+    node.querySelector('.grid-stack-item-content').appendChild(panel);
+    const hostEl = document.getElementById(`heatmap-${id}`);
+    const instance = echarts.init(hostEl, null, { renderer: 'canvas' });
+    charts.set(id, {
+      id,
+      kind: 'heatmap',
+      node,
+      hostEl,
+      instance,
+      series: [...initialSeries],
+      activeSeries: (typeof options.activeSeries === 'string' && initialSeries.includes(options.activeSeries))
+        ? options.activeSeries
+        : (initialSeries[0] || ''),
+      heatmapPalette: normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'hotmetal'),
+      label: options.label || null,
+      busyCount: 0,
+      titleMeta: '',
+    });
+    updateHeatmapSeriesSelect(id);
+    const paletteSelect = document.getElementById(`heatmap-palette-${id}`);
+    if (paletteSelect instanceof HTMLSelectElement) {
+      paletteSelect.value = normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'hotmetal');
+    }
+    appendConsoleLine(`heatmap ${id} created series=${initialSeries.length}`);
+    updateTitle(id);
+    if (!options.deferRefresh) {
+      refreshHeatmap(id).catch((err) => console.error(err));
+    }
+    return id;
+  }
+
   function removePanel(id) {
     const c = charts.get(id);
     if (!c) return;
     appendConsoleLine(`panel ${id} removed type=${c.kind || 'unknown'}`);
-    if (c.kind === 'chart' && c.instance) {
+    if ((c.kind === 'chart' || c.kind === 'heatmap') && c.instance) {
       c.instance.dispose();
     }
     if (consolePanelId === id) {
@@ -1788,6 +2067,20 @@
         });
         continue;
       }
+      if (c.kind === 'heatmap') {
+        chartList.push({
+          type: 'heatmap',
+          x: Number(nodeInfo.x || 0),
+          y: Number(nodeInfo.y || 0),
+          w: Number(nodeInfo.w || 6),
+          h: Number(nodeInfo.h || 4),
+          series: Array.isArray(c.series) ? [...c.series] : [],
+          activeSeries: typeof c.activeSeries === 'string' ? c.activeSeries : '',
+          heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'hotmetal'),
+          label: c.label || null,
+        });
+        continue;
+      }
       chartList.push({
         type: 'chart',
         x: Number(nodeInfo.x || 0),
@@ -1841,6 +2134,20 @@
           w: Number(ch.w) || 6,
           h: Number(ch.h) || 3,
           columns,
+          label: typeof ch.label === 'string' ? ch.label : null,
+          deferRefresh: true,
+        });
+        continue;
+      }
+      if (ch.type === 'heatmap') {
+        const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+        addHeatmap(series, {
+          x: Number(ch.x),
+          y: Number(ch.y),
+          w: Number(ch.w) || 6,
+          h: Number(ch.h) || 4,
+          activeSeries: typeof ch.activeSeries === 'string' ? ch.activeSeries : '',
+          heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'hotmetal'),
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -1959,8 +2266,14 @@
             }
           }
         }
+        if (c.kind === 'heatmap' && !c.series.includes(c.activeSeries)) {
+          c.activeSeries = c.series[0] || '';
+          updateHeatmapSeriesSelect(id);
+        }
         if (c.kind === 'stat') {
           refreshStat(id).catch((err) => console.error(err));
+        } else if (c.kind === 'heatmap') {
+          refreshHeatmap(id).catch((err) => console.error(err));
         } else {
           refreshChart(id).catch((err) => console.error(err));
         }
@@ -2144,9 +2457,15 @@
     }
     c.series = Array.from(activeSeriesSelection || []);
     appendConsoleLine(`panel ${activeChartId} series updated count=${c.series.length}`);
+    if (c.kind === 'heatmap' && !c.series.includes(c.activeSeries)) {
+      c.activeSeries = c.series[0] || '';
+      updateHeatmapSeriesSelect(activeChartId);
+    }
     updateTitle(activeChartId);
     if (c.kind === 'stat') {
       refreshStat(activeChartId).catch((err) => console.error(err));
+    } else if (c.kind === 'heatmap') {
+      refreshHeatmap(activeChartId).catch((err) => console.error(err));
     } else {
       refreshChart(activeChartId).catch((err) => console.error(err));
     }
@@ -2248,8 +2567,18 @@
       return;
     }
 
+    if (target.id === 'addHeatmap') {
+      addHeatmap();
+      return;
+    }
+
     if (target.id === 'addConsole') {
       createConsolePanel();
+      return;
+    }
+
+    if (target.dataset.action === 'remove-heatmap') {
+      removePanel(target.dataset.id);
       return;
     }
 
@@ -2339,6 +2668,24 @@
   document.addEventListener('change', (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
+    if (target.dataset.action === 'heatmap-series') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.activeSeries = String(target.value || '');
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'heatmap-palette') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.heatmapPalette = normalizeHeatmapPalette(target.value || 'hotmetal');
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
     if (target.dataset.action === 'api-trace') {
       if (!(target instanceof HTMLInputElement)) return;
       const id = target.dataset.id;
@@ -2763,18 +3110,20 @@
 
   grid.on('resizestop', () => {
     charts.forEach((c) => {
-      if (c.kind === 'chart' && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'heatmap') && c.instance) {
         c.instance.resize();
       }
     });
+    scheduleHeatmapLayoutRefresh();
   });
 
   window.addEventListener('resize', () => {
     charts.forEach((c) => {
-      if (c.kind === 'chart' && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'heatmap') && c.instance) {
         c.instance.resize();
       }
     });
+    scheduleHeatmapLayoutRefresh();
   });
 
   document.addEventListener('visibilitychange', () => {
