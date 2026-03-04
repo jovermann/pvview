@@ -98,16 +98,13 @@
   ];
   const AUTO_DARK_COLOR = '__auto_dark__';
   const heatmapPalettes = [
-    { id: 'hotmetal', label: 'Hot Metal', colors: ['#120a0a', '#4f120e', '#8f2411', '#d14f11', '#ff9d19', '#ffe28c', '#fff7e2'] },
-    { id: 'inferno', label: 'Inferno', colors: ['#000004', '#320a5e', '#781c6d', '#bc3754', '#ed6925', '#fbb41a', '#fcffa4'] },
-    { id: 'magma', label: 'Magma', colors: ['#000004', '#221150', '#5f187f', '#982d80', '#d3436e', '#f8765c', '#fcfdbf'] },
-    { id: 'plasma', label: 'Plasma', colors: ['#0d0887', '#5c01a6', '#9c179e', '#cc4778', '#ed7953', '#fdb42f', '#f0f921'] },
-    { id: 'viridis', label: 'Viridis', colors: ['#440154', '#414487', '#2a788e', '#22a884', '#7ad151', '#bddf26', '#fde725'] },
-    { id: 'cividis', label: 'Cividis', colors: ['#00224e', '#274d7e', '#4f6d8a', '#768b6d', '#a59c55', '#d2b746', '#fee838'] },
-    { id: 'turbo', label: 'Turbo', colors: ['#30123b', '#4145ab', '#4685fa', '#33c3ba', '#90e03e', '#f9ba38', '#f05b12', '#7a0403'] },
-    { id: 'ylorrd', label: 'Yellow-Orange-Red', colors: ['#ffffcc', '#ffeda0', '#feb24c', '#fd8d3c', '#f03b20', '#bd0026'] },
-    { id: 'bluered', label: 'Blue-Red', colors: ['#081d58', '#225ea8', '#41b6c4', '#a1dab4', '#fee090', '#f46d43', '#a50026'] },
-    { id: 'greys', label: 'Greys', colors: ['#111111', '#2d2d2d', '#525252', '#737373', '#969696', '#bdbdbd', '#f0f0f0'] },
+    { id: 'hotmetal', label: 'Hot Metal', colors: ['#120a0a', '#4f120e', '#8f2411', '#d14f11', '#ff9d19', '#ffe28c', '#fff7e2', '#ffffff'] },
+    { id: 'inferno', label: 'Inferno', colors: ['#000004', '#320a5e', '#781c6d', '#bc3754', '#ed6925', '#fbb41a', '#fcffa4', '#ffffff'] },
+    { id: 'magma', label: 'Magma', colors: ['#000004', '#221150', '#5f187f', '#982d80', '#d3436e', '#f8765c', '#fcfdbf', '#ffffff'] },
+    { id: 'plasma', label: 'Plasma', colors: ['#0d0887', '#5c01a6', '#9c179e', '#cc4778', '#ed7953', '#fdb42f', '#f0f921', '#ffffff'] },
+    { id: 'viridis', label: 'Viridis', colors: ['#440154', '#414487', '#2a788e', '#22a884', '#7ad151', '#bddf26', '#fde725', '#ffffff'] },
+    { id: 'cividis', label: 'Cividis', colors: ['#00224e', '#274d7e', '#4f6d8a', '#768b6d', '#a59c55', '#d2b746', '#fee838', '#ffffff'] },
+    { id: 'greys', label: 'Greys', colors: ['#111111', '#2d2d2d', '#525252', '#737373', '#969696', '#bdbdbd', '#f0f0f0', '#ffffff'] },
   ];
   let settingsSaveTimer = null;
   let currentDashboardName = 'Default';
@@ -1138,6 +1135,10 @@
           <select class="heatmap-series-select" id="heatmap-palette-${id}" data-action="heatmap-palette" data-id="${id}" title="Palette">
             ${heatmapPalettes.map((p) => `<option value="${p.id}">${htmlEscape(p.label)}</option>`).join('')}
           </select>
+          <label class="panel-check" title="Use logarithmic color scale">
+            <input type="checkbox" id="heatmap-log-${id}" data-action="heatmap-log" data-id="${id}" />
+            <span>Log</span>
+          </label>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="icon-btn danger" data-action="remove-heatmap" data-id="${id}" title="Remove window">🗑️</button>
         </div>
