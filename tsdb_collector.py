@@ -24,6 +24,7 @@ from tsdb import (
     compress_timeseries_db_file,
     create_timeseries_db_writer,
     decimal_places_from_format_id,
+    dump_timeseries_db_bytes,
     downsample_series_points,
     read_timeseries_db,
     stat_timeseries_db,
@@ -1687,6 +1688,7 @@ def main() -> int:
     parser.add_argument("-c", "--collect", action="store_true", help="Collect subscribed MQTT topics into current TSDB files")
     parser.add_argument("--topics", action="append", default=[], help="MQTT subscription topic filter (repeatable)")
     parser.add_argument("--dump", help="Dump a TimeSeriesDB file in human-readable format")
+    parser.add_argument("--dump-bytes", metavar="TSDB_FILE", help="Dump a TSDB file byte-by-byte with decoded semantics")
     parser.add_argument("--stat-tsdb", metavar="TSDB_FILE", help="Print byte statistics for a TimeSeriesDB file")
     parser.add_argument("--downsample", metavar="DATA_FILE", help="Read data_* or dsda_* TSDB file and create all coarser dsda_* variants up to 1h")
     parser.add_argument("--generate-demo-db", type=int, metavar="DAYS", help="Generate demo TSDB files for DAYS days")
@@ -1746,6 +1748,14 @@ def main() -> int:
             print(f"Failed to read DB file {dump_path!r}: {exc}")
             return 2
         db.dump()
+        return 0
+    if args.dump_bytes:
+        dump_path = resolve_tsdb_path(args.dump_bytes)
+        try:
+            dump_timeseries_db_bytes(dump_path, out=sys.stdout)
+        except Exception as exc:
+            print(f"Failed to dump bytes for DB file {dump_path!r}: {exc}")
+            return 2
         return 0
     if args.stat_tsdb:
         stat_path = resolve_tsdb_path(args.stat_tsdb)
@@ -1845,7 +1855,7 @@ def main() -> int:
             http_config=default_http,
         )
 
-    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump, --stat-tsdb, --downsample, --generate-demo-db, or --compress.")
+    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump, --dump-bytes, --stat-tsdb, --downsample, --generate-demo-db, or --compress.")
     return 2
 
 

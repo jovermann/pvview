@@ -685,6 +685,373 @@ def _scan_format_value_size(data: bytes, offset: int, format_id: int) -> Tuple[i
     return offset - start, offset
 
 
+def _dump_bytes_chunk(out: TextIO, chunk: bytes, text: str) -> None:
+    if not chunk:
+        return
+    first = True
+    for i in range(0, len(chunk), 8):
+        part = chunk[i:i + 8]
+        hex_col = " ".join(f"{b:02x}" for b in part)
+        right = text if first else ""
+        out.write(f"{hex_col:<23}  {right}\n")
+        first = False
+
+
+def _dump_bytes_value_text(value: Any) -> str:
+    if isinstance(value, str):
+        return repr(value)
+    if isinstance(value, float):
+        return _format_float_plain(value, decimals=12)
+    return repr(value)
+
+
+def _ascii_bytes_text(data: bytes) -> str:
+    chars: List[str] = []
+    for b in data:
+        if 32 <= b <= 126:
+            chars.append(chr(b))
+        else:
+            chars.append(f"\\x{b:02x}")
+    return "".join(chars)
+
+
+def _format_float_plain(value: float, decimals: int = 6) -> str:
+    s = f"{float(value):.{max(0, int(decimals))}f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    if "." not in s:
+        s = s + ".0"
+    return s
+
+
+def _format_float_fixed(value: float, decimals: int) -> str:
+    return f"{float(value):.{max(0, int(decimals))}f}"
+
+
+def _describe_numeric_payload(raw_value_bytes: bytes, format_id: int, decoded_value: Any) -> str:
+    if format_id == FORMAT_FLOAT:
+        bits = int.from_bytes(raw_value_bytes, "little")
+        return f"type=float32le bits=0x{bits:08x} value={_format_float_plain(float(decoded_value), 12)}"
+    if format_id in (
+        FORMAT_DOUBLE,
+        FORMAT_DOUBLE_DEC1,
+        FORMAT_DOUBLE_DEC2,
+        FORMAT_DOUBLE_DEC3,
+        FORMAT_DOUBLE_DEC4,
+        FORMAT_DOUBLE_DEC5,
+        FORMAT_DOUBLE_DEC6PLUS,
+    ):
+        bits = int.from_bytes(raw_value_bytes, "little")
+        decimals = decimal_places_from_format_id(format_id)
+        return f"type=float64le bits=0x{bits:016x} value={_format_float_fixed(float(decoded_value), decimals)}"
+    shape = _numeric_format_shape(format_id)
+    if shape is not None:
+        byte_count, signed, scale = shape
+        raw_int, _ = _read_scalar(raw_value_bytes, 0, byte_count, signed)
+        signed_name = "i" if signed else "u"
+        return (
+            f"type={signed_name}{byte_count * 8}le(scale=/{scale}) "
+            f"raw={raw_int} value={_format_float_plain(float(decoded_value), 12)}"
+        )
+    return f"type=unknown_numeric fmt=0x{format_id:02x} value={_dump_bytes_value_text(decoded_value)}"
+
+
+def _describe_value_payload(raw_payload: bytes, format_id: int, decoded_value: Any) -> str:
+    if is_string_format_id(format_id):
+        len_size = {
+            FORMAT_STRING_U8: 1,
+            FORMAT_STRING_U16: 2,
+            FORMAT_STRING_U32: 4,
+            FORMAT_STRING_U64: 8,
+        }[format_id]
+        text_len = int.from_bytes(raw_payload[:len_size], "little")
+        return f"type=utf8(len=u{len_size * 8}le={text_len}) value={_dump_bytes_value_text(decoded_value)}"
+    if is_numeric_format_id(format_id):
+        return _describe_numeric_payload(raw_payload, format_id, decoded_value)
+    return f"type=fmt0x{format_id:02x} value={_dump_bytes_value_text(decoded_value)}"
+
+
+def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
+    stream = out if out is not None else sys.stdout
+    with open(path, "rb") as f:
+        raw = f.read()
+
+    channel_defs: Dict[int, Tuple[int, str]] = {}
+    current_ts: Optional[int] = None
+    ds_bucket_ms: Optional[int] = None
+    offset = 0
+
+    try:
+        if len(raw) >= 8:
+            _dump_bytes_chunk(stream, raw[0:8], f"tag ascii='{_ascii_bytes_text(raw[0:8])}'")
+            offset = 8
+        else:
+            _dump_bytes_chunk(stream, raw, "truncated tag")
+            return
+
+        if len(raw) >= 12:
+            version = int.from_bytes(raw[8:12], "little")
+            _dump_bytes_chunk(stream, raw[8:12], f"version u32le={version}")
+            offset = 12
+        else:
+            _dump_bytes_chunk(stream, raw[offset:], "truncated version")
+            return
+
+        while offset < len(raw):
+            entry_start = offset
+            entry_type = raw[offset]
+            offset += 1
+
+            if entry_type <= 0xEF:
+                if entry_type not in channel_defs:
+                    raise TsdbParseError(f"Undefined channel id {entry_type}")
+                format_id, series_name = channel_defs[entry_type]
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], f"value8 type ch={entry_type}")
+                if ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                    for label in ("min", "avg", "max"):
+                        value_start = offset
+                        value, offset = read_format_value(raw, offset, format_id)
+                        payload = raw[value_start:offset]
+                        _dump_bytes_chunk(
+                            stream,
+                            payload,
+                            f"{series_name} {label} { _describe_value_payload(payload, format_id, value) } "
+                            f"ts={current_ts} ds_bucket_ms={ds_bucket_ms}",
+                        )
+                else:
+                    value_start = offset
+                    value, offset = read_format_value(raw, offset, format_id)
+                    payload = raw[value_start:offset]
+                    _dump_bytes_chunk(
+                        stream,
+                        payload,
+                        f"{series_name} { _describe_value_payload(payload, format_id, value) } ts={current_ts}",
+                    )
+                continue
+
+            if entry_type == ENTRY_TYPE_VALUE_16:
+                _ensure_available(raw, offset, 2, "16-bit channel id")
+                channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+                id_start = offset
+                offset += 2
+                if channel_id not in channel_defs:
+                    raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
+                format_id, series_name = channel_defs[channel_id]
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "value16 type")
+                _dump_bytes_chunk(stream, raw[id_start:id_start + 2], f"value16 channel=u16le {channel_id}")
+                if ds_bucket_ms is not None and is_numeric_format_id(format_id):
+                    for label in ("min", "avg", "max"):
+                        value_start = offset
+                        value, offset = read_format_value(raw, offset, format_id)
+                        payload = raw[value_start:offset]
+                        _dump_bytes_chunk(
+                            stream,
+                            payload,
+                            f"{series_name} {label} { _describe_value_payload(payload, format_id, value) } "
+                            f"ts={current_ts} ds_bucket_ms={ds_bucket_ms}",
+                        )
+                else:
+                    value_start = offset
+                    value, offset = read_format_value(raw, offset, format_id)
+                    payload = raw[value_start:offset]
+                    _dump_bytes_chunk(
+                        stream,
+                        payload,
+                        f"{series_name} { _describe_value_payload(payload, format_id, value) } ts={current_ts}",
+                    )
+                continue
+
+            if entry_type == ENTRY_TYPE_TIME_ABSOLUTE:
+                _ensure_available(raw, offset, 8, "absolute timestamp")
+                ts = int.from_bytes(raw[offset:offset + 8], "little")
+                current_ts = ts
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time abs type")
+                _dump_bytes_chunk(stream, raw[offset:offset + 8], f"ts_abs u64le={ts} ({ts / 1000.0:.3f}s)")
+                offset += 8
+                continue
+
+            if entry_type == ENTRY_TYPE_TIME_REL_8:
+                _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
+                delta = raw[offset]
+                current_ts = (current_ts or 0) + delta
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel8 type")
+                _dump_bytes_chunk(stream, raw[offset:offset + 1], f"delta u8=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                offset += 1
+                continue
+
+            if entry_type == ENTRY_TYPE_TIME_REL_16:
+                _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
+                delta = int.from_bytes(raw[offset:offset + 2], "little")
+                current_ts = (current_ts or 0) + delta
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel16 type")
+                _dump_bytes_chunk(stream, raw[offset:offset + 2], f"delta u16le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                offset += 2
+                continue
+
+            if entry_type == ENTRY_TYPE_TIME_REL_24:
+                delta, next_off = _read_u24(raw, offset)
+                current_ts = (current_ts or 0) + delta
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel24 type")
+                _dump_bytes_chunk(stream, raw[offset:next_off], f"delta u24le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                offset = next_off
+                continue
+
+            if entry_type == ENTRY_TYPE_TIME_REL_32:
+                _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
+                delta = int.from_bytes(raw[offset:offset + 4], "little")
+                current_ts = (current_ts or 0) + delta
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel32 type")
+                _dump_bytes_chunk(stream, raw[offset:offset + 4], f"delta u32le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                offset += 4
+                continue
+
+            if entry_type == ENTRY_TYPE_CHANNEL_DEF_8:
+                _ensure_available(raw, offset, 3, "channel definition (8-bit)")
+                channel_id = raw[offset]
+                format_id = raw[offset + 1]
+                name_len = raw[offset + 2]
+                hdr_start = offset
+                offset += 3
+                _ensure_available(raw, offset, name_len, "channel name")
+                name_bytes = raw[offset:offset + name_len]
+                series_name = name_bytes.decode("utf-8", errors="replace")
+                channel_defs[channel_id] = (format_id, series_name)
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "channel_def8 type")
+                _dump_bytes_chunk(
+                    stream,
+                    raw[hdr_start:hdr_start + 3],
+                    f"channel u8={channel_id} format u8=0x{format_id:02x} name_len u8={name_len}",
+                )
+                _dump_bytes_chunk(stream, name_bytes, f"series utf8='{series_name}'")
+                offset += name_len
+                continue
+
+            if entry_type == ENTRY_TYPE_CHANNEL_DEF_16:
+                _ensure_available(raw, offset, 5, "channel definition (16-bit)")
+                channel_id = int.from_bytes(raw[offset:offset + 2], "little")
+                format_id = raw[offset + 2]
+                name_len = int.from_bytes(raw[offset + 3:offset + 5], "little")
+                hdr_start = offset
+                offset += 5
+                _ensure_available(raw, offset, name_len, "channel name")
+                name_bytes = raw[offset:offset + name_len]
+                series_name = name_bytes.decode("utf-8", errors="replace")
+                channel_defs[channel_id] = (format_id, series_name)
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "channel_def16 type")
+                _dump_bytes_chunk(
+                    stream,
+                    raw[hdr_start:hdr_start + 5],
+                    f"channel u16le={channel_id} format u8=0x{format_id:02x} name_len u16le={name_len}",
+                )
+                _dump_bytes_chunk(stream, name_bytes, f"series utf8='{series_name}'")
+                offset += name_len
+                continue
+
+            if entry_type == ENTRY_TYPE_META_INFO:
+                _ensure_available(raw, offset, 3, "meta info header")
+                key_len = raw[offset]
+                value_len = int.from_bytes(raw[offset + 1:offset + 3], "little")
+                hdr_start = offset
+                offset += 3
+                _ensure_available(raw, offset, key_len + value_len, "meta info payload")
+                key_bytes = raw[offset:offset + key_len]
+                key = key_bytes.decode("utf-8", errors="replace")
+                offset += key_len
+                val_bytes = raw[offset:offset + value_len]
+                value = val_bytes.decode("utf-8", errors="replace")
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "meta type")
+                _dump_bytes_chunk(stream, raw[hdr_start:hdr_start + 3], f"meta key_len u8={key_len} value_len u16le={value_len}")
+                _dump_bytes_chunk(stream, key_bytes, f"meta key utf8='{key}'")
+                _dump_bytes_chunk(stream, val_bytes, f"meta value utf8='{value}'")
+                if key == "dsBucketMs":
+                    try:
+                        ds_bucket_ms = int(value.strip())
+                    except Exception:
+                        pass
+                offset += value_len
+                continue
+
+            if entry_type == ENTRY_TYPE_SERIES_ARRAY:
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "series_array type")
+                size_start = offset
+                entry_size, offset = _read_uleb128(raw, offset)
+                entry_end = entry_start + entry_size
+                if entry_end > len(raw):
+                    raise TsdbParseError("Series array entry exceeds file size")
+                _dump_bytes_chunk(stream, raw[size_start:offset], f"entry_size uleb128={entry_size}")
+
+                name_len_start = offset
+                name_len, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[name_len_start:offset], f"name_len uleb128={name_len}")
+                _ensure_available(raw, offset, name_len, "series array name")
+                series_name_bytes = raw[offset:offset + name_len]
+                series_name = series_name_bytes.decode("utf-8", errors="replace")
+                _dump_bytes_chunk(stream, series_name_bytes, f"series utf8='{series_name}'")
+                offset += name_len
+
+                num_el_start = offset
+                num_elements, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[num_el_start:offset], f"{series_name} num_elements uleb128={num_elements}")
+                _ensure_available(raw, offset, 2, "series array header")
+                n_decimals = raw[offset]
+                elem_size = raw[offset + 1]
+                _dump_bytes_chunk(stream, raw[offset:offset + 2], f"{series_name} decimals u8={n_decimals} elem_size u8={elem_size}")
+                offset += 2
+                scale = float(10 ** int(n_decimals))
+
+                void_start = offset
+                void_element, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[void_start:offset], f"{series_name} void_element uleb128={void_element}")
+
+                chunk_index = 0
+                element_index = 0
+                last_value = 0
+                comp_names = ["value"] if int(elem_size) == 1 else ["min", "avg", "max"]
+                while offset < entry_end:
+                    chunk_start = offset
+                    chunk_len, offset = _read_zigzag_leb128(raw, offset)
+                    chunk_kind = "data_chunk" if chunk_len > 0 else "repeat_chunk" if chunk_len < 0 else "invalid_chunk"
+                    _dump_bytes_chunk(
+                        stream,
+                        raw[chunk_start:offset],
+                        f"{series_name} c{chunk_index} {chunk_kind} len zigzag={chunk_len:>8d}",
+                    )
+                    if chunk_len < 0:
+                        element_index += -chunk_len
+                    if chunk_len > 0:
+                        for _ in range(chunk_len):
+                            for comp_i in range(max(1, int(elem_size))):
+                                d_start = offset
+                                delta_int, offset = _read_zigzag_leb128(raw, offset)
+                                last_value += delta_int
+                                delta_value = float(delta_int) / scale
+                                actual_value = float(last_value) / scale
+                                comp = comp_names[comp_i] if comp_i < len(comp_names) else f"c{comp_i}"
+                                _dump_bytes_chunk(
+                                    stream,
+                                    raw[d_start:offset],
+                                    f"{series_name} c{chunk_index} e{element_index:>4d} {comp} "
+                                    f"zigzag={delta_int:>8d} delta={_format_float_fixed(delta_value, int(n_decimals)):>9} "
+                                    f"value={_format_float_fixed(actual_value, int(n_decimals)):>12}",
+                                )
+                            element_index += 1
+                    chunk_index += 1
+                if offset != entry_end:
+                    raise TsdbParseError("Series array decode did not end at entry boundary")
+                continue
+
+            if entry_type == ENTRY_TYPE_EOF:
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "eof")
+                continue
+
+            _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], f"unknown entry type 0x{entry_type:02x}")
+    except TsdbParseError as exc:
+        if offset < len(raw):
+            _dump_bytes_chunk(stream, raw[offset:], f"unparsed tail ({exc})")
+        else:
+            stream.write(f"{'':23}  parse error: {exc}\n")
+
+
 def stat_timeseries_db(path: str) -> TsdbFileStats:
     with open(path, "rb") as f:
         raw = f.read()

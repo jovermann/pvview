@@ -2,6 +2,7 @@ import datetime
 import pytest
 import sys
 import subprocess
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -370,6 +371,66 @@ def test_cli_dump_db_file_works_with_generated_demo(tmp_path):
     assert result.stderr == ""
     assert "TimeSeriesDB dump" in result.stdout
     assert "solar/ac/power" in result.stdout
+
+
+def test_cli_dump_bytes_covers_all_bytes_for_raw_file(tmp_path):
+    path = tmp_path / "bytes_raw.tsdb"
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.5, timestamp_ms=1000)
+    writer.addStringValue("state", "ok", timestamp_ms=1100)
+    writer.close(mark_complete=True)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump-bytes", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "tag" in result.stdout
+    assert "pv.power" in result.stdout
+    assert "state" in result.stdout
+
+    hex_bytes = []
+    for line in result.stdout.splitlines():
+        left = line[:23]
+        hex_bytes.extend(re.findall(r"\b[0-9a-f]{2}\b", left))
+    dumped = bytes.fromhex(" ".join(hex_bytes))
+    assert dumped == path.read_bytes()
+
+
+def test_cli_dump_bytes_decodes_series_array_file(tmp_path):
+    day = datetime.date(2026, 2, 20)
+    path = tmp_path / "dsda_2026-02-20.1h.tsdb"
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    write_series_array_timeseries_db(
+        str(path),
+        day,
+        3_600_000,
+        ["solar/ac/power"],
+        {"solar/ac/power": 1},
+        {
+            "solar/ac/power": [
+                (day_start_ms + 30 * 60 * 1000, {"min": 1.0, "avg": 2.5, "max": 4.0}),
+            ]
+        },
+        elem_size=3,
+    )
+
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump-bytes", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "series_array type" in result.stdout
+    assert "series utf8='solar/ac/power'" in result.stdout
+    assert "elem_size u8=3" in result.stdout
 
 
 def test_cli_generate_demo_db_creates_files(tmp_path):
