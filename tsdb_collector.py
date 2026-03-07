@@ -1686,7 +1686,7 @@ def main() -> int:
     parser.add_argument("--open-dtu-summary", action="store_true", help="Print OpenDTU inverter summary and totals (expects 'solar' root topic)")
     parser.add_argument("-c", "--collect", action="store_true", help="Collect subscribed MQTT topics into current TSDB files")
     parser.add_argument("--topics", action="append", default=[], help="MQTT subscription topic filter (repeatable)")
-    parser.add_argument("--dump-tsdb", help="Dump a TimeSeriesDB file in human-readable format")
+    parser.add_argument("--dump", help="Dump a TimeSeriesDB file in human-readable format")
     parser.add_argument("--stat-tsdb", metavar="TSDB_FILE", help="Print byte statistics for a TimeSeriesDB file")
     parser.add_argument("--downsample", metavar="DATA_FILE", help="Read data_* or dsda_* TSDB file and create all coarser dsda_* variants up to 1h")
     parser.add_argument("--generate-demo-db", type=int, metavar="DAYS", help="Generate demo TSDB files for DAYS days")
@@ -1735,8 +1735,8 @@ def main() -> int:
             return expanded
         return os.path.join(data_dir, expanded)
 
-    if args.dump_tsdb:
-        dump_path = resolve_tsdb_path(args.dump_tsdb)
+    if args.dump:
+        dump_path = resolve_tsdb_path(args.dump)
         try:
             if args.verbose:
                 read_timeseries_db(dump_path, dump_out=sys.stdout, verbose=args.verbose)
@@ -1845,7 +1845,7 @@ def main() -> int:
             http_config=default_http,
         )
 
-    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump-tsdb, --stat-tsdb, --downsample, --generate-demo-db, or --compress.")
+    print("No action specified. Use --ui, --list-topics, --open-dtu-summary, --collect, --dump, --stat-tsdb, --downsample, --generate-demo-db, or --compress.")
     return 2
 
 

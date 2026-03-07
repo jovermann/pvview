@@ -361,7 +361,7 @@ def test_cli_dump_db_file_works_with_generated_demo(tmp_path):
     db_path = files[0]
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump-tsdb", db_path],
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump", db_path],
         capture_output=True,
         text=True,
         check=False,
