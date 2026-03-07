@@ -2,6 +2,8 @@
   const FRONTEND_API_VERSION = 20;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const NEW_EMPTY_DASHBOARD_VALUE = '__new_empty_dashboard__';
+  const AUTO_DETECT_LABEL = 'Auto Detect';
+  const DASHBOARD_SEPARATOR_TEXT = '--------------------';
   const grid = GridStack.init({
     cellHeight: 102,
     margin: 2,
@@ -80,6 +82,7 @@
   const consoleLines = [];
   const maxConsoleLines = 3000;
   const savedDashboardNames = new Set();
+  let dashboardMenuItems = [];
   const inverterNames = new Map();
   const inverterNameRequests = new Map();
   const axisUnitsBySuffix = new Map([
@@ -127,6 +130,7 @@
   let showRefreshDurationDebug = false;
   let heatmapResizeTimer = null;
   let saveDashboardDialogMode = 'save';
+  let dashboardSeparatorCounter = 1;
 
   function htmlEscape(value) {
     return String(value)
@@ -496,6 +500,11 @@
   function currentSettingsPayload() {
     return {
       dashboard: String(currentDashboardName || 'Default'),
+      dashboardMenu: dashboardMenuItems.map((item) => (
+        item && item.type === 'separator'
+          ? { type: 'separator', id: String(item.id || '') }
+          : { type: 'dashboard', name: String(item && item.name ? item.name : '') }
+      )),
       visibilityRefreshEnabled: !!visibilityRefreshEnabled,
       granularity: normalizeChartGranularity(globalGranularity),
       showMinPointsDebug: !!showMinPointsDebug,
@@ -544,6 +553,64 @@
       console.error(err);
     }
     return {};
+  }
+
+  function _nextDashboardSeparatorId() {
+    const id = `sep-${dashboardSeparatorCounter}`;
+    dashboardSeparatorCounter += 1;
+    return id;
+  }
+
+  function _normalizeDashboardMenuFromSettings(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      if (String(item.type || '') === 'separator') {
+        out.push({ type: 'separator', id: String(item.id || _nextDashboardSeparatorId()) });
+        continue;
+      }
+      const name = String(item.name || '').trim();
+      if (name) out.push({ type: 'dashboard', name });
+    }
+    return out;
+  }
+
+  function reconcileDashboardMenuItems() {
+    const known = new Set(Array.from(savedDashboardNames));
+    const seen = new Set();
+    const next = [];
+    for (const item of dashboardMenuItems) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.type === 'separator') {
+        next.push({ type: 'separator', id: String(item.id || _nextDashboardSeparatorId()) });
+        continue;
+      }
+      const name = String(item.name || '').trim();
+      if (!name || name === 'Default' || !known.has(name) || seen.has(name)) continue;
+      seen.add(name);
+      next.push({ type: 'dashboard', name });
+    }
+    for (const name of Array.from(savedDashboardNames).sort()) {
+      if (name === 'Default' || seen.has(name)) continue;
+      next.push({ type: 'dashboard', name });
+      seen.add(name);
+    }
+    dashboardMenuItems = next;
+  }
+
+  function pruneDashboardSeparatorsForSave() {
+    const compact = [];
+    for (const item of dashboardMenuItems) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.type === 'separator') {
+        if (compact.length === 0) continue;
+        if (compact[compact.length - 1].type === 'separator') continue;
+      }
+      compact.push(item);
+    }
+    while (compact.length > 0 && compact[compact.length - 1].type === 'separator') compact.pop();
+    dashboardMenuItems = compact;
   }
 
   function commonSeriesPrefix(seriesNames) {
@@ -949,38 +1016,42 @@
   }
 
   function updateDashboardDatalist() {
-    const names = ['Default', ...Array.from(savedDashboardNames).sort()];
+    reconcileDashboardMenuItems();
     const current = dashboardSelect.value || currentDashboardName || 'Default';
+    let unsavedCurrentOpt = '';
     if (
       currentDashboardName
       && currentDashboardName !== 'Default'
-      && currentDashboardName !== SAVE_NEW_DASHBOARD_VALUE
-      && currentDashboardName !== NEW_EMPTY_DASHBOARD_VALUE
-      && !names.includes(currentDashboardName)
+      && !savedDashboardNames.has(currentDashboardName)
     ) {
-      names.push(currentDashboardName);
+      unsavedCurrentOpt = `<option value="${htmlEscape(currentDashboardName)}">${htmlEscape(currentDashboardName)}</option>`;
     }
+    const menuOpts = dashboardMenuItems.map((item, idx) => {
+      if (item.type === 'separator') {
+        return `<option value="__sep_${idx}" disabled>${DASHBOARD_SEPARATOR_TEXT}</option>`;
+      }
+      return `<option value="${htmlEscape(String(item.name || ''))}">${htmlEscape(String(item.name || ''))}</option>`;
+    });
     dashboardSelect.innerHTML = [
-      ...names.map((name) => `<option value="${htmlEscape(name)}">${htmlEscape(name)}</option>`),
+      ...menuOpts,
+      unsavedCurrentOpt,
+      '<option value="__sep_bottom" disabled>--------------------</option>',
+      `<option value="Default">${AUTO_DETECT_LABEL}</option>`,
       `<option value="${SAVE_NEW_DASHBOARD_VALUE}">Save dashboard as ...</option>`,
       `<option value="${NEW_EMPTY_DASHBOARD_VALUE}">New empty dashboard ...</option>`,
-    ].join('');
-    if (current === SAVE_NEW_DASHBOARD_VALUE || current === NEW_EMPTY_DASHBOARD_VALUE || names.includes(current)) {
+    ].filter(Boolean).join('');
+    const menuNames = new Set(dashboardMenuItems.filter((x) => x.type === 'dashboard').map((x) => String(x.name)));
+    if (current === SAVE_NEW_DASHBOARD_VALUE || current === NEW_EMPTY_DASHBOARD_VALUE || current === 'Default' || menuNames.has(current) || current === currentDashboardName) {
       dashboardSelect.value = current;
-    } else if (names.includes(currentDashboardName)) {
+    } else if (menuNames.has(currentDashboardName) || currentDashboardName === 'Default') {
       dashboardSelect.value = currentDashboardName;
     } else {
-      dashboardSelect.value = 'Default';
+      dashboardSelect.value = currentDashboardName || 'Default';
     }
   }
 
   function nextEmptyDashboardName() {
     const used = new Set(['Default', ...Array.from(savedDashboardNames)]);
-    for (const cfg of charts.values()) {
-      if (cfg && typeof cfg.label === 'string') {
-        break;
-      }
-    }
     if (currentDashboardName) used.add(String(currentDashboardName));
     let n = 1;
     while (used.has(`Dashboard ${n}`)) n += 1;
@@ -1003,6 +1074,7 @@
       console.error(err);
       savedDashboardNames.clear();
     }
+    reconcileDashboardMenuItems();
     updateDashboardDatalist();
   }
 
@@ -2303,13 +2375,16 @@
   }
 
   async function saveCurrentDashboard(nameOverride = null) {
+    pruneDashboardSeparatorsForSave();
+    updateDashboardDatalist();
+    renderDashboardManageList();
     const name = String(nameOverride || currentDashboardName || '').trim();
     if (!name) {
       alert('Please enter a dashboard name.');
       return;
     }
     if (name === 'Default') {
-      alert("The name 'Default' is reserved. Please choose another name.");
+      alert(`The name '${AUTO_DETECT_LABEL}' is reserved. Please choose another name.`);
       return;
     }
     appendConsoleLine(`dashboard save start name="${name}"`);
@@ -2335,21 +2410,38 @@
   }
 
   function renderDashboardManageList() {
-    const names = Array.from(savedDashboardNames).sort();
-    if (names.length === 0) {
-      dashboardManageList.innerHTML = '<div class="series-item"><span>No saved dashboards</span></div>';
+    reconcileDashboardMenuItems();
+    if (dashboardMenuItems.length === 0) {
+      dashboardManageList.innerHTML = '<div class="series-item"><span>No dashboard menu entries</span></div>';
       return;
     }
-    dashboardManageList.innerHTML = names.map((name) => `
-      <div class="series-item">
-        <span>${htmlEscape(name)}</span>
-        <span style="margin-left:auto;display:inline-flex;gap:6px">
-          <button type="button" class="icon-btn" data-action="dashboard-load" data-name="${htmlEscape(name)}">Load</button>
-          <button type="button" class="icon-btn" data-action="dashboard-rename" data-name="${htmlEscape(name)}">Rename</button>
-          <button type="button" class="icon-btn danger" data-action="dashboard-delete" data-name="${htmlEscape(name)}" title="Delete dashboard">🗑️</button>
-        </span>
-      </div>
-    `).join('');
+    dashboardManageList.innerHTML = dashboardMenuItems.map((item, idx) => {
+      if (item.type === 'separator') {
+        return `
+          <div class="series-item">
+            <span>${DASHBOARD_SEPARATOR_TEXT}</span>
+            <span style="margin-left:auto;display:inline-flex;gap:6px">
+              <button type="button" class="icon-btn" data-action="dashboard-item-up" data-index="${idx}" ${idx === 0 ? 'disabled' : ''}>↑</button>
+              <button type="button" class="icon-btn" data-action="dashboard-item-down" data-index="${idx}" ${idx === dashboardMenuItems.length - 1 ? 'disabled' : ''}>↓</button>
+              <button type="button" class="icon-btn danger" data-action="dashboard-separator-delete" data-index="${idx}" title="Delete separator">🗑️</button>
+            </span>
+          </div>
+        `;
+      }
+      const name = String(item.name || '');
+      return `
+        <div class="series-item">
+          <span>${htmlEscape(name)}</span>
+          <span style="margin-left:auto;display:inline-flex;gap:6px">
+            <button type="button" class="icon-btn" data-action="dashboard-load" data-name="${htmlEscape(name)}">Load</button>
+            <button type="button" class="icon-btn" data-action="dashboard-rename" data-name="${htmlEscape(name)}">Rename</button>
+            <button type="button" class="icon-btn" data-action="dashboard-item-up" data-index="${idx}" ${idx === 0 ? 'disabled' : ''}>↑</button>
+            <button type="button" class="icon-btn" data-action="dashboard-item-down" data-index="${idx}" ${idx === dashboardMenuItems.length - 1 ? 'disabled' : ''}>↓</button>
+            <button type="button" class="icon-btn danger" data-action="dashboard-delete" data-name="${htmlEscape(name)}" title="Delete dashboard">🗑️</button>
+          </span>
+        </div>
+      `;
+    }).join('');
   }
 
   async function openDashboardManageDialog() {
@@ -3031,9 +3123,34 @@
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
     const action = target.dataset.action;
-    const name = target.dataset.name;
-    if (!action || !name) return;
+    if (!action) return;
     try {
+      if (action === 'dashboard-item-up' || action === 'dashboard-item-down') {
+        const idx = Number(target.dataset.index);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= dashboardMenuItems.length) return;
+        const other = idx + (action === 'dashboard-item-up' ? -1 : 1);
+        if (other < 0 || other >= dashboardMenuItems.length) return;
+        const tmp = dashboardMenuItems[idx];
+        dashboardMenuItems[idx] = dashboardMenuItems[other];
+        dashboardMenuItems[other] = tmp;
+        reconcileDashboardMenuItems();
+        renderDashboardManageList();
+        updateDashboardDatalist();
+        queueSaveSettings();
+        return;
+      }
+      if (action === 'dashboard-separator-delete') {
+        const idx = Number(target.dataset.index);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= dashboardMenuItems.length) return;
+        dashboardMenuItems.splice(idx, 1);
+        reconcileDashboardMenuItems();
+        renderDashboardManageList();
+        updateDashboardDatalist();
+        queueSaveSettings();
+        return;
+      }
+      const name = target.dataset.name;
+      if (!name) return;
       if (action === 'dashboard-load') {
         appendConsoleLine(`dashboard load start name="${name}"`);
         dashboardSelect.value = name;
@@ -3055,6 +3172,12 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ newName: trimmed }),
         });
+        for (let i = 0; i < dashboardMenuItems.length; i += 1) {
+          const item = dashboardMenuItems[i];
+          if (item && item.type === 'dashboard' && String(item.name) === name) {
+            dashboardMenuItems[i] = { type: 'dashboard', name: trimmed };
+          }
+        }
         await refreshDashboardNames();
         renderDashboardManageList();
         if (currentDashboardName === name) {
@@ -3069,6 +3192,7 @@
         if (!confirm(`Delete dashboard "${name}"?`)) return;
         appendConsoleLine(`dashboard delete start name="${name}"`);
         await apiJson(`/dashboards/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        dashboardMenuItems = dashboardMenuItems.filter((item) => !(item && item.type === 'dashboard' && String(item.name) === name));
         await refreshDashboardNames();
         renderDashboardManageList();
         if (currentDashboardName === name) {
@@ -3089,6 +3213,14 @@
     appendConsoleLine(`clear dashboard requested panels=${charts.size}`);
     clearAllCharts();
     virtualSeriesDialog.close();
+  });
+
+  document.getElementById('addDashboardSeparator').addEventListener('click', () => {
+    dashboardMenuItems.push({ type: 'separator', id: _nextDashboardSeparatorId() });
+    reconcileDashboardMenuItems();
+    renderDashboardManageList();
+    updateDashboardDatalist();
+    queueSaveSettings();
   });
 
   document.getElementById('saveDashboardForm').addEventListener('submit', (e) => {
@@ -3384,6 +3516,10 @@
   dashboardSelect.addEventListener('change', () => {
     const name = String(dashboardSelect.value || '').trim();
     if (!name) return;
+    if (name.startsWith('__sep_')) {
+      dashboardSelect.value = currentDashboardName || 'Default';
+      return;
+    }
     if (name === SAVE_NEW_DASHBOARD_VALUE) {
       dashboardSelect.value = currentDashboardName;
       openSaveNewDashboardDialog('');
@@ -3429,6 +3565,8 @@
     configureAutoRefresh();
     await refreshDashboardNames();
     const settings = await loadSettings();
+    dashboardMenuItems = _normalizeDashboardMenuFromSettings(settings && settings.dashboardMenu);
+    updateDashboardDatalist();
     const range = settings && typeof settings.range === 'object' ? settings.range : {};
     const preset = typeof range.preset === 'string' ? range.preset : '2d';
     if (preset && preset !== 'custom') {
