@@ -631,7 +631,7 @@ def generateDemoData(days: int, output_dir: str = ".", data_txt_path: Optional[s
         day = start_day + datetime.timedelta(days=day_index)
         start_dt = datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc)
         start_ms = int(start_dt.timestamp() * 1000)
-        path = os.path.join(output_dir, f"data_{day.isoformat()}.tsdb")
+        path = os.path.join(output_dir, f"demo_{day.isoformat()}.tsdb")
         produced_files.append(path)
 
         daily_yields: dict[str, float] = {name: 0.0 for name in yieldday_series}
