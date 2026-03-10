@@ -131,14 +131,9 @@ Series Array Entry can only represent numeric values. Strings are discarded upon
 
 The number of decimals of the input data is preserved, except that values with > 3 decimals get rounded to 3 decimals.
 
-Files containing Series Array Entries (after the header) only contain Series Array Entries and no MetaInfoEntries, no TimeEntries, no ValueEntries, no ChannelDefinitionEntries and no End of File marker.
+Files containing Series Array Entries (after the header) only contain Series Array Entries and no MetaInfoEntries, no TimeEntries, no ValueEntries and no ChannelDefinitionEntries.
 
 An encoder should encode sequences of void values as void chunks if the void sequence is two or more elements long and as void value if the void chunk is shorter.
-
-End of File Marker
-------------------
-uint8_t type = 0xfe; // End of file marker. The presence of this byte marks the file as complete. No more data will be appended.
-                     // It is ok if this is missing. This indicates to a reader that a writer may still append data to this file at any time. This is usually the case for the current file for the current day.
 
 Downsampling
 ------------
@@ -218,4 +213,3 @@ Constraints
 - A channel id X must be defined before any values for channel X occur in the sequence of entries.
 - The initial timestamp must be set before the first value in the sequence of entries.
 - A timestamp applies to all following values until a new timestamp is set.
-

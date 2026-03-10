@@ -677,7 +677,7 @@ def generateDemoData(days: int, output_dir: str = ".", data_txt_path: Optional[s
                     writer.addValue(name, _quantize_numeric(current_total, series_decimals.get(name, 3)), timestamp_ms=ts)
                     cumulative_yieldtotal[name] = current_total + (power_w * step_hours) / 1000.0
 
-            writer.close(mark_complete=True)
+            writer.close()
 
     return produced_files
 

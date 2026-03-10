@@ -28,7 +28,7 @@ def test_roundtrip_double_and_string_values(tmp_path):
     writer.addStringValue("status.mode", "running", timestamp_ms=1000)
     writer.addValue("pv.power", 124.25, timestamp_ms=1500)
     writer.addStringValue("status.mode", "idle", timestamp_ms=2300)
-    writer.close(mark_complete=True)
+    writer.close()
 
     db = read_timeseries_db(str(path))
 
@@ -171,7 +171,7 @@ def test_server_past_day_downsampling_builds_all_dsda_variants(tmp_path):
     writer.addValue("pv.power", 10.0, timestamp_ms=day_start_ms + 1000)
     writer.addValue("pv.power", 12.0, timestamp_ms=day_start_ms + 2000)
     writer.addValue("pv.power", 20.0, timestamp_ms=day_start_ms + 6000)
-    writer.close(mark_complete=True)
+    writer.close()
     _downsample_file(str(path))
 
     files, points = _get_or_build_downsampled_day_points(str(tmp_path), day, 5000, "pv.power", day_start_ms, day_start_ms + 10000)
@@ -195,7 +195,7 @@ def test_virtual_series_uses_bucketed_source_data(tmp_path):
     writer.addValue("b", 2.0, timestamp_ms=day_start_ms + 3200)
     writer.addValue("b", 3.0, timestamp_ms=day_start_ms + 6200)
     writer.addValue("b", 4.0, timestamp_ms=day_start_ms + 8200)
-    writer.close(mark_complete=True)
+    writer.close()
     _downsample_file(str(path))
 
     save_virtual_series_config(str(tmp_path), [VirtualSeriesDef(name="sum", left="a", op="+", right="b")], [], 10000)
@@ -226,13 +226,13 @@ def test_virtual_yesterday_uses_bucketed_source_data(tmp_path):
     writer1 = create_timeseries_db_writer(str(path1))
     writer1.addValue("yieldtotal", 100.0, timestamp_ms=start1 + 1000)
     writer1.addValue("yieldtotal", 110.0, timestamp_ms=start1 + 3000)
-    writer1.close(mark_complete=True)
+    writer1.close()
     _downsample_file(str(path1))
 
     writer2 = create_timeseries_db_writer(str(path2))
     writer2.addValue("yieldtotal", 125.0, timestamp_ms=start2 + 1000)
     writer2.addValue("yieldtotal", 135.0, timestamp_ms=start2 + 3000)
-    writer2.close(mark_complete=True)
+    writer2.close()
     _downsample_file(str(path2))
 
     save_virtual_series_config(str(tmp_path), [VirtualSeriesDef(name="yday", left="yieldtotal", op="yesterday", right="")], [], 10000)
@@ -284,7 +284,7 @@ def test_compress_chooses_uint16_scaled_by_10(tmp_path):
     writer.addValue("pv.power", 101.9, timestamp_ms=1000)
     writer.addValue("pv.power", 0.0, timestamp_ms=1100)
     writer.addValue("pv.power", 210.0, timestamp_ms=1200)
-    writer.close(mark_complete=True)
+    writer.close()
 
     selected = compress_timeseries_db_file(str(in_path), str(out_path))
     assert selected["pv.power"] == 0xA1
@@ -304,7 +304,7 @@ def test_compress_chooses_small_string_format(tmp_path):
     writer = create_timeseries_db_writer(str(in_path))
     writer.addStringValue("state", "on", timestamp_ms=1000)
     writer.addStringValue("state", "off", timestamp_ms=2000)
-    writer.close(mark_complete=True)
+    writer.close()
 
     selected = compress_timeseries_db_file(str(in_path), str(out_path))
     assert selected["state"] == 0x08
@@ -319,7 +319,7 @@ def test_dump_includes_format_and_abs_rel_timestamps(tmp_path, capsys):
     writer.addValue("pv.power", 10.5, timestamp_ms=1000)
     writer.addValue("pv.power", 11.0, timestamp_ms=1125)
     writer.addStringValue("state", "ok", timestamp_ms=900)  # forces absolute reset
-    writer.close(mark_complete=True)
+    writer.close()
 
     db = read_timeseries_db(str(path))
     db.dump()
@@ -378,7 +378,7 @@ def test_cli_dump_bytes_covers_all_bytes_for_raw_file(tmp_path):
     writer = create_timeseries_db_writer(str(path))
     writer.addValue("pv.power", 10.5, timestamp_ms=1000)
     writer.addStringValue("state", "ok", timestamp_ms=1100)
-    writer.close(mark_complete=True)
+    writer.close()
 
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -454,7 +454,7 @@ def test_cli_compress_in_place_with_verbose_stats(tmp_path):
     writer = create_timeseries_db_writer(str(db_path))
     for i in range(200):
         writer.addValue("pv.power", 100.0 + ((i % 10) / 10.0), timestamp_ms=1_700_000_000_000 + i * 1000)
-    writer.close(mark_complete=True)
+    writer.close()
 
     old_size = db_path.stat().st_size
     repo_root = Path(__file__).resolve().parents[1]
@@ -493,7 +493,7 @@ def test_tsdb_appender_appends_multiple_batches(tmp_path):
     assert db.get_series_values("b") == [(1000, "x"), (1020, "y")]
 
 
-def test_cached_incremental_parse_handles_eof_truncation(tmp_path):
+def test_cached_incremental_parse_handles_tail_truncation(tmp_path):
     path = tmp_path / "append_cached.tsdb"
     appender = TimeSeriesDbAppender(str(path))
     appender.append_events([(1000, "main/bat/soc", 50.0)])
@@ -537,7 +537,7 @@ def test_stat_timeseries_db_counts_bytes(tmp_path):
     writer.addValue("pv.power", 10.5, timestamp_ms=1000)
     writer.addValue("pv.power", 11.5, timestamp_ms=1100)
     writer.addStringValue("state", "ok", timestamp_ms=1100)
-    writer.close(mark_complete=True)
+    writer.close()
 
     stats = stat_timeseries_db(str(path))
     assert stats.total_bytes == path.stat().st_size
@@ -558,7 +558,7 @@ def test_cli_stat_tsdb_prints_tables(tmp_path):
     writer = create_timeseries_db_writer(str(path))
     writer.addValue("pv.power", 10.5, timestamp_ms=1000)
     writer.addStringValue("state", "ok", timestamp_ms=1100)
-    writer.close(mark_complete=True)
+    writer.close()
 
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -586,7 +586,7 @@ def test_cli_downsample_creates_series_array_variants(tmp_path):
     writer.addValue("pv.power", 10.0, timestamp_ms=day_start_ms + 200)
     writer.addValue("pv.power", 20.0, timestamp_ms=day_start_ms + 1200)
     writer.addValue("pv.power", 30.0, timestamp_ms=day_start_ms + 5200)
-    writer.close(mark_complete=True)
+    writer.close()
 
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(

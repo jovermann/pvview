@@ -21,7 +21,6 @@ ENTRY_TYPE_CHANNEL_DEF_8 = 0xF5
 ENTRY_TYPE_CHANNEL_DEF_16 = 0xF6
 ENTRY_TYPE_META_INFO = 0xF7
 ENTRY_TYPE_SERIES_ARRAY = 0xF8
-ENTRY_TYPE_EOF = 0xFE
 ENTRY_TYPE_VALUE_16 = 0xFF
 ENTRY_TYPE_CHANNEL_VALUE_16 = ENTRY_TYPE_VALUE_16
 
@@ -66,7 +65,6 @@ class CachedTsdbFile:
     series_events: Dict[str, List[Event]]
     meta_info: Dict[str, Any]
     ds_bucket_ms: Optional[int]
-    ended_with_eof: bool
 
 
 _TSDB_CACHE_LOCK = threading.Lock()
@@ -215,9 +213,8 @@ def _is_incomplete_parse_error(exc: TsdbParseError) -> bool:
     return str(exc).startswith("Unexpected EOF while reading")
 
 
-def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdbFile, path: str) -> Tuple[int, bool]:
+def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdbFile, path: str) -> int:
     offset = 0
-    ended_with_eof = False
     while offset < len(raw):
         entry_start = offset
         entry_type = raw[offset]
@@ -344,21 +341,15 @@ def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdb
                 offset = _parse_series_array_entry(raw, entry_start, offset, cache, path)
                 continue
 
-            if entry_type == ENTRY_TYPE_EOF:
-                ended_with_eof = True
-                break
-
             raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {base_offset + offset - 1}")
         except TsdbParseError as exc:
             if _is_incomplete_parse_error(exc):
                 offset = entry_start
                 break
-            if not raw or raw[-1] != ENTRY_TYPE_EOF:
-                offset = entry_start
-                break
-            raise
+            offset = entry_start
+            break
 
-    return offset, ended_with_eof
+    return offset
 
 
 def _build_cache_from_scratch(path: str, st: os.stat_result) -> CachedTsdbFile:
@@ -382,11 +373,9 @@ def _build_cache_from_scratch(path: str, st: os.stat_result) -> CachedTsdbFile:
         series_events={},
         meta_info={},
         ds_bucket_ms=None,
-        ended_with_eof=False,
     )
-    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw[12:], 12, cache, path)
+    consumed = _parse_tsdb_chunk_into_cache(raw[12:], 12, cache, path)
     cache.parsed_offset = 12 + consumed
-    cache.ended_with_eof = ended_with_eof
     return cache
 
 
@@ -487,15 +476,6 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
 
 def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbFile) -> CachedTsdbFile:
     parse_from = cache.parsed_offset
-    if cache.ended_with_eof and parse_from > 12:
-        # Re-parse the trailing EOF marker only if it still exists.
-        # Appenders may remove EOF before writing new data, in which case
-        # rewinding would land in the middle of the previous payload.
-        with open(path, "rb") as f:
-            f.seek(parse_from - 1)
-            trailing = f.read(1)
-        if trailing == bytes([ENTRY_TYPE_EOF]):
-            parse_from -= 1
     if parse_from >= st.st_size:
         cache.mtime_ns = st.st_mtime_ns
         cache.size = st.st_size
@@ -505,9 +485,8 @@ def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbF
         f.seek(parse_from)
         raw = f.read(st.st_size - parse_from)
 
-    consumed, ended_with_eof = _parse_tsdb_chunk_into_cache(raw, parse_from, cache, path)
+    consumed = _parse_tsdb_chunk_into_cache(raw, parse_from, cache, path)
     cache.parsed_offset = parse_from + consumed
-    cache.ended_with_eof = ended_with_eof
     cache.mtime_ns = st.st_mtime_ns
     cache.size = st.st_size
     return cache
@@ -1050,10 +1029,6 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                     raise TsdbParseError("Series array decode did not end at entry boundary")
                 continue
 
-            if entry_type == ENTRY_TYPE_EOF:
-                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "eof")
-                continue
-
             _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], f"unknown entry type 0x{entry_type:02x}")
     except TsdbParseError as exc:
         if offset < len(raw):
@@ -1250,9 +1225,6 @@ def stat_timeseries_db(path: str) -> TsdbFileStats:
             value_bytes += non_void_count * value_payload_size
             other_count += 1
             continue
-        if entry_type == ENTRY_TYPE_EOF:
-            other_count += 1
-            break
         raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {entry_start}")
 
     total_bytes = len(raw)
@@ -1339,9 +1311,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if current_ts is None:
                 raise TsdbParseError("Value entry encountered before any timestamp was set")
             if channel_id not in channel_defs:
-                if raw[-1] != ENTRY_TYPE_EOF:
-                    break
-                raise TsdbParseError(f"Undefined channel id {channel_id}")
+                break
             format_id, series_name = channel_defs[channel_id]
             if ds_bucket_ms is not None and is_numeric_format_id(format_id):
                 v_min, offset = read_format_value(raw, offset, format_id)
@@ -1376,9 +1346,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if current_ts is None:
                 raise TsdbParseError("16-bit value entry encountered before any timestamp was set")
             if channel_id not in channel_defs:
-                if raw[-1] != ENTRY_TYPE_EOF:
-                    break
-                raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
+                break
             format_id, series_name = channel_defs[channel_id]
             if ds_bucket_ms is not None and is_numeric_format_id(format_id):
                 v_min, offset = read_format_value(raw, offset, format_id)
@@ -1520,15 +1488,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
                 )
             continue
 
-        if entry_type == ENTRY_TYPE_EOF:
-            if stream is not None and verbose:
-                entry_bytes = raw[entry_start:offset]
-                stream.write(f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} (eof)\n")
-            break
-
-        if raw[-1] != ENTRY_TYPE_EOF:
-            break
-        raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
+        break
 
     if stream is not None:
         stream.write(f"TimeSeriesDB dump: series={len(result._series_values)} events={len(result._events)}\n")
@@ -1651,12 +1611,9 @@ class TimeSeriesDbWriter:
     def addStringValue(self, series_name: str, value_as_string: str, timestamp_ms: Optional[int] = None) -> None:
         self.add_string_value(series_name, value_as_string, timestamp_ms)
 
-    def close(self, mark_complete: bool = False) -> None:
+    def close(self) -> None:
         if self._closed:
             return
-        if mark_complete:
-            self._f.write(bytes([ENTRY_TYPE_EOF]))
-            self._f.flush()
         self._f.close()
         self._closed = True
         invalidate_tsdb_cache(self._path)
@@ -1665,7 +1622,7 @@ class TimeSeriesDbWriter:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.close(mark_complete=False)
+        self.close()
 
 
 def create_timeseries_db_writer(path: str) -> TimeSeriesDbWriter:
@@ -1982,7 +1939,6 @@ def compress_timeseries_db_file(input_path: str, output_path: str) -> dict[str, 
                 out.write(channel_id.to_bytes(2, "little"))
             out.write(payload)
 
-        out.write(bytes([ENTRY_TYPE_EOF]))
     invalidate_tsdb_cache(output_path)
     return chosen_formats
 
@@ -2250,8 +2206,6 @@ def _scan_tsdb_state_for_append(path: str) -> _TsdbAppendState:
             offset += name_len
             channel_defs[channel_id] = (format_id, name)
             continue
-        if entry_type == ENTRY_TYPE_EOF:
-            break
         raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
 
     series_to_channel: dict[str, int] = {}
@@ -2366,7 +2320,6 @@ def write_downsampled_timeseries_db(
                     f.write(bytes([ENTRY_TYPE_CHANNEL_VALUE_16]))
                     f.write(channel_id.to_bytes(2, "little"))
                 f.write(payload)
-        f.write(bytes([ENTRY_TYPE_EOF]))
     invalidate_tsdb_cache(path)
 
 
@@ -2394,13 +2347,7 @@ class TimeSeriesDbAppender:
                 f.write(TSDB_TAG_BYTES)
                 f.write(struct.pack("<I", TSDB_VERSION))
                 invalidate_tsdb_cache(self.path)
-                return
-            f.seek(-1, os.SEEK_END)
-            last = f.read(1)
-            if last == bytes([ENTRY_TYPE_EOF]):
-                f.seek(-1, os.SEEK_END)
-                f.truncate()
-                invalidate_tsdb_cache(self.path)
+            return
 
     def _ensure_series_definition(self, f: Any, series_name: str, format_id: int) -> int:
         if series_name in self.series_to_channel:
