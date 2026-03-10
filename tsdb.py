@@ -353,6 +353,9 @@ def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdb
             if _is_incomplete_parse_error(exc):
                 offset = entry_start
                 break
+            if not raw or raw[-1] != ENTRY_TYPE_EOF:
+                offset = entry_start
+                break
             raise
 
     return offset, ended_with_eof
@@ -485,7 +488,14 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
 def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbFile) -> CachedTsdbFile:
     parse_from = cache.parsed_offset
     if cache.ended_with_eof and parse_from > 12:
-        parse_from -= 1
+        # Re-parse the trailing EOF marker only if it still exists.
+        # Appenders may remove EOF before writing new data, in which case
+        # rewinding would land in the middle of the previous payload.
+        with open(path, "rb") as f:
+            f.seek(parse_from - 1)
+            trailing = f.read(1)
+        if trailing == bytes([ENTRY_TYPE_EOF]):
+            parse_from -= 1
     if parse_from >= st.st_size:
         cache.mtime_ns = st.st_mtime_ns
         cache.size = st.st_size
@@ -1329,6 +1339,8 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if current_ts is None:
                 raise TsdbParseError("Value entry encountered before any timestamp was set")
             if channel_id not in channel_defs:
+                if raw[-1] != ENTRY_TYPE_EOF:
+                    break
                 raise TsdbParseError(f"Undefined channel id {channel_id}")
             format_id, series_name = channel_defs[channel_id]
             if ds_bucket_ms is not None and is_numeric_format_id(format_id):
@@ -1364,6 +1376,8 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
             if current_ts is None:
                 raise TsdbParseError("16-bit value entry encountered before any timestamp was set")
             if channel_id not in channel_defs:
+                if raw[-1] != ENTRY_TYPE_EOF:
+                    break
                 raise TsdbParseError(f"Undefined 16-bit channel id {channel_id}")
             format_id, series_name = channel_defs[channel_id]
             if ds_bucket_ms is not None and is_numeric_format_id(format_id):
@@ -1512,6 +1526,8 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
                 stream.write(f"        @{entry_start:08x}: {' '.join(f'{b:02x}' for b in entry_bytes)} (eof)\n")
             break
 
+        if raw[-1] != ENTRY_TYPE_EOF:
+            break
         raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {offset - 1}")
 
     if stream is not None:

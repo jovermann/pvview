@@ -493,6 +493,20 @@ def test_tsdb_appender_appends_multiple_batches(tmp_path):
     assert db.get_series_values("b") == [(1000, "x"), (1020, "y")]
 
 
+def test_cached_incremental_parse_handles_eof_truncation(tmp_path):
+    path = tmp_path / "append_cached.tsdb"
+    appender = TimeSeriesDbAppender(str(path))
+    appender.append_events([(1000, "main/bat/soc", 50.0)])
+
+    cache1 = get_cached_tsdb_file(str(path))
+    assert cache1.series_events["main/bat/soc"][0].value == 50.0
+
+    appender.append_events([(1010, "main/bat/soc", 51.0)])
+    cache2 = get_cached_tsdb_file(str(path))
+    values = [e.value for e in cache2.series_events["main/bat/soc"]]
+    assert values == [50.0, 51.0]
+
+
 def test_cli_collect_requires_subscription(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     cfg_path = tmp_path / "empty.toml"

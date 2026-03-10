@@ -2210,6 +2210,10 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("end must be >= start")
 
         files = find_candidate_files(data_dir, start_ms, end_ms)
+        if not files:
+            # Keep series discovery usable even when the selected time range
+            # does not overlap available day files.
+            files = _all_tsdb_files(data_dir)
         names = set()
         for path in files:
             for name in list_series_in_file(path):
