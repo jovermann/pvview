@@ -709,8 +709,8 @@ def read_default_quantize_timestamps(rc_path: str) -> int:
 def read_default_data_dir(rc_path: str) -> str:
     config = load_collector_config(rc_path)
     mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
-    text = str(mqtt.get("data_dir", ".")).strip()
-    return text if text else "."
+    text = str(mqtt.get("data_dir", "data")).strip()
+    return text if text else "data"
 
 
 def parse_host_port(server: str) -> tuple[str, int]:
@@ -1680,7 +1680,7 @@ def main() -> int:
     parser.add_argument(
         "--data-dir",
         default=None,
-        help="Directory for TSDB files. If omitted, read data_dir from config file (default: current directory).",
+        help="Directory for TSDB files. If omitted, read data_dir from config file (default: data).",
     )
     parser.add_argument("--list-topics", action="store_true", help="List available topics as a flat list with hierarchical names")
     parser.add_argument("--monitor", action="store_true", help="Monitor topics and print messages as they arrive")
@@ -1730,6 +1730,7 @@ def main() -> int:
     default_data_dir = read_default_data_dir(rc_path)
     selected_data_dir = args.data_dir if args.data_dir else default_data_dir
     data_dir = os.path.abspath(os.path.expanduser(selected_data_dir))
+    os.makedirs(data_dir, exist_ok=True)
 
     def resolve_tsdb_path(path: str) -> str:
         expanded = os.path.expanduser(path)

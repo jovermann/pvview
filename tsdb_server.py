@@ -2682,8 +2682,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
     parser.add_argument(
         "--data-dir",
-        default=".",
-        help="Directory containing TSDB files like data_YYYY-MM-DD.tsdb (default: current dir)",
+        default="data",
+        help="Directory containing TSDB files like data_YYYY-MM-DD.tsdb (default: data)",
     )
     parser.add_argument(
         "--ui-dir",
@@ -2698,8 +2698,7 @@ def main() -> int:
     data_dir = os.path.abspath(args.data_dir)
     ui_dir = os.path.abspath(args.ui_dir) if args.ui_dir else None
 
-    if not os.path.isdir(data_dir):
-        raise SystemExit(f"Data directory not found: {data_dir}")
+    os.makedirs(data_dir, exist_ok=True)
     if ui_dir is not None and not os.path.isdir(ui_dir):
         raise SystemExit(f"UI directory not found: {ui_dir}")
     if not (1 <= args.port <= 65535):
