@@ -1690,7 +1690,12 @@ def main() -> int:
     parser.add_argument("--dump", help="Dump a TimeSeriesDB file in human-readable format")
     parser.add_argument("--dump-bytes", metavar="TSDB_FILE", help="Dump a TSDB file byte-by-byte with decoded semantics")
     parser.add_argument("--stat-tsdb", metavar="TSDB_FILE", help="Print byte statistics for a TimeSeriesDB file")
-    parser.add_argument("--downsample", metavar="DATA_FILE", help="Read data_* or dsda_* TSDB file and create all coarser dsda_* variants up to 1h")
+    parser.add_argument(
+        "--downsample",
+        metavar="DATA_FILE",
+        nargs="+",
+        help="Read one or more data_* or dsda_* TSDB files and create all coarser dsda_* variants up to 1h",
+    )
     parser.add_argument("--generate-demo-db", type=int, metavar="DAYS", help="Generate demo TSDB files for DAYS days")
     parser.add_argument("--compress", metavar="DBFILE", help="Compress a TSDB file in place")
     parser.add_argument("--timeout", type=float, default=1.0, help="Seconds to listen for topics when listing (default: 1.0)")
@@ -1767,12 +1772,13 @@ def main() -> int:
             return 2
         return 0
     if args.downsample:
-        downsample_path = resolve_tsdb_path(args.downsample)
-        try:
-            _downsample_file(downsample_path)
-        except Exception as exc:
-            print(f"Failed to downsample DB file {downsample_path!r}: {exc}")
-            return 2
+        for downsample_arg in args.downsample:
+            downsample_path = resolve_tsdb_path(downsample_arg)
+            try:
+                _downsample_file(downsample_path)
+            except Exception as exc:
+                print(f"Failed to downsample DB file {downsample_path!r}: {exc}")
+                return 2
         return 0
     if args.generate_demo_db is not None:
         try:

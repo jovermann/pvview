@@ -604,6 +604,33 @@ def test_cli_downsample_creates_series_array_variants(tmp_path):
         assert "pv.power" in db.list_series()
 
 
+def test_cli_downsample_accepts_multiple_files(tmp_path):
+    day1 = datetime.date(2026, 2, 20)
+    day2 = datetime.date(2026, 2, 21)
+    path1 = tmp_path / f"data_{day1.isoformat()}.tsdb"
+    path2 = tmp_path / f"data_{day2.isoformat()}.tsdb"
+
+    for day, path in ((day1, path1), (day2, path2)):
+        day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+        writer = create_timeseries_db_writer(str(path))
+        writer.addValue("pv.power", 10.0, timestamp_ms=day_start_ms + 200)
+        writer.addValue("pv.power", 20.0, timestamp_ms=day_start_ms + 1200)
+        writer.close()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--downsample", str(path1), str(path2)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    for day in (day1, day2):
+        out_path = tmp_path / f"dsda_{day.isoformat()}.1h.tsdb"
+        assert out_path.exists()
+
+
 def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):
     config_path = tmp_path / "collector.toml"
     config_path.write_text(
