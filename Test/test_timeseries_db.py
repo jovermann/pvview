@@ -631,6 +631,66 @@ def test_cli_downsample_accepts_multiple_files(tmp_path):
         assert out_path.exists()
 
 
+def test_cli_downsample_force_overwrites_existing_outputs(tmp_path):
+    day = datetime.date(2026, 2, 20)
+    path = tmp_path / f"data_{day.isoformat()}.tsdb"
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.0, timestamp_ms=day_start_ms + 200)
+    writer.addValue("pv.power", 20.0, timestamp_ms=day_start_ms + 1200)
+    writer.close()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    first = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--downsample", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert first.returncode == 0
+    assert first.stderr == ""
+
+    out_1h = tmp_path / f"dsda_{day.isoformat()}.1h.tsdb"
+    assert out_1h.exists()
+
+    write_series_array_timeseries_db(
+        str(out_1h),
+        day,
+        3_600_000,
+        ["dummy"],
+        {"dummy": 0},
+        {"dummy": [(day_start_ms + 1_800_000, 1.0)]},
+        elem_size=1,
+    )
+    corrupted_db = read_timeseries_db(str(out_1h))
+    assert "dummy" in corrupted_db.list_series()
+    assert "pv.power" not in corrupted_db.list_series()
+
+    second = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--downsample", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode == 0
+    assert second.stderr == ""
+    after_skip = read_timeseries_db(str(out_1h))
+    assert "dummy" in after_skip.list_series()
+    assert "pv.power" not in after_skip.list_series()
+
+    third = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--force", "--downsample", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert third.returncode == 0
+    assert third.stderr == ""
+    after_force = read_timeseries_db(str(out_1h))
+    assert "pv.power" in after_force.list_series()
+    assert "dummy" not in after_force.list_series()
+
+
 def test_collector_config_preserves_comment_blocks_roundtrip(tmp_path):
     config_path = tmp_path / "collector.toml"
     config_path.write_text(

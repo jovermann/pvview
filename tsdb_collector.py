@@ -434,7 +434,7 @@ def _write_series_array_timeseries_db_atomic(
     os.replace(tmp_path, output_path)
 
 
-def _downsample_file(path: str) -> None:
+def _downsample_file(path: str, force: bool = False) -> None:
     source_path = os.path.abspath(path)
     day, source_bucket_ms = _parse_downsample_input_path(source_path)
     db = read_timeseries_db(source_path)
@@ -452,10 +452,13 @@ def _downsample_file(path: str) -> None:
     for bucket_ms, label, elem_size in next_levels:
         output_path = _downsample_output_path(source_path, day, label)
         if os.path.exists(output_path):
-            print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) already exists, skipping")
-            current_points_by_series = _numeric_series_points_from_db(read_timeseries_db(output_path))
-            continue
-        print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label})")
+            if not force:
+                print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) already exists, skipping")
+                current_points_by_series = _numeric_series_points_from_db(read_timeseries_db(output_path))
+                continue
+            print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) exists, overwriting")
+        else:
+            print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label})")
         next_points_by_series: dict[str, list[tuple[int, Any]]] = {}
         for idx, series_name in enumerate(series_names, start=1):
             print(f"  series {idx}/{len(series_names)}: {series_name}")
@@ -1696,6 +1699,7 @@ def main() -> int:
         nargs="+",
         help="Read one or more data_* or dsda_* TSDB files and create all coarser dsda_* variants up to 1h",
     )
+    parser.add_argument("--force", action="store_true", help="Force overwrite existing output files for operations like --downsample")
     parser.add_argument("--generate-demo-db", type=int, metavar="DAYS", help="Generate demo TSDB files for DAYS days")
     parser.add_argument("--compress", metavar="DBFILE", help="Compress a TSDB file in place")
     parser.add_argument("--timeout", type=float, default=1.0, help="Seconds to listen for topics when listing (default: 1.0)")
@@ -1775,7 +1779,7 @@ def main() -> int:
         for downsample_arg in args.downsample:
             downsample_path = resolve_tsdb_path(downsample_arg)
             try:
-                _downsample_file(downsample_path)
+                _downsample_file(downsample_path, force=args.force)
             except Exception as exc:
                 print(f"Failed to downsample DB file {downsample_path!r}: {exc}")
                 return 2
