@@ -1049,23 +1049,20 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 while offset < entry_end:
                     chunk_start = offset
                     type_and_len, offset = _read_zigzag_leb128(raw, offset)
-                    if type_and_len > 0:
-                        chunk_kind = "data_chunk"
-                    elif type_and_len in (-1, 0):
-                        chunk_kind = "invalid_chunk"
-                    elif (type_and_len & 1) == 0:
-                        chunk_kind = "repdelta_chunk"
-                    else:
-                        chunk_kind = "repvoid_chunk"
-                    _dump_bytes_chunk(
-                        stream,
-                        raw[chunk_start:offset],
-                        f"{series_name} c{chunk_index} {chunk_kind} typeAndLen zigzag={type_and_len:>8d}",
-                    )
                     if type_and_len in (-1, 0):
+                        _dump_bytes_chunk(
+                            stream,
+                            raw[chunk_start:offset],
+                            f"{series_name} c{chunk_index} invalid_chunk typeAndLen={type_and_len}",
+                        )
                         raise TsdbParseError("Series array reserved typeAndLen encountered")
 
                     if type_and_len > 0:
+                        _dump_bytes_chunk(
+                            stream,
+                            raw[chunk_start:offset],
+                            f"{series_name} c{chunk_index} data_chunk num_slots={int(type_and_len)}",
+                        )
                         n_slots = int(type_and_len)
                         for _ in range(n_slots):
                             slot_index = element_index
@@ -1096,27 +1093,24 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                             element_index += 1
                     elif (type_and_len & 1) == 0:
                         n_slots = int((-type_and_len) >> 1)
-                        d_start = offset
                         token, offset = _read_zigzag_leb128(raw, offset)
                         if token == -64:
                             raise TsdbParseError("Series array RepDelta token must not be -64")
                         delta_int = -64 if token == minus64 else token
-                        # Show what this token expands to.
-                        projected_last = last_value + delta_int * int(elem_size) * n_slots
                         _dump_bytes_chunk(
                             stream,
-                            raw[d_start:offset],
-                            f"{series_name} c{chunk_index} repdelta token={token:>8d} zigzag={delta_int:>8d} "
-                            f"repeat_slots={n_slots} valuesPerTimeSlot={elem_size} "
-                            f"last->{_format_float_fixed(projected_last / scale, int(n_decimals))}",
+                            raw[chunk_start:offset],
+                            f"{series_name} c{chunk_index} repdelta num_slots={n_slots} "
+                            f"delta={_format_float_fixed(float(delta_int) / scale, int(n_decimals))}",
                         )
-                        last_value = projected_last
+                        last_value += delta_int * int(elem_size) * n_slots
                         element_index += n_slots
                     else:
                         n_slots = int((-type_and_len) >> 1)
-                        stream.write(
-                            f"{'':23}  {series_name} c{chunk_index} repvoid repeat_slots={n_slots} "
-                            f"valuesPerTimeSlot={elem_size}\n"
+                        _dump_bytes_chunk(
+                            stream,
+                            raw[chunk_start:offset],
+                            f"{series_name} c{chunk_index} repvoid num_slots={n_slots}",
                         )
                         element_index += n_slots
                     chunk_index += 1
