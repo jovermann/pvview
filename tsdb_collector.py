@@ -1688,7 +1688,7 @@ def main() -> int:
     parser.add_argument(
         "--data-dir",
         default=None,
-        help="Directory for TSDB files. If omitted, read data_dir from config file (default: data).",
+        help="Directory for TSDB files used by --collect. If omitted, read data_dir from config file (default: data).",
     )
     parser.add_argument("--list-topics", action="store_true", help="List available topics as a flat list with hierarchical names")
     parser.add_argument("--monitor", action="store_true", help="Monitor topics and print messages as they arrive")
@@ -1741,19 +1741,8 @@ def main() -> int:
             httpd.server_close()
         return 0
 
-    default_data_dir = read_default_data_dir(rc_path)
-    selected_data_dir = args.data_dir if args.data_dir else default_data_dir
-    data_dir = os.path.abspath(os.path.expanduser(selected_data_dir))
-    os.makedirs(data_dir, exist_ok=True)
-
-    def resolve_tsdb_path(path: str) -> str:
-        expanded = os.path.expanduser(path)
-        if os.path.isabs(expanded):
-            return expanded
-        return os.path.join(data_dir, expanded)
-
     if args.dump:
-        dump_path = resolve_tsdb_path(args.dump)
+        dump_path = os.path.abspath(os.path.expanduser(args.dump))
         try:
             if args.verbose:
                 read_timeseries_db(dump_path, dump_out=sys.stdout, verbose=args.verbose)
@@ -1765,7 +1754,7 @@ def main() -> int:
         db.dump()
         return 0
     if args.dump_bytes:
-        dump_path = resolve_tsdb_path(args.dump_bytes)
+        dump_path = os.path.abspath(os.path.expanduser(args.dump_bytes))
         try:
             dump_timeseries_db_bytes(dump_path, out=sys.stdout)
         except Exception as exc:
@@ -1773,7 +1762,7 @@ def main() -> int:
             return 2
         return 0
     if args.stat_tsdb:
-        stat_path = resolve_tsdb_path(args.stat_tsdb)
+        stat_path = os.path.abspath(os.path.expanduser(args.stat_tsdb))
         try:
             _print_tsdb_file_stats(stat_path)
         except Exception as exc:
@@ -1791,8 +1780,7 @@ def main() -> int:
         return 0
     if args.generate_demo_db is not None:
         try:
-            os.makedirs(data_dir, exist_ok=True)
-            paths = generateDemoData(args.generate_demo_db, output_dir=data_dir)
+            paths = generateDemoData(args.generate_demo_db, output_dir=".")
         except Exception as exc:
             print(f"Failed to generate demo DB files: {exc}")
             return 2
@@ -1800,7 +1788,7 @@ def main() -> int:
             print(path)
         return 0
     if args.compress:
-        source = resolve_tsdb_path(args.compress)
+        source = os.path.abspath(os.path.expanduser(args.compress))
         if not os.path.exists(source):
             print(f"DB file not found: {source}")
             return 2
@@ -1825,6 +1813,10 @@ def main() -> int:
                     pass
             print(f"Failed to compress DB file {source!r}: {exc}")
             return 2
+
+    default_data_dir = read_default_data_dir(rc_path)
+    selected_data_dir = args.data_dir if args.data_dir else default_data_dir
+    data_dir = os.path.abspath(os.path.expanduser(selected_data_dir))
 
     if args.mqtt_server:
         persist_server(rc_path, args.mqtt_server)
@@ -1861,6 +1853,7 @@ def main() -> int:
             return 2
         return open_dtu_summary(server, args.timeout, args.filter, args.verbose)
     if args.collect or default_to_collect:
+        os.makedirs(data_dir, exist_ok=True)
         topics = args.topics if args.topics else default_topics
         return collect_to_tsdb(
             server,

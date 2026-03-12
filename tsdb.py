@@ -1065,53 +1065,60 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                     if type_and_len in (-1, 0):
                         raise TsdbParseError("Series array reserved typeAndLen encountered")
 
-                    slot_tokens: List[List[int]] = []
                     if type_and_len > 0:
                         n_slots = int(type_and_len)
                         for _ in range(n_slots):
-                            tokens: List[int] = []
-                            for _ in range(max(1, int(elem_size))):
+                            slot_index = element_index
+                            for comp_i in range(max(1, int(elem_size))):
                                 d_start = offset
                                 token, offset = _read_zigzag_leb128(raw, offset)
-                                tokens.append(token)
+                                comp = comp_names[comp_i] if comp_i < len(comp_names) else f"c{comp_i}"
+                                if token == -64:
+                                    _dump_bytes_chunk(
+                                        stream,
+                                        raw[d_start:offset],
+                                        f"{series_name} c{chunk_index} e{slot_index:>4d} {comp} "
+                                        f"token={token:>8d} void",
+                                    )
+                                    continue
+                                delta_int = -64 if token == minus64 else token
+                                last_value += delta_int
+                                delta_value = float(delta_int) / scale
+                                actual_value = float(last_value) / scale
                                 _dump_bytes_chunk(
                                     stream,
                                     raw[d_start:offset],
-                                    f"{series_name} c{chunk_index} e{element_index:>4d} token zigzag={token:>8d}",
+                                    f"{series_name} c{chunk_index} e{slot_index:>4d} {comp} "
+                                    f"token={token:>8d} zigzag={delta_int:>8d} "
+                                    f"delta={_format_float_fixed(delta_value, int(n_decimals)):>9} "
+                                    f"value={_format_float_fixed(actual_value, int(n_decimals)):>12}",
                                 )
-                            slot_tokens.append(tokens)
                             element_index += 1
                     elif (type_and_len & 1) == 0:
                         n_slots = int((-type_and_len) >> 1)
                         d_start = offset
                         token, offset = _read_zigzag_leb128(raw, offset)
+                        if token == -64:
+                            raise TsdbParseError("Series array RepDelta token must not be -64")
+                        delta_int = -64 if token == minus64 else token
+                        # Show what this token expands to.
+                        projected_last = last_value + delta_int * int(elem_size) * n_slots
                         _dump_bytes_chunk(
                             stream,
                             raw[d_start:offset],
-                            f"{series_name} c{chunk_index} repdelta token zigzag={token:>8d}",
+                            f"{series_name} c{chunk_index} repdelta token={token:>8d} zigzag={delta_int:>8d} "
+                            f"repeat_slots={n_slots} valuesPerTimeSlot={elem_size} "
+                            f"last->{_format_float_fixed(projected_last / scale, int(n_decimals))}",
                         )
-                        slot_tokens = [[token] * max(1, int(elem_size)) for _ in range(n_slots)]
+                        last_value = projected_last
                         element_index += n_slots
                     else:
                         n_slots = int((-type_and_len) >> 1)
-                        slot_tokens = [[-64] * max(1, int(elem_size)) for _ in range(n_slots)]
+                        stream.write(
+                            f"{'':23}  {series_name} c{chunk_index} repvoid repeat_slots={n_slots} "
+                            f"valuesPerTimeSlot={elem_size}\n"
+                        )
                         element_index += n_slots
-
-                    for slot_idx, tokens in enumerate(slot_tokens):
-                        base_e = element_index - len(slot_tokens) + slot_idx
-                        for comp_i, token in enumerate(tokens):
-                            if token == -64:
-                                continue
-                            delta_int = -64 if token == minus64 else token
-                            last_value += delta_int
-                            delta_value = float(delta_int) / scale
-                            actual_value = float(last_value) / scale
-                            comp = comp_names[comp_i] if comp_i < len(comp_names) else f"c{comp_i}"
-                            stream.write(
-                                f"{'':23}  {series_name} c{chunk_index} e{base_e:>4d} {comp} "
-                                f"zigzag={delta_int:>8d} delta={_format_float_fixed(delta_value, int(n_decimals)):>9} "
-                                f"value={_format_float_fixed(actual_value, int(n_decimals)):>12}\n"
-                            )
                     chunk_index += 1
                 if offset != entry_end:
                     raise TsdbParseError("Series array decode did not end at entry boundary")

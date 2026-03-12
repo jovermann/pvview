@@ -433,6 +433,27 @@ def test_cli_dump_bytes_decodes_series_array_file(tmp_path):
     assert "valuesPerTimeSlot uleb128=3" in result.stdout
 
 
+def test_cli_dump_bytes_prefers_existing_relative_path_over_data_dir(tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    path = data_dir / "sample.tsdb"
+    writer = create_timeseries_db_writer(str(path))
+    writer.addValue("pv.power", 10.5, timestamp_ms=1000)
+    writer.close()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "tsdb_collector.py"), "--dump-bytes", "data/sample.tsdb"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(tmp_path),
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert "pv.power" in result.stdout
+
+
 def test_cli_generate_demo_db_creates_files(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
