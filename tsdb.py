@@ -413,6 +413,31 @@ def _format_id_from_n_decimals(n_decimals: int) -> int:
     }[n]
 
 
+def _series_array_choose_minus64(used_deltas: set[int]) -> int:
+    # Choose an unused delta with shortest ZigZag+LEB128 length.
+    # Deterministic tie-break: increasing absolute value, preferring positive.
+    if 0 not in used_deltas:
+        return 0
+    i = 1
+    while i < (1 << 31):
+        for candidate in (i, -i):
+            if candidate == -64:
+                continue
+            if candidate in used_deltas:
+                continue
+            return candidate
+        i += 1
+    raise ValueError("Failed to choose minus64 sentinel")
+
+
+def _series_array_type_and_len_for_repdelta(n_slots: int) -> int:
+    return -2 * int(n_slots)
+
+
+def _series_array_type_and_len_for_repvoid(n_slots: int) -> int:
+    return -(2 * int(n_slots) + 1)
+
+
 def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: CachedTsdbFile, path: str) -> int:
     entry_size, offset = _read_uleb128(raw, offset)
     entry_end = entry_start + entry_size
@@ -423,13 +448,13 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
     series_name = raw[offset:offset + name_len].decode("utf-8")
     offset += name_len
     num_elements, offset = _read_uleb128(raw, offset)
-    _ensure_available(raw, offset, 2, "series array header")
-    n_decimals = raw[offset]
-    elem_size = raw[offset + 1]
-    offset += 2
+    n_decimals, offset = _read_uleb128(raw, offset)
+    elem_size, offset = _read_uleb128(raw, offset)
     if elem_size not in (1, 3):
-        raise TsdbParseError(f"Unsupported elemSize {elem_size} in series array")
-    void_element, offset = _read_uleb128(raw, offset)
+        raise TsdbParseError(f"Unsupported valuesPerTimeSlot {elem_size} in series array")
+    minus64, offset = _read_zigzag_leb128(raw, offset)
+    if minus64 == -64:
+        raise TsdbParseError("minus64 must not be -64")
     day = _day_from_tsdb_path(path)
     slot_ms = 86_400_000 // num_elements if num_elements > 0 and (86_400_000 % num_elements == 0) else 0
     if slot_ms <= 0:
@@ -441,33 +466,57 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
     element_index = 0
     last_value = 0
     while offset < entry_end:
-        chunk_len, offset = _read_zigzag_leb128(raw, offset)
-        if chunk_len == 0:
-            raise TsdbParseError("Series array chunkLen must not be 0")
-        if chunk_len < 0:
-            element_index += -chunk_len
-            continue
-        for _ in range(chunk_len):
+        type_and_len, offset = _read_zigzag_leb128(raw, offset)
+        if type_and_len in (-1, 0):
+            raise TsdbParseError("Series array reserved typeAndLen encountered")
+
+        slot_tokens: List[List[int]] = []
+        if type_and_len > 0:
+            n_slots = int(type_and_len)
+            for _ in range(n_slots):
+                slot: List[int] = []
+                for _j in range(int(elem_size)):
+                    token, offset = _read_zigzag_leb128(raw, offset)
+                    slot.append(token)
+                slot_tokens.append(slot)
+        elif (type_and_len & 1) == 0:
+            n_slots = int((-type_and_len) >> 1)
+            token, offset = _read_zigzag_leb128(raw, offset)
+            if token == -64:
+                raise TsdbParseError("RepDelta token must not be void marker -64")
+            slot_tokens = [[token] * int(elem_size) for _ in range(n_slots)]
+        else:
+            n_slots = int((-type_and_len) >> 1)
+            slot_tokens = [[-64] * int(elem_size) for _ in range(n_slots)]
+
+        for tokens in slot_tokens:
             if element_index >= num_elements:
-                raise TsdbParseError("Series array element index exceeds numElements")
+                raise TsdbParseError("Series array element index exceeds numTimeSlots")
             decoded_values: List[int] = []
-            for _j in range(elem_size):
-                delta, offset = _read_zigzag_leb128(raw, offset)
+            void_count = 0
+            for token in tokens:
+                if token == -64:
+                    void_count += 1
+                    continue
+                delta = -64 if token == minus64 else token
                 last_value += delta
                 decoded_values.append(last_value)
-            is_void = all(v == void_element for v in decoded_values)
-            if not is_void:
-                ts_ms = _slot_center_timestamp_ms(day, num_elements, element_index)
-                scale = 10 ** int(n_decimals)
-                if elem_size == 1:
-                    value: Any = decoded_values[0] / scale
-                else:
-                    value = {
-                        "min": decoded_values[0] / scale,
-                        "avg": decoded_values[1] / scale,
-                        "max": decoded_values[2] / scale,
-                    }
-                cache.series_events.setdefault(series_name, []).append(Event(ts_ms, value))
+            if void_count == int(elem_size):
+                element_index += 1
+                continue
+            if void_count != 0:
+                raise TsdbParseError("Series array mixed void/non-void scalar values in one time slot")
+            ts_ms = _slot_center_timestamp_ms(day, num_elements, element_index)
+            scale = 10 ** int(n_decimals)
+            if elem_size == 1:
+                value = decoded_values[0] / scale
+            else:
+                value = {
+                    "min": decoded_values[0] / scale,
+                    "avg": decoded_values[1] / scale,
+                    "max": decoded_values[2] / scale,
+                }
+            cache.series_events.setdefault(series_name, []).append(Event(ts_ms, value))
             element_index += 1
     if element_index != num_elements:
         raise TsdbParseError(f"Series array elements {element_index} != numElements {num_elements}")
@@ -981,16 +1030,17 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 num_el_start = offset
                 num_elements, offset = _read_uleb128(raw, offset)
                 _dump_bytes_chunk(stream, raw[num_el_start:offset], f"{series_name} num_elements uleb128={num_elements}")
-                _ensure_available(raw, offset, 2, "series array header")
-                n_decimals = raw[offset]
-                elem_size = raw[offset + 1]
-                _dump_bytes_chunk(stream, raw[offset:offset + 2], f"{series_name} decimals u8={n_decimals} elem_size u8={elem_size}")
-                offset += 2
+                ndec_start = offset
+                n_decimals, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[ndec_start:offset], f"{series_name} nDecimals uleb128={n_decimals}")
+                vps_start = offset
+                elem_size, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[vps_start:offset], f"{series_name} valuesPerTimeSlot uleb128={elem_size}")
                 scale = float(10 ** int(n_decimals))
 
-                void_start = offset
-                void_element, offset = _read_uleb128(raw, offset)
-                _dump_bytes_chunk(stream, raw[void_start:offset], f"{series_name} void_element uleb128={void_element}")
+                minus64_start = offset
+                minus64, offset = _read_zigzag_leb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[minus64_start:offset], f"{series_name} minus64 zigzag={minus64:>8d}")
 
                 chunk_index = 0
                 element_index = 0
@@ -998,32 +1048,70 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 comp_names = ["value"] if int(elem_size) == 1 else ["min", "avg", "max"]
                 while offset < entry_end:
                     chunk_start = offset
-                    chunk_len, offset = _read_zigzag_leb128(raw, offset)
-                    chunk_kind = "data_chunk" if chunk_len > 0 else "repeat_chunk" if chunk_len < 0 else "invalid_chunk"
+                    type_and_len, offset = _read_zigzag_leb128(raw, offset)
+                    if type_and_len > 0:
+                        chunk_kind = "data_chunk"
+                    elif type_and_len in (-1, 0):
+                        chunk_kind = "invalid_chunk"
+                    elif (type_and_len & 1) == 0:
+                        chunk_kind = "repdelta_chunk"
+                    else:
+                        chunk_kind = "repvoid_chunk"
                     _dump_bytes_chunk(
                         stream,
                         raw[chunk_start:offset],
-                        f"{series_name} c{chunk_index} {chunk_kind} len zigzag={chunk_len:>8d}",
+                        f"{series_name} c{chunk_index} {chunk_kind} typeAndLen zigzag={type_and_len:>8d}",
                     )
-                    if chunk_len < 0:
-                        element_index += -chunk_len
-                    if chunk_len > 0:
-                        for _ in range(chunk_len):
-                            for comp_i in range(max(1, int(elem_size))):
+                    if type_and_len in (-1, 0):
+                        raise TsdbParseError("Series array reserved typeAndLen encountered")
+
+                    slot_tokens: List[List[int]] = []
+                    if type_and_len > 0:
+                        n_slots = int(type_and_len)
+                        for _ in range(n_slots):
+                            tokens: List[int] = []
+                            for _ in range(max(1, int(elem_size))):
                                 d_start = offset
-                                delta_int, offset = _read_zigzag_leb128(raw, offset)
-                                last_value += delta_int
-                                delta_value = float(delta_int) / scale
-                                actual_value = float(last_value) / scale
-                                comp = comp_names[comp_i] if comp_i < len(comp_names) else f"c{comp_i}"
+                                token, offset = _read_zigzag_leb128(raw, offset)
+                                tokens.append(token)
                                 _dump_bytes_chunk(
                                     stream,
                                     raw[d_start:offset],
-                                    f"{series_name} c{chunk_index} e{element_index:>4d} {comp} "
-                                    f"zigzag={delta_int:>8d} delta={_format_float_fixed(delta_value, int(n_decimals)):>9} "
-                                    f"value={_format_float_fixed(actual_value, int(n_decimals)):>12}",
+                                    f"{series_name} c{chunk_index} e{element_index:>4d} token zigzag={token:>8d}",
                                 )
+                            slot_tokens.append(tokens)
                             element_index += 1
+                    elif (type_and_len & 1) == 0:
+                        n_slots = int((-type_and_len) >> 1)
+                        d_start = offset
+                        token, offset = _read_zigzag_leb128(raw, offset)
+                        _dump_bytes_chunk(
+                            stream,
+                            raw[d_start:offset],
+                            f"{series_name} c{chunk_index} repdelta token zigzag={token:>8d}",
+                        )
+                        slot_tokens = [[token] * max(1, int(elem_size)) for _ in range(n_slots)]
+                        element_index += n_slots
+                    else:
+                        n_slots = int((-type_and_len) >> 1)
+                        slot_tokens = [[-64] * max(1, int(elem_size)) for _ in range(n_slots)]
+                        element_index += n_slots
+
+                    for slot_idx, tokens in enumerate(slot_tokens):
+                        base_e = element_index - len(slot_tokens) + slot_idx
+                        for comp_i, token in enumerate(tokens):
+                            if token == -64:
+                                continue
+                            delta_int = -64 if token == minus64 else token
+                            last_value += delta_int
+                            delta_value = float(delta_int) / scale
+                            actual_value = float(last_value) / scale
+                            comp = comp_names[comp_i] if comp_i < len(comp_names) else f"c{comp_i}"
+                            stream.write(
+                                f"{'':23}  {series_name} c{chunk_index} e{base_e:>4d} {comp} "
+                                f"zigzag={delta_int:>8d} delta={_format_float_fixed(delta_value, int(n_decimals)):>9} "
+                                f"value={_format_float_fixed(actual_value, int(n_decimals)):>12}\n"
+                            )
                     chunk_index += 1
                 if offset != entry_end:
                     raise TsdbParseError("Series array decode did not end at entry boundary")
@@ -1191,30 +1279,56 @@ def stat_timeseries_db(path: str) -> TsdbFileStats:
             _ensure_available(raw, offset, name_len, "series array name")
             offset += name_len
             num_elements, offset = _read_uleb128(raw, offset)
-            _ensure_available(raw, offset, 2, "series array header")
-            n_decimals = raw[offset]
-            elem_size = raw[offset + 1]
-            offset += 2
+            n_decimals, offset = _read_uleb128(raw, offset)
+            elem_size, offset = _read_uleb128(raw, offset)
             if elem_size not in (1, 3):
-                raise TsdbParseError(f"Unsupported elemSize {elem_size} in series array")
-            void_element, offset = _read_uleb128(raw, offset)
+                raise TsdbParseError(f"Unsupported valuesPerTimeSlot {elem_size} in series array")
+            minus64, offset = _read_zigzag_leb128(raw, offset)
+            if minus64 == -64:
+                raise TsdbParseError("minus64 must not be -64")
             value_format_id = _format_id_from_n_decimals(n_decimals)
             non_void_count = 0
             last_value = 0
+            element_index = 0
             while offset < entry_end:
-                chunk_len, offset = _read_zigzag_leb128(raw, offset)
-                if chunk_len == 0:
-                    raise TsdbParseError("Series array chunkLen must not be 0")
-                if chunk_len < 0:
-                    continue
-                for _ in range(chunk_len):
-                    decoded_values: List[int] = []
-                    for _ in range(elem_size):
-                        delta, offset = _read_zigzag_leb128(raw, offset)
+                type_and_len, offset = _read_zigzag_leb128(raw, offset)
+                if type_and_len in (-1, 0):
+                    raise TsdbParseError("Series array reserved typeAndLen encountered")
+
+                slot_tokens: List[List[int]] = []
+                if type_and_len > 0:
+                    n_slots = int(type_and_len)
+                    for _ in range(n_slots):
+                        tokens: List[int] = []
+                        for _j in range(elem_size):
+                            token, offset = _read_zigzag_leb128(raw, offset)
+                            tokens.append(token)
+                        slot_tokens.append(tokens)
+                elif (type_and_len & 1) == 0:
+                    n_slots = int((-type_and_len) >> 1)
+                    token, offset = _read_zigzag_leb128(raw, offset)
+                    slot_tokens = [[token] * elem_size for _ in range(n_slots)]
+                else:
+                    n_slots = int((-type_and_len) >> 1)
+                    slot_tokens = [[-64] * elem_size for _ in range(n_slots)]
+
+                for tokens in slot_tokens:
+                    if element_index >= num_elements:
+                        raise TsdbParseError("Series array element index exceeds numTimeSlots")
+                    void_count = 0
+                    for token in tokens:
+                        if token == -64:
+                            void_count += 1
+                            continue
+                        delta = -64 if token == minus64 else token
                         last_value += delta
-                        decoded_values.append(last_value)
-                    if not all(v == void_element for v in decoded_values):
+                    if void_count == 0:
                         non_void_count += 1
+                    elif void_count != elem_size:
+                        raise TsdbParseError("Series array mixed void/non-void scalar values in one time slot")
+                    element_index += 1
+            if element_index != num_elements:
+                raise TsdbParseError(f"Series array elements {element_index} != numTimeSlots {num_elements}")
             if offset != entry_end:
                 raise TsdbParseError(f"Series array entry parsing did not end on entry boundary at {entry_start}")
             value_payload_size = elem_size * 8
@@ -1968,7 +2082,6 @@ def write_series_array_timeseries_db(
             scale = 10 ** decimals
             entries = series_points.get(series_name, [])
             element_values: List[Optional[List[int]]] = [None] * num_elements
-            used_values: set[int] = set()
             for ts_ms, value in entries:
                 idx = (int(ts_ms) - day_start_ms) // bucket_ms
                 if idx < 0 or idx >= num_elements:
@@ -1990,47 +2103,112 @@ def write_series_array_timeseries_db(
                             int(round(float(value["max"]) * scale)),
                         ]
                 element_values[idx] = encoded_values
-                used_values.update(encoded_values)
-            void_element = max([0] + [abs(v) for v in used_values]) + 1
-            while void_element in used_values:
-                void_element += 1
+
+            # Flatten to scalar stream per time slot and delta encode non-void values.
+            # Void scalars are represented as None at this stage.
+            scalar_tokens: List[List[Optional[int]]] = []
+            used_deltas: set[int] = set()
+            last_value = 0
+            for idx in range(num_elements):
+                values = element_values[idx]
+                if values is None:
+                    scalar_tokens.append([None] * elem_size)
+                    continue
+                slot_tokens: List[Optional[int]] = []
+                for v in values:
+                    delta = int(v) - last_value
+                    last_value = int(v)
+                    used_deltas.add(delta)
+                    slot_tokens.append(delta)
+                scalar_tokens.append(slot_tokens)
+
+            minus64 = _series_array_choose_minus64(used_deltas)
+
+            # Replace real -64 by minus64 and void by -64 as specified.
+            encoded_slots: List[List[int]] = []
+            for slot in scalar_tokens:
+                if all(token is None for token in slot):
+                    encoded_slots.append([-64] * elem_size)
+                    continue
+                values: List[int] = []
+                for token in slot:
+                    if token is None:
+                        values.append(-64)
+                    elif token == -64:
+                        values.append(minus64)
+                    else:
+                        values.append(int(token))
+                encoded_slots.append(values)
 
             payload = bytearray()
             name_bytes = series_name.encode("utf-8")
             payload.extend(_write_uleb128(len(name_bytes)))
             payload.extend(name_bytes)
             payload.extend(_write_uleb128(num_elements))
-            payload.append(decimals)
-            payload.append(elem_size)
-            payload.extend(_write_uleb128(void_element))
+            payload.extend(_write_uleb128(decimals))
+            payload.extend(_write_uleb128(elem_size))
+            payload.extend(_write_zigzag_leb128(minus64))
 
-            last_value = 0
             idx = 0
             while idx < num_elements:
-                if element_values[idx] is None:
+                slot = encoded_slots[idx]
+                is_void = all(v == -64 for v in slot)
+                rep_delta_candidate = (
+                    (not is_void)
+                    and all(v == slot[0] for v in slot)
+                    and slot[0] != -64
+                )
+
+                if is_void:
                     run = 1
-                    while idx + run < num_elements and element_values[idx + run] is None:
+                    while idx + run < num_elements and all(v == -64 for v in encoded_slots[idx + run]):
                         run += 1
-                    if run >= 2:
-                        payload.extend(_write_zigzag_leb128(-run))
+                    if run >= 3:
+                        payload.extend(_write_zigzag_leb128(_series_array_type_and_len_for_repvoid(run)))
                         idx += run
                         continue
-                    chunk_values = [void_element] * elem_size
-                    payload.extend(_write_zigzag_leb128(1))
-                    for v in chunk_values:
-                        payload.extend(_write_zigzag_leb128(v - last_value))
-                        last_value = v
+                elif rep_delta_candidate:
+                    delta_token = int(slot[0])
+                    run = 1
+                    while idx + run < num_elements:
+                        nxt = encoded_slots[idx + run]
+                        if not (all(v == delta_token for v in nxt) and delta_token != -64):
+                            break
+                        run += 1
+                    if run >= 3:
+                        payload.extend(_write_zigzag_leb128(_series_array_type_and_len_for_repdelta(run)))
+                        payload.extend(_write_zigzag_leb128(delta_token))
+                        idx += run
+                        continue
+
+                # DeltaChunk: accumulate slots until a long rep-chunk would start.
+                chunk_slots: List[List[int]] = []
+                while idx < num_elements:
+                    current = encoded_slots[idx]
+                    next_is_void = all(v == -64 for v in current)
+                    next_is_rep_delta = (not next_is_void) and all(v == current[0] for v in current) and current[0] != -64
+
+                    if chunk_slots:
+                        if next_is_void:
+                            run = 1
+                            while idx + run < num_elements and all(v == -64 for v in encoded_slots[idx + run]):
+                                run += 1
+                            if run >= 3:
+                                break
+                        if next_is_rep_delta:
+                            d = current[0]
+                            run = 1
+                            while idx + run < num_elements and all(v == d for v in encoded_slots[idx + run]):
+                                run += 1
+                            if run >= 3:
+                                break
+                    chunk_slots.append(current)
                     idx += 1
-                    continue
-                run_values: List[List[int]] = []
-                while idx < num_elements and element_values[idx] is not None:
-                    run_values.append(element_values[idx] or [])
-                    idx += 1
-                payload.extend(_write_zigzag_leb128(len(run_values)))
-                for values in run_values:
-                    for v in values:
-                        payload.extend(_write_zigzag_leb128(v - last_value))
-                        last_value = v
+
+                payload.extend(_write_zigzag_leb128(len(chunk_slots)))
+                for slot_values in chunk_slots:
+                    for token in slot_values:
+                        payload.extend(_write_zigzag_leb128(int(token)))
 
             entry_size_bytes = b""
             while True:

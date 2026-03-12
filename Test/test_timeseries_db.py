@@ -430,7 +430,7 @@ def test_cli_dump_bytes_decodes_series_array_file(tmp_path):
     assert result.stderr == ""
     assert "series_array type" in result.stdout
     assert "series utf8='solar/ac/power'" in result.stdout
-    assert "elem_size u8=3" in result.stdout
+    assert "valuesPerTimeSlot uleb128=3" in result.stdout
 
 
 def test_cli_generate_demo_db_creates_files(tmp_path):

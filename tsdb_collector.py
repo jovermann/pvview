@@ -133,7 +133,7 @@ def collect_to_tsdb(
                 if verbose:
                     print(f"downsample worker start: {path}")
                 try:
-                    _downsample_file(path)
+                    _downsample_file(path, verbose=verbose)
                     if verbose:
                         print(f"downsample worker done: {path}")
                 except Exception as exc:
@@ -434,7 +434,7 @@ def _write_series_array_timeseries_db_atomic(
     os.replace(tmp_path, output_path)
 
 
-def _downsample_file(path: str, force: bool = False) -> None:
+def _downsample_file(path: str, force: bool = False, verbose: int = 0) -> None:
     source_path = os.path.abspath(path)
     day, source_bucket_ms = _parse_downsample_input_path(source_path)
     db = read_timeseries_db(source_path)
@@ -446,22 +446,27 @@ def _downsample_file(path: str, force: bool = False) -> None:
     }
     next_levels = [level for level in _DOWNSAMPLE_LEVELS if level[0] > source_bucket_ms]
     if not next_levels:
-        print(f"No coarser downsample levels above {source_path}")
+        if verbose:
+            print(f"No coarser downsample levels above {source_path}")
         return
     current_points_by_series = source_points_by_series
     for bucket_ms, label, elem_size in next_levels:
         output_path = _downsample_output_path(source_path, day, label)
         if os.path.exists(output_path):
             if not force:
-                print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) already exists, skipping")
+                if verbose:
+                    print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) already exists, skipping")
                 current_points_by_series = _numeric_series_points_from_db(read_timeseries_db(output_path))
                 continue
-            print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) exists, overwriting")
+            if verbose:
+                print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label}) exists, overwriting")
         else:
-            print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label})")
+            if verbose:
+                print(f"downsampling {os.path.basename(source_path)} -> {os.path.basename(output_path)} ({label})")
         next_points_by_series: dict[str, list[tuple[int, Any]]] = {}
         for idx, series_name in enumerate(series_names, start=1):
-            print(f"  series {idx}/{len(series_names)}: {series_name}")
+            if verbose:
+                print(f"  series {idx}/{len(series_names)}: {series_name}")
             next_points_by_series[series_name] = downsample_series_points(
                 current_points_by_series.get(series_name, []),
                 day,
@@ -478,7 +483,7 @@ def _downsample_file(path: str, force: bool = False) -> None:
             next_points_by_series,
             elem_size,
         )
-        print(f"  wrote {output_path}")
+        print(output_path)
         current_points_by_series = next_points_by_series
 
 _EMBEDDED_DEMO_SERIES_TEXT = """
@@ -1777,9 +1782,9 @@ def main() -> int:
         return 0
     if args.downsample:
         for downsample_arg in args.downsample:
-            downsample_path = resolve_tsdb_path(downsample_arg)
+            downsample_path = os.path.abspath(os.path.expanduser(downsample_arg))
             try:
-                _downsample_file(downsample_path, force=args.force)
+                _downsample_file(downsample_path, force=args.force, verbose=args.verbose)
             except Exception as exc:
                 print(f"Failed to downsample DB file {downsample_path!r}: {exc}")
                 return 2
