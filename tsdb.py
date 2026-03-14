@@ -1028,6 +1028,10 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 series_name = series_name_bytes.decode("utf-8", errors="replace")
                 _dump_bytes_chunk(stream, series_name_bytes, f"series utf8='{series_name}'")
                 offset += name_len
+                day = _day_from_tsdb_path(path)
+                day_start_ms = int(
+                    datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000
+                )
 
                 num_el_start = offset
                 num_elements, offset = _read_uleb128(raw, offset)
@@ -1078,12 +1082,16 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                                 d_start = offset
                                 token, offset = _read_zigzag_leb128(raw, offset)
                                 comp = comp_names[comp_i] if comp_i < len(comp_names) else f"c{comp_i}"
+                                ts_ms = day_start_ms + int(time_offset) + slot_index * int(ms_per_slot) + (int(ms_per_slot) // 2)
+                                ts_text = datetime.datetime.fromtimestamp(
+                                    ts_ms / 1000.0, tz=datetime.timezone.utc
+                                ).strftime("%H:%M:%S")
                                 if token == -64:
                                     _dump_bytes_chunk(
                                         stream,
                                         raw[d_start:offset],
                                         f"{series_name} c{chunk_index} e{slot_index:>4d} {comp} "
-                                        f"token={token:>8d} void",
+                                        f"ts={ts_text} void",
                                     )
                                     continue
                                 delta_int = -64 if token == minus64 else token
@@ -1094,9 +1102,9 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                                     stream,
                                     raw[d_start:offset],
                                     f"{series_name} c{chunk_index} e{slot_index:>4d} {comp} "
-                                    f"token={token:>8d} zigzag={delta_int:>8d} "
-                                    f"delta={_format_float_fixed(delta_value, int(n_decimals)):>9} "
-                                    f"value={_format_float_fixed(actual_value, int(n_decimals)):>12}",
+                                    f"ts={ts_text} zigzag={delta_int:>9d} "
+                                    f"delta={_format_float_fixed(delta_value, int(n_decimals)):>10} "
+                                    f"value={_format_float_fixed(actual_value, int(n_decimals)):>13}",
                                 )
                             element_index += 1
                     else:
