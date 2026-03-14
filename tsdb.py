@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, TextIO, Tuple
 
 TSDB_TAG_BYTES = b"TSDB\x00\x00\x00\x00"
 TSDB_VERSION = 1
+SERIES_ARRAY_VERSION = 0
 
 ENTRY_TYPE_TIME_ABSOLUTE = 0xF0
 ENTRY_TYPE_TIME_REL_8 = 0xF1
@@ -430,24 +431,21 @@ def _series_array_choose_minus64(used_deltas: set[int]) -> int:
     raise ValueError("Failed to choose minus64 sentinel")
 
 
-def _series_array_type_and_len_for_repdelta(n_slots: int) -> int:
-    return -2 * int(n_slots)
-
-
-def _series_array_type_and_len_for_repvoid(n_slots: int) -> int:
-    return -(2 * int(n_slots) + 1)
-
-
 def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: CachedTsdbFile, path: str) -> int:
     entry_size, offset = _read_uleb128(raw, offset)
     entry_end = entry_start + entry_size
     if entry_end > len(raw):
         raise TsdbParseError(f"Series Array entry exceeds file size at offset {entry_start}")
+    series_array_version, offset = _read_uleb128(raw, offset)
+    if series_array_version != SERIES_ARRAY_VERSION:
+        raise TsdbParseError(f"Unsupported Series Array version {series_array_version} at offset {entry_start}")
     name_len, offset = _read_uleb128(raw, offset)
     _ensure_available(raw, offset, name_len, "series array name")
     series_name = raw[offset:offset + name_len].decode("utf-8")
     offset += name_len
     num_elements, offset = _read_uleb128(raw, offset)
+    ms_per_slot, offset = _read_uleb128(raw, offset)
+    time_offset, offset = _read_uleb128(raw, offset)
     n_decimals, offset = _read_uleb128(raw, offset)
     elem_size, offset = _read_uleb128(raw, offset)
     if elem_size not in (1, 3):
@@ -455,13 +453,17 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
     minus64, offset = _read_zigzag_leb128(raw, offset)
     if minus64 == -64:
         raise TsdbParseError("minus64 must not be -64")
+    if num_elements <= 0:
+        raise TsdbParseError(f"Invalid numTimeSlots {num_elements} in series array")
+    if ms_per_slot <= 0:
+        raise TsdbParseError(f"Invalid msPerTimeSlot {ms_per_slot} in series array")
+    if time_offset < 0:
+        raise TsdbParseError(f"Invalid timeOffset {time_offset} in series array")
     day = _day_from_tsdb_path(path)
-    slot_ms = 86_400_000 // num_elements if num_elements > 0 and (86_400_000 % num_elements == 0) else 0
-    if slot_ms <= 0:
-        raise TsdbParseError(f"Invalid numElements {num_elements} in series array")
+    day_start_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
     cache.series_format_ids.setdefault(series_name, _format_id_from_n_decimals(n_decimals))
-    cache.ds_bucket_ms = slot_ms
-    cache.meta_info.setdefault("dsBucketMs", slot_ms)
+    cache.ds_bucket_ms = int(ms_per_slot)
+    cache.meta_info.setdefault("dsBucketMs", int(ms_per_slot))
 
     element_index = 0
     last_value = 0
@@ -479,15 +481,12 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
                     token, offset = _read_zigzag_leb128(raw, offset)
                     slot.append(token)
                 slot_tokens.append(slot)
-        elif (type_and_len & 1) == 0:
-            n_slots = int((-type_and_len) >> 1)
-            token, offset = _read_zigzag_leb128(raw, offset)
-            if token == -64:
-                raise TsdbParseError("RepDelta token must not be void marker -64")
-            slot_tokens = [[token] * int(elem_size) for _ in range(n_slots)]
         else:
-            n_slots = int((-type_and_len) >> 1)
-            slot_tokens = [[-64] * int(elem_size) for _ in range(n_slots)]
+            n_slots = int(-type_and_len)
+            if n_slots < 3:
+                raise TsdbParseError("Series array reserved typeAndLen encountered")
+            token, offset = _read_zigzag_leb128(raw, offset)
+            slot_tokens = [[token] * int(elem_size) for _ in range(n_slots)]
 
         for tokens in slot_tokens:
             if element_index >= num_elements:
@@ -506,7 +505,7 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
                 continue
             if void_count != 0:
                 raise TsdbParseError("Series array mixed void/non-void scalar values in one time slot")
-            ts_ms = _slot_center_timestamp_ms(day, num_elements, element_index)
+            ts_ms = day_start_ms + int(time_offset) + element_index * int(ms_per_slot) + (int(ms_per_slot) // 2)
             scale = 10 ** int(n_decimals)
             if elem_size == 1:
                 value = decoded_values[0] / scale
@@ -1018,6 +1017,9 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                     raise TsdbParseError("Series array entry exceeds file size")
                 _dump_bytes_chunk(stream, raw[size_start:offset], f"entry_size uleb128={entry_size}")
 
+                sa_ver_start = offset
+                sa_ver, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[sa_ver_start:offset], f"seriesArrayVersion uleb128={sa_ver}")
                 name_len_start = offset
                 name_len, offset = _read_uleb128(raw, offset)
                 _dump_bytes_chunk(stream, raw[name_len_start:offset], f"name_len uleb128={name_len}")
@@ -1029,7 +1031,13 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
 
                 num_el_start = offset
                 num_elements, offset = _read_uleb128(raw, offset)
-                _dump_bytes_chunk(stream, raw[num_el_start:offset], f"{series_name} num_elements uleb128={num_elements}")
+                _dump_bytes_chunk(stream, raw[num_el_start:offset], f"{series_name} numTimeSlots uleb128={num_elements}")
+                slot_ms_start = offset
+                ms_per_slot, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[slot_ms_start:offset], f"{series_name} msPerTimeSlot uleb128={ms_per_slot}")
+                time_offset_start = offset
+                time_offset, offset = _read_uleb128(raw, offset)
+                _dump_bytes_chunk(stream, raw[time_offset_start:offset], f"{series_name} timeOffset uleb128={time_offset}")
                 ndec_start = offset
                 n_decimals, offset = _read_uleb128(raw, offset)
                 _dump_bytes_chunk(stream, raw[ndec_start:offset], f"{series_name} nDecimals uleb128={n_decimals}")
@@ -1091,11 +1099,25 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                                     f"value={_format_float_fixed(actual_value, int(n_decimals)):>12}",
                                 )
                             element_index += 1
-                    elif (type_and_len & 1) == 0:
-                        n_slots = int((-type_and_len) >> 1)
+                    else:
+                        n_slots = int(-type_and_len)
+                        if n_slots < 3:
+                            _dump_bytes_chunk(
+                                stream,
+                                raw[chunk_start:offset],
+                                f"{series_name} c{chunk_index} invalid_chunk typeAndLen={type_and_len}",
+                            )
+                            raise TsdbParseError("Series array reserved typeAndLen encountered")
                         token, offset = _read_zigzag_leb128(raw, offset)
                         if token == -64:
-                            raise TsdbParseError("Series array RepDelta token must not be -64")
+                            _dump_bytes_chunk(
+                                stream,
+                                raw[chunk_start:offset],
+                                f"{series_name} c{chunk_index} repvoid num_slots={n_slots}",
+                            )
+                            element_index += n_slots
+                            chunk_index += 1
+                            continue
                         delta_int = -64 if token == minus64 else token
                         _dump_bytes_chunk(
                             stream,
@@ -1104,14 +1126,6 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                             f"delta={_format_float_fixed(float(delta_int) / scale, int(n_decimals))}",
                         )
                         last_value += delta_int * int(elem_size) * n_slots
-                        element_index += n_slots
-                    else:
-                        n_slots = int((-type_and_len) >> 1)
-                        _dump_bytes_chunk(
-                            stream,
-                            raw[chunk_start:offset],
-                            f"{series_name} c{chunk_index} repvoid num_slots={n_slots}",
-                        )
                         element_index += n_slots
                     chunk_index += 1
                 if offset != entry_end:
@@ -1276,10 +1290,15 @@ def stat_timeseries_db(path: str) -> TsdbFileStats:
             entry_end = entry_start + entry_size
             if entry_end > len(raw):
                 raise TsdbParseError(f"Series Array entry exceeds file size at offset {entry_start}")
+            sa_version, offset = _read_uleb128(raw, offset)
+            if sa_version != SERIES_ARRAY_VERSION:
+                raise TsdbParseError(f"Unsupported Series Array version {sa_version} at offset {entry_start}")
             name_len, offset = _read_uleb128(raw, offset)
             _ensure_available(raw, offset, name_len, "series array name")
             offset += name_len
             num_elements, offset = _read_uleb128(raw, offset)
+            _ms_per_slot, offset = _read_uleb128(raw, offset)
+            _time_offset, offset = _read_uleb128(raw, offset)
             n_decimals, offset = _read_uleb128(raw, offset)
             elem_size, offset = _read_uleb128(raw, offset)
             if elem_size not in (1, 3):
@@ -1305,13 +1324,12 @@ def stat_timeseries_db(path: str) -> TsdbFileStats:
                             token, offset = _read_zigzag_leb128(raw, offset)
                             tokens.append(token)
                         slot_tokens.append(tokens)
-                elif (type_and_len & 1) == 0:
-                    n_slots = int((-type_and_len) >> 1)
+                else:
+                    n_slots = int(-type_and_len)
+                    if n_slots < 3:
+                        raise TsdbParseError("Series array reserved typeAndLen encountered")
                     token, offset = _read_zigzag_leb128(raw, offset)
                     slot_tokens = [[token] * elem_size for _ in range(n_slots)]
-                else:
-                    n_slots = int((-type_and_len) >> 1)
-                    slot_tokens = [[-64] * elem_size for _ in range(n_slots)]
 
                 for tokens in slot_tokens:
                     if element_index >= num_elements:
@@ -2143,9 +2161,12 @@ def write_series_array_timeseries_db(
 
             payload = bytearray()
             name_bytes = series_name.encode("utf-8")
+            payload.extend(_write_uleb128(SERIES_ARRAY_VERSION))
             payload.extend(_write_uleb128(len(name_bytes)))
             payload.extend(name_bytes)
             payload.extend(_write_uleb128(num_elements))
+            payload.extend(_write_uleb128(bucket_ms))
+            payload.extend(_write_uleb128(0))
             payload.extend(_write_uleb128(decimals))
             payload.extend(_write_uleb128(elem_size))
             payload.extend(_write_zigzag_leb128(minus64))
@@ -2165,7 +2186,8 @@ def write_series_array_timeseries_db(
                     while idx + run < num_elements and all(v == -64 for v in encoded_slots[idx + run]):
                         run += 1
                     if run >= 3:
-                        payload.extend(_write_zigzag_leb128(_series_array_type_and_len_for_repvoid(run)))
+                        payload.extend(_write_zigzag_leb128(-run))
+                        payload.extend(_write_zigzag_leb128(-64))
                         idx += run
                         continue
                 elif rep_delta_candidate:
@@ -2177,7 +2199,7 @@ def write_series_array_timeseries_db(
                             break
                         run += 1
                     if run >= 3:
-                        payload.extend(_write_zigzag_leb128(_series_array_type_and_len_for_repdelta(run)))
+                        payload.extend(_write_zigzag_leb128(-run))
                         payload.extend(_write_zigzag_leb128(delta_token))
                         idx += run
                         continue
