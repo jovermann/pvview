@@ -66,6 +66,7 @@
       <span class="date-field">Add</span>
       <button id="addChart" class="btn accent">Chart</button>
       <button id="addStat" class="btn">Stat</button>
+      <button id="addBar" class="btn">Bar</button>
       <button id="addHeatmap" class="btn">Heatmap</button>
       <button id="addConsole" class="btn">Console</button>
       <select id="globalGranularity" title="Granularity">
@@ -204,6 +205,32 @@
         <button id="removeHeatmapSettings" type="button" class="btn danger menu-left">Remove Window</button>
         <button id="cancelHeatmapSettings" type="button" class="btn">Cancel</button>
         <button id="saveHeatmapSettings" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="barSettingsDialog" class="modal">
+    <form method="dialog" class="modal-content" id="barSettingsForm">
+      <h2>Bar Settings</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Name</div>
+        <div><input id="barSettingsName" type="text" placeholder="Window name" /></div>
+
+        <div class="settings-label">Bar Width (px)</div>
+        <div><input id="barSettingsWidth" type="number" min="1" max="40" step="1" /></div>
+
+        <div class="settings-label">Bar Gap (px)</div>
+        <div><input id="barSettingsGap" type="number" min="0" max="40" step="1" /></div>
+
+        <div class="settings-label">Group Gap (px)</div>
+        <div><input id="barSettingsGroupGap" type="number" min="0" max="120" step="1" /></div>
+      </div>
+      <div class="settings-label">Series Order</div>
+      <div id="barSettingsSeriesList" class="series-list"></div>
+      <menu>
+        <button id="removeBarSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="cancelBarSettings" type="button" class="btn">Cancel</button>
+        <button id="saveBarSettings" value="default" class="btn accent">Save</button>
       </menu>
     </form>
   </dialog>

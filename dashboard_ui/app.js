@@ -62,6 +62,12 @@
   const heatmapSettingsDialog = document.getElementById('heatmapSettingsDialog');
   const heatmapSettingsName = document.getElementById('heatmapSettingsName');
   const heatmapSettingsGap = document.getElementById('heatmapSettingsGap');
+  const barSettingsDialog = document.getElementById('barSettingsDialog');
+  const barSettingsName = document.getElementById('barSettingsName');
+  const barSettingsWidth = document.getElementById('barSettingsWidth');
+  const barSettingsGap = document.getElementById('barSettingsGap');
+  const barSettingsGroupGap = document.getElementById('barSettingsGroupGap');
+  const barSettingsSeriesList = document.getElementById('barSettingsSeriesList');
   const statColumnsDialog = document.getElementById('statColumnsDialog');
   const columnsList = document.getElementById('columnsList');
   const columnsSearch = document.getElementById('columnsSearch');
@@ -73,8 +79,11 @@
   let chartSettingsSeriesDraft = [];
   let chartSettingsSeriesColorDraft = {};
   let statSettingsSeriesDraft = [];
+  let barSettingsSeriesDraft = [];
+  let barSettingsSeriesColorDraft = {};
   let activeSettingsStatId = null;
   let activeSettingsHeatmapId = null;
+  let activeSettingsBarId = null;
   let activeColumnsStatId = null;
   let consolePanelId = null;
   let apiTraceEnabled = false;
@@ -240,10 +249,52 @@
   }
 
   const chartGranularityOptions = ['auto', 'raw', '1s', '5s', '15s', '1m', '5m', '15m', '1h'];
+  const barIntervalOptions = ['hour', 'day', 'week', 'month'];
 
   function normalizeChartGranularity(value) {
     const text = String(value || '').trim().toLowerCase();
     return chartGranularityOptions.includes(text) ? text : 'auto';
+  }
+
+  function normalizeBarInterval(value) {
+    const text = String(value || '').trim().toLowerCase();
+    return barIntervalOptions.includes(text) ? text : 'day';
+  }
+
+  function normalizeBarWidthPx(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 10;
+    return Math.max(1, Math.min(40, Math.floor(n)));
+  }
+
+  function normalizeBarGapPx(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 2;
+    return Math.max(0, Math.min(40, Math.floor(n)));
+  }
+
+  function normalizeBarGroupGapPx(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 8;
+    return Math.max(0, Math.min(120, Math.floor(n)));
+  }
+
+  function barIntervalMs(value) {
+    const key = normalizeBarInterval(value);
+    if (key === 'hour') return 3600000;
+    if (key === 'day') return 86400000;
+    if (key === 'week') return 7 * 86400000;
+    return 28 * 86400000;
+  }
+
+  function formatBarSlotLabel(ts, interval) {
+    const d = new Date(Number(ts));
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const md = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    if (normalizeBarInterval(interval) === 'hour') {
+      return `${md} ${pad2(d.getHours())}:00`;
+    }
+    return md;
   }
 
   function summarizeBucketMode(items, countKey, startMs, endMs, ignorePredicate = null) {
@@ -350,6 +401,16 @@
     const ids = [];
     for (const [id, cfg] of charts.entries()) {
       if (cfg && cfg.kind === 'heatmap') {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  function barIds() {
+    const ids = [];
+    for (const [id, cfg] of charts.entries()) {
+      if (cfg && cfg.kind === 'bar') {
         ids.push(id);
       }
     }
@@ -477,24 +538,26 @@
 
   async function refreshAllCharts(reason = 'manual') {
     const ids = chartIds();
+    const barPanelIds = barIds();
     const heatmapPanelIds = heatmapIds();
     const statPanelIds = statIds();
     const t0 = performance.now();
     refreshGetCallCount = 0;
-    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length}`);
+    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length}`);
     const chartResults = await Promise.allSettled(ids.map((id) => refreshChart(id)));
+    const barResults = await Promise.allSettled(barPanelIds.map((id) => refreshBar(id)));
     const heatmapResults = await Promise.allSettled(heatmapPanelIds.map((id) => refreshHeatmap(id)));
     const statResults = await Promise.allSettled(statPanelIds.map((id) => refreshStat(id)));
-    const results = [...chartResults, ...heatmapResults, ...statResults];
+    const results = [...chartResults, ...barResults, ...heatmapResults, ...statResults];
     const failed = results.filter((r) => r.status === 'rejected').length;
-    const allIds = [...ids, ...heatmapPanelIds, ...statPanelIds];
+    const allIds = [...ids, ...barPanelIds, ...heatmapPanelIds, ...statPanelIds];
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         appendConsoleLine(`panel ${allIds[i]} refresh error ${r.reason}`);
       }
     });
     const elapsed = Math.round(performance.now() - t0);
-    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -1273,6 +1336,32 @@
     return wrapper;
   }
 
+  function createBarPanel(id) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'panel';
+    wrapper.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">Bar ${id}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
+          <select class="heatmap-series-select" id="bar-interval-${id}" data-action="bar-interval" data-id="${id}" title="Interval">
+            <option value="hour">Hour</option>
+            <option value="day" selected>Day</option>
+            <option value="week">Week</option>
+            <option value="month">Month</option>
+          </select>
+          <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
+          <button class="settings-gadget" data-action="bar-settings" data-id="${id}" title="Settings">⚙️</button>
+        </div>
+      </div>
+      <div class="chart" id="bar-${id}"></div>
+    `;
+    return wrapper;
+  }
+
   function updateTitle(id) {
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
@@ -1285,6 +1374,11 @@
     }
     if (c.kind === 'heatmap') {
       titleEl.textContent = c.label || `24h Heatmap ${id}`;
+      if (metaEl) metaEl.textContent = c.titleMeta || '';
+      return;
+    }
+    if (c.kind === 'bar') {
+      titleEl.textContent = c.label || `Bar ${id}`;
       if (metaEl) metaEl.textContent = c.titleMeta || '';
       return;
     }
@@ -1551,6 +1645,223 @@
         }],
       }, true);
       appendConsoleLine(`heatmap ${id} refresh done name="${panelName}" days=${dayColumns} points=${heatData.length}`);
+    } finally {
+      setPanelBusy(id, false);
+    }
+  }
+
+  async function refreshBar(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'bar' || !cfg.instance || !(cfg.hostEl instanceof HTMLElement)) return;
+    setPanelBusy(id, true);
+    try {
+      const panelName = cfg.label || `Bar ${id}`;
+      appendConsoleLine(`bar ${id} refresh start name="${panelName}" series=${cfg.series.length}`);
+      await ensureInverterNames(cfg.series);
+      if (!cfg.series.length) {
+        setPanelTitleMeta(id, '');
+        cfg.instance.clear();
+        cfg.instance.setOption({
+          backgroundColor: 'transparent',
+          title: { text: 'No series selected', left: 'center', top: 'middle', textStyle: { color: '#8ca0b8' } },
+        });
+        appendConsoleLine(`bar ${id} refresh done (no series)`);
+        return;
+      }
+      const interval = normalizeBarInterval(cfg.barInterval);
+      const intervalMs = barIntervalMs(interval);
+      const { end } = getRange();
+      const enabledRawSeries = cfg.series.filter(
+        (name) => !(cfg.legendEnabledBySeries && cfg.legendEnabledBySeries[name] === false)
+      );
+      const enabledSeriesCount = Math.max(1, enabledRawSeries.length);
+      const barWidthPx = normalizeBarWidthPx(cfg.barWidthPx);
+      const barGapPx = normalizeBarGapPx(cfg.barGapPx);
+      const barGroupGapPx = normalizeBarGroupGapPx(cfg.barGroupGapPx);
+      const plotWidth = Math.max(80, cfg.hostEl.clientWidth - 48);
+      const groupWidthPx = enabledSeriesCount * barWidthPx + Math.max(0, enabledSeriesCount - 1) * barGapPx;
+      const slotWidthPx = Math.max(10, groupWidthPx + barGroupGapPx);
+      const slotCount = Math.max(1, Math.floor(plotWidth / slotWidthPx));
+      const visibleEnd = Math.floor(Number(end) / intervalMs) * intervalMs;
+      const visibleStart = visibleEnd - slotCount * intervalMs;
+      const fetchEnd = visibleEnd + intervalMs;
+      const fetchStart = visibleStart;
+      const minPoints = normalizeMinPoints(Math.max(200, slotCount * 8), 200);
+      const granularity = normalizeChartGranularity(globalGranularity);
+      const q = new URLSearchParams({
+        start: String(fetchStart),
+        end: String(fetchEnd),
+        minPoints: String(minPoints),
+      });
+      if (granularity !== 'auto') {
+        q.set('granularity', granularity);
+      }
+      for (const name of cfg.series) q.append('series', name);
+      const reqT0 = performance.now();
+      appendConsoleLine(`bar ${id} request start batch series=${cfg.series.length} enabled=${enabledSeriesCount} interval=${interval} slots=${slotCount} minPoints=${minPoints} granularity=${granularity}`);
+      const batchResp = await apiJson(`/events?${q}`);
+      const reqMs = Math.round(performance.now() - reqT0);
+      const eventItems = Array.isArray(batchResp && batchResp.events)
+        ? batchResp.events
+        : ((batchResp && typeof batchResp.series === 'string') ? [batchResp] : []);
+      const eventsBySeries = new Map(eventItems.filter((x) => x && typeof x === 'object' && typeof x.series === 'string').map((x) => [x.series, x]));
+      appendConsoleLine(`bar ${id} request done batch series=${cfg.series.length} returned=${eventItems.length} elapsed=${reqMs}ms`);
+
+      const displaySeries = cfg.series.map((s) => displaySeriesName(s));
+      const prefix = displayPrefixForSeries(displaySeries);
+      const xLabels = Array.from({ length: slotCount }, (_, i) => formatBarSlotLabel(visibleStart + i * intervalMs, interval));
+      const seriesDefs = [];
+      for (const seriesName of cfg.series) {
+        const data = eventsBySeries.get(seriesName) || { points: [], decimalPlaces: undefined };
+        const displayRule = effectiveDisplayRuleForSeries(seriesName, unitForSeriesName(seriesName), data.decimalPlaces);
+        const slotMins = new Array(slotCount + 1).fill(null);
+        const points = Array.isArray(data.points) ? data.points : [];
+        for (const p of points) {
+          if (!p || typeof p !== 'object') continue;
+          const ts = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
+          if (!Number.isFinite(ts) || ts < fetchStart || ts >= fetchEnd) continue;
+          const slotIdx = Math.floor((ts - visibleStart) / intervalMs);
+          if (slotIdx < 0 || slotIdx > slotCount) continue;
+          let rawValue;
+          if (Object.prototype.hasOwnProperty.call(p, 'min')) rawValue = p.min;
+          else if (Object.prototype.hasOwnProperty.call(p, 'value')) rawValue = p.value;
+          else rawValue = p.avg;
+          const scaled = applyDisplayScale(rawValue, displayRule);
+          if (typeof scaled !== 'number' || !Number.isFinite(scaled)) continue;
+          if (slotMins[slotIdx] === null || scaled < slotMins[slotIdx]) {
+            slotMins[slotIdx] = scaled;
+          }
+        }
+        const barValues = [];
+        for (let i = 0; i < slotCount; i += 1) {
+          const cur = slotMins[i];
+          const next = slotMins[i + 1];
+          if (
+            typeof cur !== 'number' || !Number.isFinite(cur)
+            || typeof next !== 'number' || !Number.isFinite(next)
+            || cur === 0 || next === 0
+          ) {
+            barValues.push(0);
+          } else {
+            barValues.push(roundNumeric(next - cur));
+          }
+        }
+        seriesDefs.push({
+          rawName: seriesName,
+          displayName: compactSeriesLabel(displaySeriesName(seriesName), prefix),
+          values: barValues,
+          displayRule,
+        });
+      }
+      const displayNameToSeries = new Map();
+      for (const s of seriesDefs) {
+        const bucket = displayNameToSeries.get(s.displayName) || [];
+        bucket.push(s.rawName);
+        displayNameToSeries.set(s.displayName, bucket);
+      }
+      cfg.displayNameToSeries = displayNameToSeries;
+      const legendSelected = {};
+      for (const [legendName, rawSeriesList] of displayNameToSeries.entries()) {
+        let enabled = true;
+        for (const rawName of rawSeriesList) {
+          if (cfg.legendEnabledBySeries && cfg.legendEnabledBySeries[rawName] === false) {
+            enabled = false;
+            break;
+          }
+        }
+        legendSelected[legendName] = enabled;
+      }
+
+      const axisOrder = [];
+      const axisIndexByKey = new Map();
+      for (const s of seriesDefs) {
+        const suffix = String(s.rawName).split('/').pop() || String(s.rawName);
+        const axisKey = (s.displayRule && s.displayRule.axisKey) || axisGroupKeyForSuffix(suffix);
+        if (!axisIndexByKey.has(axisKey)) {
+          axisIndexByKey.set(axisKey, axisOrder.length);
+          axisOrder.push(axisKey);
+        }
+        s.axisKey = axisKey;
+      }
+      const axisSlot = 36;
+      const axisUnitByKey = new Map();
+      for (const s of seriesDefs) {
+        if (!axisUnitByKey.has(s.axisKey) && s.displayRule && s.displayRule.unit) {
+          axisUnitByKey.set(s.axisKey, s.displayRule.unit);
+        }
+      }
+      const yAxes = axisOrder.map((axisKey, i) => ({
+        type: 'value',
+        name: axisUnitByKey.has(axisKey) ? `${String(axisKey)} / ${axisUnitByKey.get(axisKey)}` : axisLabelForSuffix(axisKey),
+        position: (i % 2 === 0) ? 'left' : 'right',
+        offset: Math.floor(i / 2) * axisSlot,
+        alignTicks: true,
+        axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
+        axisLabel: { color: '#aebbc9' },
+        splitLine: { show: i === 0, lineStyle: { color: '#2b3544' } },
+        nameTextStyle: { color: '#aebbc9', fontSize: 10 },
+        nameLocation: 'middle',
+        nameGap: 32 + Math.floor(i / 2) * 6,
+      }));
+      const axisCount = yAxes.length;
+      const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
+      const gridRight = 8 + Math.floor(axisCount / 2) * axisSlot;
+      const gridTop = 12;
+
+      cfg.instance.setOption({
+        backgroundColor: 'transparent',
+        animation: false,
+        legend: {
+          orient: 'vertical',
+          left: gridLeft,
+          top: gridTop,
+          selected: legendSelected,
+          textStyle: { color: '#c6d2e0' },
+        },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          valueFormatter: (v) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : ''),
+        },
+        grid: {
+          left: gridLeft,
+          right: gridRight,
+          top: gridTop,
+          bottom: 24,
+        },
+        xAxis: {
+          type: 'category',
+          data: xLabels,
+          axisLine: { lineStyle: { color: '#4d5b70' } },
+          axisLabel: { color: '#aebbc9', interval: 'auto' },
+        },
+        yAxis: yAxes,
+        series: seriesDefs.map((s) => ({
+          name: s.displayName,
+          type: 'bar',
+          data: s.values,
+          barWidth: barWidthPx,
+          barMaxWidth: barWidthPx,
+          barGap: `${(barGapPx / Math.max(1, barWidthPx)) * 100}%`,
+          barCategoryGap: `${(barGroupGapPx / Math.max(1, groupWidthPx)) * 100}%`,
+          itemStyle: {
+            color: (() => {
+              const idx = cfg.series.indexOf(s.rawName);
+              const overrideColor = (cfg.seriesColorByName && typeof cfg.seriesColorByName[s.rawName] === 'string')
+                ? String(cfg.seriesColorByName[s.rawName]).trim()
+                : '';
+              if (overrideColor === AUTO_DARK_COLOR) {
+                return seriesPaletteDark[(idx >= 0 ? idx : 0) % seriesPaletteDark.length];
+              }
+              return overrideColor || seriesPalette[(idx >= 0 ? idx : 0) % seriesPalette.length];
+            })(),
+          },
+          yAxisIndex: axisIndexByKey.get(s.axisKey) || 0,
+        })),
+      }, true);
+
+      setPanelTitleMeta(id, showRefreshDurationDebug ? `${reqMs} ms` : '');
+      appendConsoleLine(`bar ${id} refresh done name="${panelName}" series=${seriesDefs.length} slots=${slotCount}`);
     } finally {
       setPanelBusy(id, false);
     }
@@ -2146,11 +2457,75 @@
     return id;
   }
 
+  function addBar(initialSeries = [], options = {}) {
+    chartCounter += 1;
+    const id = String(chartCounter);
+    const widgetEl = document.createElement('div');
+    widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 6,
+      h: options.h || 3,
+    });
+    const panel = createBarPanel(id);
+    node.querySelector('.grid-stack-item-content').appendChild(panel);
+    const hostEl = document.getElementById(`bar-${id}`);
+    const instance = echarts.init(hostEl, null, { renderer: 'canvas' });
+    const barInterval = normalizeBarInterval(options.barInterval || 'day');
+    charts.set(id, {
+      id,
+      kind: 'bar',
+      node,
+      hostEl,
+      instance,
+      series: [...initialSeries],
+      barInterval,
+      barWidthPx: normalizeBarWidthPx(options.barWidthPx),
+      barGapPx: normalizeBarGapPx(options.barGapPx),
+      barGroupGapPx: normalizeBarGroupGapPx(options.barGroupGapPx),
+      legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
+      seriesColorByName: (options.seriesColorByName && typeof options.seriesColorByName === 'object')
+        ? { ...options.seriesColorByName }
+        : {},
+      displayNameToSeries: new Map(),
+      label: options.label || null,
+      busyCount: 0,
+      titleMeta: '',
+    });
+    instance.on('legendselectchanged', (ev) => {
+      const c = charts.get(id);
+      if (!c || c.kind !== 'bar') return;
+      const displayName = ev && typeof ev.name === 'string' ? ev.name : '';
+      if (!displayName) return;
+      const list = c.displayNameToSeries instanceof Map ? c.displayNameToSeries.get(displayName) : null;
+      if (!Array.isArray(list) || list.length === 0) return;
+      const selected = !!(ev && ev.selected && ev.selected[displayName]);
+      if (!c.legendEnabledBySeries || typeof c.legendEnabledBySeries !== 'object') {
+        c.legendEnabledBySeries = {};
+      }
+      for (const rawName of list) {
+        c.legendEnabledBySeries[rawName] = selected;
+      }
+      refreshBar(id).catch((err) => console.error(err));
+    });
+    const intervalSelect = document.getElementById(`bar-interval-${id}`);
+    if (intervalSelect instanceof HTMLSelectElement) {
+      intervalSelect.value = barInterval;
+    }
+    appendConsoleLine(`bar ${id} created series=${initialSeries.length} interval=${barInterval}`);
+    updateTitle(id);
+    if (!options.deferRefresh) {
+      refreshBar(id).catch((err) => console.error(err));
+    }
+    return id;
+  }
+
   function removePanel(id) {
     const c = charts.get(id);
     if (!c) return;
     appendConsoleLine(`panel ${id} removed type=${c.kind || 'unknown'}`);
-    if ((c.kind === 'chart' || c.kind === 'heatmap') && c.instance) {
+    if ((c.kind === 'chart' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
       c.instance.dispose();
     }
     if (consolePanelId === id) {
@@ -2265,6 +2640,26 @@
         });
         continue;
       }
+      if (c.kind === 'bar') {
+        chartList.push({
+          type: 'bar',
+          x: Number(nodeInfo.x || 0),
+          y: Number(nodeInfo.y || 0),
+          w: Number(nodeInfo.w || 6),
+          h: Number(nodeInfo.h || 3),
+          series: Array.isArray(c.series) ? [...c.series] : [],
+          barInterval: normalizeBarInterval(c.barInterval || 'day'),
+          barWidthPx: normalizeBarWidthPx(c.barWidthPx),
+          barGapPx: normalizeBarGapPx(c.barGapPx),
+          barGroupGapPx: normalizeBarGroupGapPx(c.barGroupGapPx),
+          legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
+          seriesColorByName: (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+            ? { ...c.seriesColorByName }
+            : {},
+          label: c.label || null,
+        });
+        continue;
+      }
       chartList.push({
         type: 'chart',
         x: Number(nodeInfo.x || 0),
@@ -2335,6 +2730,28 @@
           heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
           cellsPerDay: normalizeHeatmapCells(ch.cellsPerDay),
           cellGap: Math.max(0, Math.min(12, Math.floor(Number(ch.cellGap || 1)))),
+          label: typeof ch.label === 'string' ? ch.label : null,
+          deferRefresh: true,
+        });
+        continue;
+      }
+      if (ch.type === 'bar') {
+        const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+        addBar(series, {
+          x: Number(ch.x),
+          y: Number(ch.y),
+          w: Number(ch.w) || 6,
+          h: Number(ch.h) || 3,
+          barInterval: normalizeBarInterval(ch.barInterval || 'day'),
+          barWidthPx: normalizeBarWidthPx(ch.barWidthPx),
+          barGapPx: normalizeBarGapPx(ch.barGapPx),
+          barGroupGapPx: normalizeBarGroupGapPx(ch.barGroupGapPx),
+          legendEnabledBySeries: (ch.legendEnabledBySeries && typeof ch.legendEnabledBySeries === 'object')
+            ? { ...ch.legendEnabledBySeries }
+            : {},
+          seriesColorByName: (ch.seriesColorByName && typeof ch.seriesColorByName === 'object')
+            ? { ...ch.seriesColorByName }
+            : {},
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -2480,6 +2897,8 @@
         }
         if (c.kind === 'stat') {
           refreshStat(id).catch((err) => console.error(err));
+        } else if (c.kind === 'bar') {
+          refreshBar(id).catch((err) => console.error(err));
         } else if (c.kind === 'heatmap') {
           refreshHeatmap(id).catch((err) => console.error(err));
         } else {
@@ -2594,6 +3013,67 @@
     heatmapSettingsDialog.showModal();
   }
 
+  function openBarSettingsDialog(id) {
+    const c = charts.get(id);
+    if (!c || c.kind !== 'bar') return;
+    activeSettingsBarId = id;
+    barSettingsName.value = c.label || '';
+    if (barSettingsWidth) barSettingsWidth.value = String(normalizeBarWidthPx(c.barWidthPx));
+    if (barSettingsGap) barSettingsGap.value = String(normalizeBarGapPx(c.barGapPx));
+    if (barSettingsGroupGap) barSettingsGroupGap.value = String(normalizeBarGroupGapPx(c.barGroupGapPx));
+    barSettingsSeriesDraft = Array.isArray(c.series) ? [...c.series] : [];
+    barSettingsSeriesColorDraft = (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+      ? { ...c.seriesColorByName }
+      : {};
+    renderBarSettingsSeriesList();
+    barSettingsDialog.showModal();
+  }
+
+  function renderBarSettingsSeriesList() {
+    if (!(barSettingsSeriesList instanceof HTMLElement)) return;
+    if (!Array.isArray(barSettingsSeriesDraft) || barSettingsSeriesDraft.length === 0) {
+      barSettingsSeriesList.innerHTML = '<div class="series-item"><span>No series selected</span></div>';
+      return;
+    }
+    barSettingsSeriesList.innerHTML = barSettingsSeriesDraft.map((name, i) => `
+      <div class="series-item">
+        <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
+        <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
+        <span class="chart-color-grid" title="Series color">
+          <button type="button" class="chart-color-box ${!String(barSettingsSeriesColorDraft[String(name)] || '').trim() ? 'active auto' : 'auto'}" data-action="bar-series-color-set" data-series="${htmlEscape(String(name))}" data-color="" title="Auto"></button>
+          ${seriesPalette.map((color) => `
+            <button
+              type="button"
+              class="chart-color-box ${String(barSettingsSeriesColorDraft[String(name)] || '').trim() === color ? 'active' : ''}"
+              data-action="bar-series-color-set"
+              data-series="${htmlEscape(String(name))}"
+              data-color="${htmlEscape(color)}"
+              title="${htmlEscape(color)}"
+              style="border-color:${htmlEscape(color)};background:${htmlEscape(rgbaFromHex(color, 0.3))}"
+            ></button>
+          `).join('')}
+          <button type="button" class="chart-color-box ${String(barSettingsSeriesColorDraft[String(name)] || '').trim() === AUTO_DARK_COLOR ? 'active auto dark' : 'auto dark'}" data-action="bar-series-color-set" data-series="${htmlEscape(String(name))}" data-color="${AUTO_DARK_COLOR}" title="Auto dark"></button>
+          ${seriesPaletteDark.map((color) => `
+            <button
+              type="button"
+              class="chart-color-box ${String(barSettingsSeriesColorDraft[String(name)] || '').trim() === color ? 'active' : ''}"
+              data-action="bar-series-color-set"
+              data-series="${htmlEscape(String(name))}"
+              data-color="${htmlEscape(color)}"
+              title="${htmlEscape(color)}"
+              style="border-color:${htmlEscape(color)};background:${htmlEscape(rgbaFromHex(color, 0.3))}"
+            ></button>
+          `).join('')}
+        </span>
+        <span style="margin-left:auto;display:inline-flex;gap:6px">
+          <button type="button" class="icon-btn danger" data-action="bar-series-delete" data-index="${i}" title="Remove series">🗑️</button>
+          <button type="button" class="icon-btn" data-action="bar-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button type="button" class="icon-btn" data-action="bar-series-down" data-index="${i}" ${i === barSettingsSeriesDraft.length - 1 ? 'disabled' : ''}>↓</button>
+        </span>
+      </div>
+    `).join('');
+  }
+
   function renderStatSettingsSeriesList() {
     if (!(statSettingsSeriesList instanceof HTMLElement)) return;
     if (!Array.isArray(statSettingsSeriesDraft) || statSettingsSeriesDraft.length === 0) {
@@ -2684,6 +3164,8 @@
     updateTitle(activeChartId);
     if (c.kind === 'stat') {
       refreshStat(activeChartId).catch((err) => console.error(err));
+    } else if (c.kind === 'bar') {
+      refreshBar(activeChartId).catch((err) => console.error(err));
     } else if (c.kind === 'heatmap') {
       refreshHeatmap(activeChartId).catch((err) => console.error(err));
     } else {
@@ -2740,6 +3222,17 @@
       renderChartSettingsSeriesList();
       return;
     }
+    const barColorActionEl = target.closest('[data-action="bar-series-color-set"]');
+    if (barColorActionEl instanceof HTMLElement) {
+      const seriesName = String(barColorActionEl.dataset.series || '');
+      const value = String(barColorActionEl.dataset.color || '').trim();
+      if (seriesName) {
+        if (value) barSettingsSeriesColorDraft[seriesName] = value;
+        else delete barSettingsSeriesColorDraft[seriesName];
+      }
+      renderBarSettingsSeriesList();
+      return;
+    }
 
     if (target.matches('.preset')) {
       activePreset = target.dataset.range || null;
@@ -2785,6 +3278,11 @@
       return;
     }
 
+    if (target.id === 'addBar') {
+      addBar();
+      return;
+    }
+
     if (target.id === 'addHeatmap') {
       addHeatmap();
       return;
@@ -2817,6 +3315,11 @@
 
     if (target.dataset.action === 'heatmap-settings') {
       openHeatmapSettingsDialog(target.dataset.id);
+      return;
+    }
+
+    if (target.dataset.action === 'bar-settings') {
+      openBarSettingsDialog(target.dataset.id);
       return;
     }
 
@@ -2864,6 +3367,27 @@
       if (!Number.isInteger(idx) || idx < 0 || idx >= statSettingsSeriesDraft.length) return;
       statSettingsSeriesDraft.splice(idx, 1);
       renderStatSettingsSeriesList();
+      return;
+    }
+
+    if (target.dataset.action === 'bar-series-delete') {
+      const idx = Number(target.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= barSettingsSeriesDraft.length) return;
+      barSettingsSeriesDraft.splice(idx, 1);
+      renderBarSettingsSeriesList();
+      return;
+    }
+
+    if (target.dataset.action === 'bar-series-up' || target.dataset.action === 'bar-series-down') {
+      const idx = Number(target.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= barSettingsSeriesDraft.length) return;
+      const delta = target.dataset.action === 'bar-series-up' ? -1 : 1;
+      const other = idx + delta;
+      if (other < 0 || other >= barSettingsSeriesDraft.length) return;
+      const tmp = barSettingsSeriesDraft[idx];
+      barSettingsSeriesDraft[idx] = barSettingsSeriesDraft[other];
+      barSettingsSeriesDraft[other] = tmp;
+      renderBarSettingsSeriesList();
       return;
     }
 
@@ -2925,6 +3449,15 @@
       if (!panel || panel.kind !== 'heatmap') return;
       panel.cellsPerDay = normalizeHeatmapCells(target.value || '24');
       refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'bar-interval') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'bar') return;
+      panel.barInterval = normalizeBarInterval(target.value || 'day');
+      refreshBar(id).catch((err) => console.error(err));
       return;
     }
     if (target.dataset.action === 'api-trace') {
@@ -3087,6 +3620,61 @@
 
   heatmapSettingsDialog.addEventListener('close', () => {
     activeSettingsHeatmapId = null;
+  });
+
+  document.getElementById('barSettingsForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeSettingsBarId) {
+      barSettingsDialog.close();
+      return;
+    }
+    const c = charts.get(activeSettingsBarId);
+    if (!c || c.kind !== 'bar') {
+      barSettingsDialog.close();
+      return;
+    }
+    c.label = String(barSettingsName.value || '').trim() || null;
+    c.barWidthPx = normalizeBarWidthPx(barSettingsWidth ? barSettingsWidth.value : c.barWidthPx);
+    c.barGapPx = normalizeBarGapPx(barSettingsGap ? barSettingsGap.value : c.barGapPx);
+    c.barGroupGapPx = normalizeBarGroupGapPx(barSettingsGroupGap ? barSettingsGroupGap.value : c.barGroupGapPx);
+    c.series = Array.isArray(barSettingsSeriesDraft) ? [...barSettingsSeriesDraft] : [];
+    c.seriesColorByName = {};
+    for (const seriesName of c.series) {
+      const color = String(barSettingsSeriesColorDraft[String(seriesName)] || '').trim();
+      if (color) c.seriesColorByName[String(seriesName)] = color;
+    }
+    updateTitle(activeSettingsBarId);
+    refreshBar(activeSettingsBarId).catch((err) => console.error(err));
+    activeSettingsBarId = null;
+    barSettingsSeriesDraft = [];
+    barSettingsSeriesColorDraft = {};
+    barSettingsDialog.close();
+  });
+
+  document.getElementById('cancelBarSettings').addEventListener('click', () => {
+    activeSettingsBarId = null;
+    barSettingsSeriesDraft = [];
+    barSettingsSeriesColorDraft = {};
+    barSettingsDialog.close();
+  });
+
+  document.getElementById('removeBarSettings').addEventListener('click', () => {
+    if (!activeSettingsBarId) {
+      barSettingsDialog.close();
+      return;
+    }
+    const removeId = activeSettingsBarId;
+    activeSettingsBarId = null;
+    barSettingsSeriesDraft = [];
+    barSettingsSeriesColorDraft = {};
+    barSettingsDialog.close();
+    removePanel(removeId);
+  });
+
+  barSettingsDialog.addEventListener('close', () => {
+    activeSettingsBarId = null;
+    barSettingsSeriesDraft = [];
+    barSettingsSeriesColorDraft = {};
   });
 
   document.getElementById('statColumnsForm').addEventListener('submit', (e) => {
@@ -3446,7 +4034,7 @@
 
   grid.on('resizestop', () => {
     charts.forEach((c) => {
-      if ((c.kind === 'chart' || c.kind === 'heatmap') && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
         c.instance.resize();
       }
     });
@@ -3455,7 +4043,7 @@
 
   window.addEventListener('resize', () => {
     charts.forEach((c) => {
-      if ((c.kind === 'chart' || c.kind === 'heatmap') && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
         c.instance.resize();
       }
     });
