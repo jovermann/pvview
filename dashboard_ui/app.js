@@ -1715,6 +1715,7 @@
         const data = eventsBySeries.get(seriesName) || { points: [], decimalPlaces: undefined };
         const displayRule = effectiveDisplayRuleForSeries(seriesName, unitForSeriesName(seriesName), data.decimalPlaces);
         const slotMins = new Array(slotCount + 1).fill(null);
+        const slotMaxs = new Array(slotCount + 1).fill(null);
         const points = Array.isArray(data.points) ? data.points : [];
         for (const p of points) {
           if (!p || typeof p !== 'object') continue;
@@ -1731,19 +1732,28 @@
           if (slotMins[slotIdx] === null || scaled < slotMins[slotIdx]) {
             slotMins[slotIdx] = scaled;
           }
+          if (slotMaxs[slotIdx] === null || scaled > slotMaxs[slotIdx]) {
+            slotMaxs[slotIdx] = scaled;
+          }
         }
         const barValues = [];
         for (let i = 0; i < slotCount; i += 1) {
           const cur = slotMins[i];
           const next = slotMins[i + 1];
+          const prevMax = i > 0 ? slotMaxs[i - 1] : null;
+          const curMax = slotMaxs[i];
+          const left = (typeof cur === 'number' && Number.isFinite(cur)) ? cur
+            : ((typeof prevMax === 'number' && Number.isFinite(prevMax)) ? prevMax : null);
+          const right = (typeof next === 'number' && Number.isFinite(next)) ? next
+            : ((typeof curMax === 'number' && Number.isFinite(curMax)) ? curMax : null);
           if (
-            typeof cur !== 'number' || !Number.isFinite(cur)
-            || typeof next !== 'number' || !Number.isFinite(next)
-            || cur === 0 || next === 0
+            typeof left !== 'number' || !Number.isFinite(left)
+            || typeof right !== 'number' || !Number.isFinite(right)
+            || left === 0 || right === 0
           ) {
             barValues.push(0);
           } else {
-            barValues.push(roundNumeric(next - cur));
+            barValues.push(roundNumeric(right - left));
           }
         }
         seriesDefs.push({
