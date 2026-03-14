@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 20;
+  const FRONTEND_API_VERSION = 21;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const NEW_EMPTY_DASHBOARD_VALUE = '__new_empty_dashboard__';
   const AUTO_DETECT_LABEL = 'Auto Detect';
@@ -250,6 +250,21 @@
 
   const chartGranularityOptions = ['auto', 'raw', '1s', '5s', '15s', '1m', '5m', '15m', '1h'];
   const barIntervalOptions = ['hour', 'day', 'week', 'month'];
+  const virtualLeftScalingOptions = [
+    '*1',
+    '*1000',
+    '*3600',
+    '*1000000',
+    '*3600000',
+    '*1000000000',
+    '*3600000000',
+    '/1000',
+    '/3600',
+    '/1000000',
+    '/3600000',
+    '/1000000000',
+    '/3600000000',
+  ];
 
   function normalizeChartGranularity(value) {
     const text = String(value || '').trim().toLowerCase();
@@ -259,6 +274,11 @@
   function normalizeBarInterval(value) {
     const text = String(value || '').trim().toLowerCase();
     return barIntervalOptions.includes(text) ? text : 'day';
+  }
+
+  function normalizeVirtualLeftScaling(value) {
+    const s = String(value || '').trim();
+    return virtualLeftScalingOptions.includes(s) ? s : '*1';
   }
 
   function normalizeBarWidthPx(value) {
@@ -946,6 +966,7 @@
       .map((d) => ({
         name: String(d.name || '').trim(),
         left: String(d.left || '').trim(),
+        leftScaling: normalizeVirtualLeftScaling(d.leftScaling),
         op: String(d.op || '').trim(),
         right: String(d.right || '').trim(),
       }))
@@ -991,6 +1012,9 @@
       <div class="virtual-row" data-index="${i}">
         <input type="text" data-field="name" placeholder="name" value="${htmlEscape(d.name || '')}" />
         <input type="text" data-field="left" placeholder="left series" list="virtualSeriesCandidates" value="${htmlEscape(d.left || '')}" />
+        <select data-field="leftScaling">
+          ${virtualLeftScalingOptions.map((s) => `<option value="${s}" ${normalizeVirtualLeftScaling(d.leftScaling) === s ? 'selected' : ''}>${s === '*1' ? '(none)' : s}</option>`).join('')}
+        </select>
         <select data-field="op">
           ${['+', '-', '*', '/', 'today', 'yesterday'].map((op) => `<option value="${op}" ${d.op === op ? 'selected' : ''}>${op}</option>`).join('')}
         </select>
@@ -1001,7 +1025,7 @@
   }
 
   function addVirtualSeriesDraftRow() {
-    virtualSeriesDialogDraft.push({ name: '', left: '', op: '+', right: '' });
+    virtualSeriesDialogDraft.push({ name: '', left: '', leftScaling: '*1', op: '+', right: '' });
     renderVirtualSeriesRows();
   }
 
@@ -3970,14 +3994,15 @@
       .map((d) => ({
         name: String(d.name || '').trim(),
         left: String(d.left || '').trim(),
+        leftScaling: normalizeVirtualLeftScaling(d.leftScaling),
         op: String(d.op || '').trim(),
         right: String(d.right || '').trim(),
       }))
       .filter((d) => d.name || d.left || d.right);
     const seen = new Set();
     for (const d of defs) {
-      if (!d.name || !d.left || !['+', '-', '*', '/', 'today', 'yesterday'].includes(d.op) || (!(d.op === 'today' || d.op === 'yesterday') && !d.right)) {
-        alert('Each virtual series row must have name, left series, operator, and right series (right is optional for "today"/"yesterday").');
+      if (!d.name || !d.left || !virtualLeftScalingOptions.includes(d.leftScaling) || !['+', '-', '*', '/', 'today', 'yesterday'].includes(d.op) || (!(d.op === 'today' || d.op === 'yesterday') && !d.right)) {
+        alert('Each virtual series row must have name, left series, scaling, operator, and right series (right is optional for "today"/"yesterday").');
         return;
       }
       if (seen.has(d.name)) {

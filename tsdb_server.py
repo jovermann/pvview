@@ -54,7 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 20  # Increment when API endpoints or payload schemas change.
+API_VERSION = 21  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 DEFAULT_MIN_POINTS = 10
 
@@ -79,6 +79,7 @@ class VirtualSeriesDef:
     left: str
     op: str
     right: str
+    left_scaling: str = "*1"
 
 
 @dataclass
@@ -128,6 +129,16 @@ _REQUEST_TRACE = threading.local()
 
 _SERIES_STATS_CACHE_LOCK = threading.Lock()
 _SERIES_STATS_CACHE: Dict[Tuple[str, str], SeriesStatSummaryCacheEntry] = {}
+
+_VIRTUAL_LEFT_SCALING_FACTORS = (
+    1000,
+    3600,
+    1_000_000,
+    3_600_000,
+    1_000_000_000,
+    3_600_000_000,
+)
+_VIRTUAL_LEFT_SCALINGS = {"*1"} | {f"*{f}" for f in _VIRTUAL_LEFT_SCALING_FACTORS} | {f"/{f}" for f in _VIRTUAL_LEFT_SCALING_FACTORS}
 
 _DOWNSAMPLE_BUCKETS: List[Tuple[int, str]] = [
     (5_000, "5s"),
@@ -1096,13 +1107,14 @@ def _normalize_virtual_series_def(obj: Any) -> Optional[VirtualSeriesDef]:
         return None
     name = str(obj.get("name", "")).strip()
     left = str(obj.get("left", "")).strip()
+    left_scaling = str(obj.get("leftScaling", obj.get("scaling", "*1"))).strip() or "*1"
     op = str(obj.get("op", "")).strip()
     right = str(obj.get("right", "")).strip()
-    if not name or not left or op not in {"+", "-", "*", "/", "today", "yesterday"}:
+    if not name or not left or op not in {"+", "-", "*", "/", "today", "yesterday"} or left_scaling not in _VIRTUAL_LEFT_SCALINGS:
         return None
     if op not in {"today", "yesterday"} and not right:
         return None
-    return VirtualSeriesDef(name=name, left=left, op=op, right=right)
+    return VirtualSeriesDef(name=name, left=left, left_scaling=left_scaling, op=op, right=right)
 
 
 def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
@@ -1201,7 +1213,7 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit
     payload = {
         "alignWindowMs": int(align_window_ms),
         "virtualSeries": [
-            {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
+            {"name": d.name, "left": d.left, "leftScaling": d.left_scaling, "op": d.op, "right": d.right}
             for d in defs
         ],
         "unitOverrides": [
@@ -1449,6 +1461,75 @@ def _parse_virtual_constant(value: str) -> Optional[float]:
     return n
 
 
+def _apply_left_scaling_value(value: float, left_scaling: str) -> Optional[float]:
+    s = str(left_scaling or "*1").strip()
+    if s == "*1":
+        out = value
+    elif s.startswith("*"):
+        try:
+            factor = float(s[1:])
+        except ValueError:
+            return None
+        out = value * factor
+    elif s.startswith("/"):
+        try:
+            factor = float(s[1:])
+        except ValueError:
+            return None
+        if factor == 0:
+            return None
+        out = value / factor
+    else:
+        return None
+    if out != out or abs(out) == float("inf"):
+        return None
+    return out
+
+
+def _apply_left_scaling_events(events: List[Event], left_scaling: str) -> List[Event]:
+    if left_scaling == "*1":
+        return list(events)
+    result: List[Event] = []
+    for ev in events:
+        v = ev.value
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        out = _apply_left_scaling_value(float(v), left_scaling)
+        if out is None:
+            continue
+        result.append(Event(ev.timestamp_ms, out))
+    return result
+
+
+def _apply_left_scaling_points(points: List[Dict[str, Any]], left_scaling: str, decimal_places: int) -> List[Dict[str, Any]]:
+    if left_scaling == "*1":
+        return list(points)
+    result: List[Dict[str, Any]] = []
+    for point in points:
+        stats = _point_numeric_stats(point)
+        if stats is None:
+            continue
+        min_out = _apply_left_scaling_value(float(stats["min"]), left_scaling)
+        avg_out = _apply_left_scaling_value(float(stats["avg"]), left_scaling)
+        max_out = _apply_left_scaling_value(float(stats["max"]), left_scaling)
+        if min_out is None or avg_out is None or max_out is None:
+            continue
+        lo = min(min_out, max_out)
+        hi = max(min_out, max_out)
+        result.append(
+            {
+                "timestamp": int(stats["timestamp"]),
+                "start": int(stats["start"]),
+                "end": int(stats["end"]),
+                "count": int(stats["count"]),
+                "min": round(lo, decimal_places),
+                "avg": round(avg_out, decimal_places),
+                "max": round(hi, decimal_places),
+            }
+        )
+    return result
+
+
 def _compute_virtual_events_with_constant(events: List[Event], constant: float, op: str, constant_on_left: bool) -> List[Event]:
     result: List[Event] = []
     for ev in events:
@@ -1660,14 +1741,18 @@ def _compute_one_virtual_series_points(
     left_is_const, left_const, left_points, left_dp, left_files, left_sig = _resolve_virtual_operand_points(
         data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, bucket_ms
     )
+    if left_is_const and left_const is not None:
+        left_const = _apply_left_scaling_value(float(left_const), d.left_scaling)
+    else:
+        left_points = _apply_left_scaling_points(left_points, d.left_scaling, left_dp)
     if d.op in {"today", "yesterday"}:
         if left_is_const:
-            entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), [], 3, [])
+            entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), [], 3, [])
             return [], 3, [], _virtual_points_result_signature(entry)
         decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
         points = _compute_virtual_points_today(left_points, decimal_places) if d.op == "today" else _compute_virtual_points_yesterday(left_points, decimal_places)
         points = [p for p in points if start_ms <= int(p.get("timestamp", 0)) <= end_ms]
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), list(points), decimal_places, sorted(set(left_files)))
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), list(points), decimal_places, sorted(set(left_files)))
         return points, decimal_places, sorted(set(left_files)), _virtual_points_result_signature(entry)
 
     right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
@@ -1675,18 +1760,20 @@ def _compute_one_virtual_series_points(
     )
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     if left_is_const and right_is_const:
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, [], 3, [])
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, [], 3, [])
         return [], 3, [], _virtual_points_result_signature(entry)
     if left_is_const:
+        if left_const is None:
+            return [], 3, [], ("empty",)
         points = _combine_numeric_points_with_constant(right_points, float(left_const), d.op, True, decimal_places)
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(right_files)))
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(right_files)))
         return points, decimal_places, sorted(set(right_files)), _virtual_points_result_signature(entry)
     if right_is_const:
         points = _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places)
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files)))
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files)))
         return points, decimal_places, sorted(set(left_files)), _virtual_points_result_signature(entry)
     points = _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places)
-    entry = VirtualPointsCacheEntry((d.name, d.left, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files + right_files)))
+    entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files + right_files)))
     return points, decimal_places, sorted(set(left_files + right_files)), _virtual_points_result_signature(entry)
 
 
@@ -1796,7 +1883,7 @@ def _compute_one_virtual_series_points_cached(
     align_window_ms: int,
 ) -> Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     cache_key = (os.path.abspath(data_dir), d.name, int(start_ms), int(end_ms), int(bucket_ms))
-    definition = (d.name, d.left, d.op, d.right, int(align_window_ms), int(start_ms), int(end_ms), int(bucket_ms))
+    definition = (d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), int(start_ms), int(end_ms), int(bucket_ms))
     operand_start_ms = start_ms
     operand_end_ms = end_ms
     if d.op in {"today", "yesterday"}:
@@ -1810,6 +1897,10 @@ def _compute_one_virtual_series_points_cached(
     left_is_const, left_const, left_points, left_dp, left_files, left_sig = _resolve_virtual_operand_points(
         data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, bucket_ms
     )
+    if left_is_const and left_const is not None:
+        left_const = _apply_left_scaling_value(float(left_const), d.left_scaling)
+    else:
+        left_points = _apply_left_scaling_points(left_points, d.left_scaling, left_dp)
     if d.op in {"today", "yesterday"}:
         right_is_const, right_const, right_points, right_dp, right_files, right_sig = True, None, [], 0, [], (d.op,)
     else:
@@ -1875,9 +1966,13 @@ def _compute_one_virtual_series_cached(
     align_window_ms: int,
 ) -> Tuple[List[Event], int, List[str], Tuple[Any, ...]]:
     cache_key = (os.path.abspath(data_dir), d.name)
-    definition = (d.name, d.left, d.op, d.right, int(align_window_ms))
+    definition = (d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms))
 
     left_is_const, left_const, left_events, left_dp, left_files, left_sig = _resolve_virtual_operand(data_dir, d.left, prior_virtuals)
+    if left_is_const and left_const is not None:
+        left_const = _apply_left_scaling_value(float(left_const), d.left_scaling)
+    else:
+        left_events = _apply_left_scaling_events(left_events, d.left_scaling)
     if d.op in {"today", "yesterday"}:
         right_sig = (d.op,)
         with _VIRTUAL_SERIES_CACHE_LOCK:
@@ -1943,7 +2038,10 @@ def _compute_one_virtual_series_cached(
             return list(entry.events), entry.decimal_places, list(entry.files), _virtual_result_signature(entry)
 
     if left_is_const:
-        events = _compute_virtual_events_with_constant(right_events, float(left_const), d.op, True)
+        if left_const is None:
+            events = []
+        else:
+            events = _compute_virtual_events_with_constant(right_events, float(left_const), d.op, True)
     elif right_is_const:
         events = _compute_virtual_events_with_constant(left_events, float(right_const), d.op, False)
     else:
@@ -2470,7 +2568,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             {
                 "alignWindowMs": int(align_window_ms),
                 "virtualSeries": [
-                    {"name": d.name, "left": d.left, "op": d.op, "right": d.right}
+                    {"name": d.name, "left": d.left, "leftScaling": d.left_scaling, "op": d.op, "right": d.right}
                     for d in defs
                 ],
                 "unitOverrides": overrides,
@@ -2513,7 +2611,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         for item in items:
             d = _normalize_virtual_series_def(item)
             if d is None:
-                raise ValueError("Each virtual series must include name,left,op and valid operator (+ - * / today yesterday); right is optional for today/yesterday")
+                raise ValueError("Each virtual series must include name,left,leftScaling,op and valid operator (+ - * / today yesterday); right is optional for today/yesterday")
             if d.name in seen:
                 raise ValueError(f"Duplicate virtual series name: {d.name}")
             seen.add(d.name)

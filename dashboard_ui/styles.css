@@ -445,7 +445,7 @@ main { padding: 2px; }
 
 .virtual-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.3fr) 64px minmax(180px, 1.3fr) auto;
+  grid-template-columns: minmax(120px, 0.85fr) minmax(180px, 1.2fr) 112px 64px minmax(180px, 1.2fr) auto;
   gap: 4px;
   align-items: center;
   padding: 2px 1px;
