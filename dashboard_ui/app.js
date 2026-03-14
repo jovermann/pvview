@@ -1687,15 +1687,13 @@
       const fetchEnd = visibleEnd + intervalMs;
       const fetchStart = visibleStart;
       const minPoints = normalizeMinPoints(Math.max(200, slotCount * 8), 200);
-      const granularity = normalizeChartGranularity(globalGranularity);
+      const granularity = '1h';
       const q = new URLSearchParams({
         start: String(fetchStart),
         end: String(fetchEnd),
         minPoints: String(minPoints),
+        granularity,
       });
-      if (granularity !== 'auto') {
-        q.set('granularity', granularity);
-      }
       for (const name of cfg.series) q.append('series', name);
       const reqT0 = performance.now();
       appendConsoleLine(`bar ${id} request start batch series=${cfg.series.length} enabled=${enabledSeriesCount} interval=${interval} slots=${slotCount} minPoints=${minPoints} granularity=${granularity}`);
