@@ -235,8 +235,8 @@
     return normalizeMinPoints(Math.floor(width / 2), 10);
   }
 
-  function bucketLabelShort(bucketMs) {
-    const n = Number(bucketMs);
+  function granularityLabelShort(granularityMs) {
+    const n = Number(granularityMs);
     if (!Number.isFinite(n) || n <= 0) return 'raw';
     if (n === 1000) return '1s';
     if (n === 5000) return '5s';
@@ -317,7 +317,7 @@
     return md;
   }
 
-  function summarizeBucketMode(items, countKey, startMs, endMs, ignorePredicate = null) {
+  function summarizeGranularityMode(items, countKey, startMs, endMs, ignorePredicate = null) {
     const bucketCounts = new Map();
     let rawCount = 0;
     let totalBuckets = 0;
@@ -326,20 +326,20 @@
       if (typeof ignorePredicate === 'function' && ignorePredicate(item)) continue;
       const buckets = Number(item[countKey]);
       if (Number.isFinite(buckets) && buckets > 0) totalBuckets += buckets;
-      const bucketMs = Number(item.bucketMs);
-      if (Number.isFinite(bucketMs) && bucketMs > 0) {
-        bucketCounts.set(bucketMs, (bucketCounts.get(bucketMs) || 0) + 1);
+      const granularityMs = Number(item.granularityMs);
+      if (Number.isFinite(granularityMs) && granularityMs > 0) {
+        bucketCounts.set(granularityMs, (bucketCounts.get(granularityMs) || 0) + 1);
       } else {
         rawCount += 1;
       }
     }
     if (bucketCounts.size === 0) return { label: 'raw', buckets: totalBuckets, potentialBuckets: totalBuckets };
     if (rawCount === 0 && bucketCounts.size === 1) {
-      const bucketMs = Array.from(bucketCounts.keys())[0];
-      const potentialBuckets = Math.max(0, Math.ceil((Math.max(0, Number(endMs) - Number(startMs)) + 1) / bucketMs));
-      return { label: bucketLabelShort(bucketMs), buckets: totalBuckets, potentialBuckets };
+      const granularityMs = Array.from(bucketCounts.keys())[0];
+      const potentialBuckets = Math.max(0, Math.ceil((Math.max(0, Number(endMs) - Number(startMs)) + 1) / granularityMs));
+      return { label: granularityLabelShort(granularityMs), buckets: totalBuckets, potentialBuckets };
     }
-    const labels = Array.from(bucketCounts.keys()).sort((a, b) => a - b).map((ms) => bucketLabelShort(ms));
+    const labels = Array.from(bucketCounts.keys()).sort((a, b) => a - b).map((ms) => granularityLabelShort(ms));
     if (rawCount > 0) labels.unshift('raw');
     return { label: labels.join('/'), buckets: totalBuckets, potentialBuckets: totalBuckets };
   }
@@ -1536,12 +1536,12 @@
       const targetCellSize = plotHeight / cellsPerDay;
       const dayColumns = Math.max(1, Math.round(plotWidth / targetCellSize));
       const cellMs = dayMs / cellsPerDay;
-      const fetchBucketMs = (() => {
+      const fetchGranularityMs = (() => {
         if (cellsPerDay <= 24) return 3600000;
         if (cellsPerDay <= 96) return 900000;
         return 300000;
       })();
-      const fetchGranularity = bucketLabelShort(fetchBucketMs);
+      const fetchGranularity = granularityLabelShort(fetchGranularityMs);
       const rightDay = new Date(end);
       rightDay.setHours(0, 0, 0, 0);
       const visibleStart = rightDay.getTime() - (dayColumns - 1) * dayMs;
@@ -2008,7 +2008,7 @@
         latestTimestampMs: Number.isFinite(latestTimestampMs) ? latestTimestampMs : undefined,
         downsampled: !!data.downsampled,
         returnedPoints: Number.isFinite(Number(data.returnedPoints)) ? Number(data.returnedPoints) : points.length,
-        bucketMs: Number.isFinite(Number(data.bucketMs)) ? Number(data.bucketMs) : null,
+        granularityMs: Number.isFinite(Number(data.granularityMs)) ? Number(data.granularityMs) : null,
       };
     }));
 
@@ -2027,7 +2027,7 @@
     const decimalsByLegendName = new Map();
     const hideMaxByLegendName = new Map();
     const pointsByLegendName = new Map();
-    const bucketModeByLegendName = new Map();
+    const granularityModeByLegendName = new Map();
     for (const s of seriesResponses) {
       let maxValue = s.legendMax;
       let curValue;
@@ -2075,10 +2075,10 @@
         s.displayName,
         Number(pointsByLegendName.get(s.displayName) || 0) + Number(s.returnedPoints || 0)
       );
-      const existingBucketMode = bucketModeByLegendName.get(s.displayName);
-      const nextBucketMode = Number.isFinite(s.bucketMs) ? bucketLabelShort(s.bucketMs) : 'raw';
-      if (!existingBucketMode || existingBucketMode === 'raw') {
-        bucketModeByLegendName.set(s.displayName, nextBucketMode);
+      const existingGranularityMode = granularityModeByLegendName.get(s.displayName);
+      const nextGranularityMode = Number.isFinite(s.granularityMs) ? granularityLabelShort(s.granularityMs) : 'raw';
+      if (!existingGranularityMode || existingGranularityMode === 'raw') {
+        granularityModeByLegendName.set(s.displayName, nextGranularityMode);
       }
     }
     const displayNameToSeries = new Map();
@@ -2124,10 +2124,10 @@
     }));
 
     const axisCount = yAxes.length;
-    const chartBucketSummary = summarizeBucketMode(eventItems, 'returnedPoints', start, end);
+    const chartGranularitySummary = summarizeGranularityMode(eventItems, 'returnedPoints', start, end);
     appendConsoleLine(
-      `chart ${id} request buckets mode=${chartBucketSummary.label} `
-      + `buckets=${chartBucketSummary.buckets}/${chartBucketSummary.potentialBuckets}`
+      `chart ${id} request granularity=${chartGranularitySummary.label} `
+      + `buckets=${chartGranularitySummary.buckets}/${chartGranularitySummary.potentialBuckets}`
     );
     const chartMetaParts = [];
     if (showMinPointsDebug) chartMetaParts.push(`min ${minPoints}`);
@@ -2156,8 +2156,8 @@
           const decimals = decimalsByLegendName.get(name);
           const hideMax = !!hideMaxByLegendName.get(name);
           const pointsCount = Number(pointsByLegendName.get(name) || 0);
-          const bucketMode = bucketModeByLegendName.get(name) || 'raw';
-          const pointsText = `${pointsCount} pts, ${bucketMode}`;
+          const granularityMode = granularityModeByLegendName.get(name) || 'raw';
+          const pointsText = `${pointsCount} pts, ${granularityMode}`;
           const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
           const addDebug = (base) => showMinPointsDebug ? `${base}, ${pointsText}` : base;
           if (hideMax) {

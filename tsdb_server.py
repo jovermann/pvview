@@ -4,7 +4,7 @@
 API:
 - GET /health
 - GET /series?start=<ts>&end=<ts>
-- GET /events?series=<name>&start=<ts>&end=<ts>&minPoints=<n>
+- GET /events?series=<name>&start=<ts>&end=<ts>&minPoints=<n>&granularity=<auto|raw|1s|5s|15s|1m|5m|15m|1h>
   (or repeated series params for batched response)
 - GET /stats?series=<name>&start=<ts>&end=<ts>
 - GET /virtual-series
@@ -30,6 +30,8 @@ Response for /events:
   "requestedMinPoints": <n>,
   "returnedPoints": <n>,
   "downsampled": <bool>,
+  "requestedGranularity": <auto|raw|1s|5s|15s|1m|5m|15m|1h|<ms>>,
+  "granularityMs": <0|1000|5000|15000|60000|300000|900000|3600000>,
   "points": [...]
 }
 
@@ -159,13 +161,13 @@ _ALL_DOWNSAMPLE_BUCKETS: List[Tuple[int, str, int]] = [
     (3_600_000, "1h", 3),
 ]
 
-_DOWNSAMPLE_LABEL_TO_MS: Dict[str, int] = {label: bucket_ms for bucket_ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS}
+_DOWNSAMPLE_LABEL_TO_MS: Dict[str, int] = {label: granularity_ms for granularity_ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS}
 
 
 @dataclass
 class DownsampledDayCacheEntry:
     source_signature: Tuple[Any, ...]
-    bucket_ms: int
+    granularity_ms: int
     day: datetime.date
     numeric_series: Dict[str, List[Dict[str, Any]]]
     string_series: Dict[str, List[Dict[str, Any]]]
@@ -265,20 +267,20 @@ def _original_file_for_day(data_dir: str, day: datetime.date) -> str:
     return os.path.join(data_dir, f"data_{day.isoformat()}.tsdb")
 
 
-def _downsampled_file_for_day(data_dir: str, day: datetime.date, bucket_ms: int) -> str:
+def _downsampled_file_for_day(data_dir: str, day: datetime.date, granularity_ms: int) -> str:
     """Execute downsampled file for day as part of TSDB server processing.
 
     Args:
         data_dir: Directory containing TSDB files and server metadata files.
         day: UTC calendar day being processed.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
 
     Returns:
         str: Result produced by this function.
     """
-    label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == bucket_ms), None)
+    label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
     if label is None:
-        raise ValueError(f"Unsupported bucket size: {bucket_ms}")
+        raise ValueError(f"Unsupported bucket size: {granularity_ms}")
     return os.path.join(data_dir, f"dsda_{day.isoformat()}.{label}.tsdb")
 
 
@@ -295,20 +297,20 @@ def _day_start_ms(day: datetime.date) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def _bucket_center_ms(bucket_start_ms: int, bucket_ms: int) -> int:
+def _bucket_center_ms(bucket_start_ms: int, granularity_ms: int) -> int:
     """Execute bucket center ms as part of TSDB server processing.
 
     Args:
         bucket_start_ms: Parameter `bucket_start_ms` of type `int` used by this function.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
 
     Returns:
         int: Result produced by this function.
     """
-    return bucket_start_ms + (bucket_ms // 2)
+    return bucket_start_ms + (granularity_ms // 2)
 
 
-def _choose_auto_bucket_ms(start_ms: int, end_ms: int, min_points: int) -> int:
+def _choose_auto_granularity_ms(start_ms: int, end_ms: int, min_points: int) -> int:
     """Choose auto bucket ms based on request bounds and limits.
 
     Args:
@@ -320,9 +322,9 @@ def _choose_auto_bucket_ms(start_ms: int, end_ms: int, min_points: int) -> int:
         int: Result produced by this function.
     """
     span = max(1, end_ms - start_ms + 1)
-    for bucket_ms, _name, _elem_size in reversed(_ALL_DOWNSAMPLE_BUCKETS):
-        if (span + bucket_ms - 1) // bucket_ms >= min_points:
-            return bucket_ms
+    for granularity_ms, _name, _elem_size in reversed(_ALL_DOWNSAMPLE_BUCKETS):
+        if (span + granularity_ms - 1) // granularity_ms >= min_points:
+            return granularity_ms
     return 0
 
 
@@ -342,19 +344,19 @@ def _parse_granularity_override(value: Optional[str]) -> Optional[int]:
         return None
     if text == "raw":
         return 0
-    bucket_ms = _DOWNSAMPLE_LABEL_TO_MS.get(text)
-    if bucket_ms is None:
+    granularity_ms = _DOWNSAMPLE_LABEL_TO_MS.get(text)
+    if granularity_ms is None:
         raise ValueError(f"Unsupported granularity: {value}")
-    return bucket_ms
+    return granularity_ms
 
 
-def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, bucket_ms: int) -> DownsampledDayCacheEntry:
+def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, granularity_ms: int) -> DownsampledDayCacheEntry:
     """Build downsampled day cache from original for API responses.
 
     Args:
         path: Filesystem path or URL path segment.
         day: UTC calendar day being processed.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
 
     Returns:
         DownsampledDayCacheEntry: Result produced by this function.
@@ -385,7 +387,7 @@ def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, bu
                     continue
                 if not isinstance(ev.value, (int, float)) or isinstance(ev.value, bool):
                     continue
-                bucket_idx = (ts - day_start_ms) // bucket_ms
+                bucket_idx = (ts - day_start_ms) // granularity_ms
                 bucket = buckets.get(bucket_idx)
                 value = float(ev.value)
                 if bucket is None:
@@ -400,11 +402,11 @@ def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, bu
             points: List[Dict[str, Any]] = []
             for bucket_idx in sorted(buckets.keys()):
                 bucket = buckets[bucket_idx]
-                bucket_start = day_start_ms + bucket_idx * bucket_ms
-                bucket_end = min(day_end_ms, bucket_start + bucket_ms - 1)
+                bucket_start = day_start_ms + bucket_idx * granularity_ms
+                bucket_end = min(day_end_ms, bucket_start + granularity_ms - 1)
                 points.append(
                     {
-                        "timestamp": _bucket_center_ms(bucket_start, bucket_ms),
+                        "timestamp": _bucket_center_ms(bucket_start, granularity_ms),
                         "start": bucket_start,
                         "end": bucket_end,
                         "count": int(bucket["count"]),
@@ -421,18 +423,18 @@ def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, bu
                 ts = ev.timestamp_ms
                 if ts < day_start_ms or ts > day_end_ms or not isinstance(ev.value, str):
                     continue
-                bucket_idx = (ts - day_start_ms) // bucket_ms
+                bucket_idx = (ts - day_start_ms) // granularity_ms
                 buckets[bucket_idx] = ev.value
             points = []
             for bucket_idx in sorted(buckets.keys()):
-                bucket_start = day_start_ms + bucket_idx * bucket_ms
-                points.append({"timestamp": _bucket_center_ms(bucket_start, bucket_ms), "value": buckets[bucket_idx]})
+                bucket_start = day_start_ms + bucket_idx * granularity_ms
+                points.append({"timestamp": _bucket_center_ms(bucket_start, granularity_ms), "value": buckets[bucket_idx]})
             if points:
                 string_series[series_name] = points
 
     return DownsampledDayCacheEntry(
         source_signature=(path, cache.mtime_ns, cache.size),
-        bucket_ms=bucket_ms,
+        granularity_ms=granularity_ms,
         day=day,
         numeric_series=numeric_series,
         string_series=string_series,
@@ -441,13 +443,13 @@ def _build_downsampled_day_cache_from_original(path: str, day: datetime.date, bu
     )
 
 
-def _new_incremental_downsampled_day_cache_entry(path: str, day: datetime.date, bucket_ms: int) -> DownsampledDayCacheEntry:
+def _new_incremental_downsampled_day_cache_entry(path: str, day: datetime.date, granularity_ms: int) -> DownsampledDayCacheEntry:
     """Execute new incremental downsampled day cache entry as part of TSDB server processing.
 
     Args:
         path: Filesystem path or URL path segment.
         day: UTC calendar day being processed.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
 
     Returns:
         DownsampledDayCacheEntry: Result produced by this function.
@@ -455,7 +457,7 @@ def _new_incremental_downsampled_day_cache_entry(path: str, day: datetime.date, 
     cache = get_cached_tsdb_file(path)
     return DownsampledDayCacheEntry(
         source_signature=(path, cache.mtime_ns, cache.size, cache.parsed_offset),
-        bucket_ms=bucket_ms,
+        granularity_ms=granularity_ms,
         day=day,
         numeric_series={},
         string_series={},
@@ -486,11 +488,11 @@ def _append_numeric_bucket_point(
         None. This function performs side effects only.
     """
     day_start_ms = _day_start_ms(entry.day)
-    bucket_start = day_start_ms + bucket_idx * entry.bucket_ms
-    bucket_end = min(day_start_ms + 86_400_000 - 1, bucket_start + entry.bucket_ms - 1)
+    bucket_start = day_start_ms + bucket_idx * entry.granularity_ms
+    bucket_end = min(day_start_ms + 86_400_000 - 1, bucket_start + entry.granularity_ms - 1)
     entry.numeric_series.setdefault(series_name, []).append(
         {
-            "timestamp": _bucket_center_ms(bucket_start, entry.bucket_ms),
+            "timestamp": _bucket_center_ms(bucket_start, entry.granularity_ms),
             "start": bucket_start,
             "end": bucket_end,
             "count": int(bucket["count"]),
@@ -519,16 +521,16 @@ def _append_string_bucket_point(
         None. This function performs side effects only.
     """
     day_start_ms = _day_start_ms(entry.day)
-    bucket_start = day_start_ms + bucket_idx * entry.bucket_ms
+    bucket_start = day_start_ms + bucket_idx * entry.granularity_ms
     entry.string_series.setdefault(series_name, []).append(
-        {"timestamp": _bucket_center_ms(bucket_start, entry.bucket_ms), "value": value}
+        {"timestamp": _bucket_center_ms(bucket_start, entry.granularity_ms), "value": value}
     )
 
 
 def _update_current_day_downsampled_cache_from_original(
     path: str,
     day: datetime.date,
-    bucket_ms: int,
+    granularity_ms: int,
     entry: Optional[DownsampledDayCacheEntry],
 ) -> DownsampledDayCacheEntry:
     """Execute update current day downsampled cache from original as part of TSDB server processing.
@@ -536,7 +538,7 @@ def _update_current_day_downsampled_cache_from_original(
     Args:
         path: Filesystem path or URL path segment.
         day: UTC calendar day being processed.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         entry: Parameter `entry` of type `Optional[DownsampledDayCacheEntry]` used by this function.
 
     Returns:
@@ -545,14 +547,14 @@ def _update_current_day_downsampled_cache_from_original(
     cache = get_cached_tsdb_file(path)
     if (
         entry is None
-        or entry.bucket_ms != bucket_ms
+        or entry.granularity_ms != granularity_ms
         or entry.day != day
         or entry.raw_series_counts is None
         or entry.pending_numeric is None
         or entry.pending_string is None
         or cache.parsed_offset < entry.raw_parsed_offset
     ):
-        entry = _new_incremental_downsampled_day_cache_entry(path, day, bucket_ms)
+        entry = _new_incremental_downsampled_day_cache_entry(path, day, granularity_ms)
 
     if cache.parsed_offset == entry.raw_parsed_offset and entry.series_format_ids == cache.series_format_ids:
         entry.source_signature = (path, cache.mtime_ns, cache.size, cache.parsed_offset)
@@ -566,7 +568,7 @@ def _update_current_day_downsampled_cache_from_original(
         events = cache.series_events.get(series_name, [])
         prev_count = entry.raw_series_counts.get(series_name, 0)
         if prev_count > len(events):
-            entry = _new_incremental_downsampled_day_cache_entry(path, day, bucket_ms)
+            entry = _new_incremental_downsampled_day_cache_entry(path, day, granularity_ms)
             prev_count = 0
         if is_numeric_format_id(format_id):
             series_pending = entry.pending_numeric.setdefault(series_name, {})
@@ -576,7 +578,7 @@ def _update_current_day_downsampled_cache_from_original(
                     continue
                 if not isinstance(ev.value, (int, float)) or isinstance(ev.value, bool):
                     continue
-                bucket_idx = (ts - day_start_ms) // bucket_ms
+                bucket_idx = (ts - day_start_ms) // granularity_ms
                 bucket = series_pending.get(bucket_idx)
                 value = float(ev.value)
                 if bucket is None:
@@ -594,13 +596,13 @@ def _update_current_day_downsampled_cache_from_original(
                 ts = ev.timestamp_ms
                 if ts < day_start_ms or ts > day_end_ms or not isinstance(ev.value, str):
                     continue
-                bucket_idx = (ts - day_start_ms) // bucket_ms
+                bucket_idx = (ts - day_start_ms) // granularity_ms
                 series_pending[bucket_idx] = ev.value
         entry.raw_series_counts[series_name] = len(events)
 
     latest_ts = cache.current_ts
     if latest_ts is not None and latest_ts >= day_start_ms:
-        current_bucket_idx = min((latest_ts - day_start_ms) // bucket_ms, (86_400_000 - 1) // bucket_ms)
+        current_bucket_idx = min((latest_ts - day_start_ms) // granularity_ms, (86_400_000 - 1) // granularity_ms)
         complete_before_idx = current_bucket_idx
         for series_name, series_pending in entry.pending_numeric.items():
             for bucket_idx in sorted([idx for idx in series_pending.keys() if idx < complete_before_idx]):
@@ -653,7 +655,7 @@ def _write_downsampled_day_cache(path: str, entry: DownsampledDayCacheEntry) -> 
     write_series_array_timeseries_db(
         path,
         entry.day,
-        entry.bucket_ms,
+        entry.granularity_ms,
         series_order,
         series_decimals,
         numeric_points,
@@ -698,20 +700,20 @@ def _build_all_downsampled_day_files(data_dir: str, day: datetime.date) -> None:
                 last_value = ev.value
         if last_value is not None:
             string_values[series_name] = last_value
-    for bucket_ms, _label, elem_size in _ALL_DOWNSAMPLE_BUCKETS:
+    for granularity_ms, _label, elem_size in _ALL_DOWNSAMPLE_BUCKETS:
         next_points_by_series: Dict[str, List[Tuple[int, Any]]] = {}
         for series_name in series_names:
             next_points_by_series[series_name] = downsample_series_points(
                 current_points_by_series.get(series_name, []),
                 day,
-                bucket_ms,
+                granularity_ms,
                 elem_size,
                 series_decimals.get(series_name, 0),
             )
         write_series_array_timeseries_db(
-            _downsampled_file_for_day(data_dir, day, bucket_ms),
+            _downsampled_file_for_day(data_dir, day, granularity_ms),
             day,
-            bucket_ms,
+            granularity_ms,
             series_names,
             series_decimals,
             next_points_by_series,
@@ -765,7 +767,7 @@ def _downsampled_points_from_day_cache(
 def _downsampled_points_from_ds_file(
     path: str,
     day: datetime.date,
-    bucket_ms: int,
+    granularity_ms: int,
     series_name: str,
     start_ms: int,
     end_ms: int,
@@ -775,7 +777,7 @@ def _downsampled_points_from_ds_file(
     Args:
         path: Filesystem path or URL path segment.
         day: UTC calendar day being processed.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         series_name: Series name used for lookup and processing.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
@@ -791,9 +793,9 @@ def _downsampled_points_from_ds_file(
     decimals = decimal_places_from_format_id(get_series_format_id_in_file(path, series_name))
     points: List[Dict[str, Any]] = []
     for ev in events:
-        bucket_idx = max(0, (ev.timestamp_ms - day_start_ms) // bucket_ms)
-        bucket_start = day_start_ms + bucket_idx * bucket_ms
-        bucket_end = min(day_end_ms, bucket_start + bucket_ms - 1)
+        bucket_idx = max(0, (ev.timestamp_ms - day_start_ms) // granularity_ms)
+        bucket_start = day_start_ms + bucket_idx * granularity_ms
+        bucket_end = min(day_end_ms, bucket_start + granularity_ms - 1)
         if isinstance(ev.value, dict) and {"min", "avg", "max"} <= set(ev.value.keys()):
             points.append(
                 {
@@ -813,7 +815,7 @@ def _downsampled_points_from_ds_file(
 def _get_or_build_downsampled_day_points(
     data_dir: str,
     day: datetime.date,
-    bucket_ms: int,
+    granularity_ms: int,
     series_name: str,
     start_ms: int,
     end_ms: int,
@@ -823,7 +825,7 @@ def _get_or_build_downsampled_day_points(
     Args:
         data_dir: Directory containing TSDB files and server metadata files.
         day: UTC calendar day being processed.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         series_name: Series name used for lookup and processing.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
@@ -837,20 +839,20 @@ def _get_or_build_downsampled_day_points(
 
     today = datetime.datetime.now(datetime.timezone.utc).date()
     if day == today:
-        key = (original_path, bucket_ms)
+        key = (original_path, granularity_ms)
         with _DOWNSAMPLE_DAY_CACHE_LOCK:
             entry = _DOWNSAMPLE_DAY_CACHE.get(key)
-            entry = _update_current_day_downsampled_cache_from_original(original_path, day, bucket_ms, entry)
+            entry = _update_current_day_downsampled_cache_from_original(original_path, day, granularity_ms, entry)
             _DOWNSAMPLE_DAY_CACHE[key] = entry
         _downsampled, points = _downsampled_points_from_day_cache(entry, series_name, start_ms, end_ms)
         return entry.files, points
 
-    ds_path = _downsampled_file_for_day(data_dir, day, bucket_ms)
+    ds_path = _downsampled_file_for_day(data_dir, day, granularity_ms)
     original_stat = os.stat(original_path)
     if os.path.isfile(ds_path):
         ds_stat = os.stat(ds_path)
         if ds_stat.st_mtime_ns >= original_stat.st_mtime_ns:
-            _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, bucket_ms, series_name, start_ms, end_ms)
+            _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, granularity_ms, series_name, start_ms, end_ms)
             return [os.path.basename(ds_path)], points
     events = read_tsdb_events_for_series(original_path, series_name, start_ms, end_ms)
     if not events:
@@ -858,7 +860,7 @@ def _get_or_build_downsampled_day_points(
     fmt = get_series_format_id_in_file(original_path, series_name)
     if is_numeric_format_id(fmt):
         decimals = decimal_places_from_format_id(fmt)
-        points = _downsample_fixed_numeric_events(events, bucket_ms, start_ms, end_ms, decimal_places=decimals)
+        points = _downsample_fixed_numeric_events(events, granularity_ms, start_ms, end_ms, decimal_places=decimals)
         return [os.path.basename(original_path)], points
     return [os.path.basename(original_path)], [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
 
@@ -931,7 +933,7 @@ def downsample_numeric_events(
 
 def _downsample_fixed_numeric_events(
     events: List[Event],
-    bucket_ms: int,
+    granularity_ms: int,
     start_ms: int,
     end_ms: int,
     decimal_places: Optional[int] = None,
@@ -940,7 +942,7 @@ def _downsample_fixed_numeric_events(
 
     Args:
         events: Event list containing timestamp/value pairs.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
         decimal_places: Number of decimal places used for rounding output values.
@@ -958,7 +960,7 @@ def _downsample_fixed_numeric_events(
         dt = datetime.datetime.fromtimestamp(ts / 1000.0, tz=datetime.timezone.utc)
         day = dt.date()
         day_start_ms = _day_start_ms(day)
-        bucket_idx = (ts - day_start_ms) // bucket_ms
+        bucket_idx = (ts - day_start_ms) // granularity_ms
         key = (day, bucket_idx)
         bucket = buckets.get(key)
         value = float(ev.value)
@@ -976,15 +978,15 @@ def _downsample_fixed_numeric_events(
     for (day, bucket_idx) in sorted(buckets.keys()):
         bucket = buckets[(day, bucket_idx)]
         day_start_ms = _day_start_ms(day)
-        bucket_start = day_start_ms + bucket_idx * bucket_ms
-        bucket_end = min(day_start_ms + 86_400_000 - 1, bucket_start + bucket_ms - 1)
+        bucket_start = day_start_ms + bucket_idx * granularity_ms
+        bucket_end = min(day_start_ms + 86_400_000 - 1, bucket_start + granularity_ms - 1)
         avg = bucket["sum"] / bucket["count"]
         min_value = round(bucket["min"], decimal_places) if decimal_places is not None else bucket["min"]
         avg_value = round(avg, decimal_places) if decimal_places is not None else avg
         max_value = round(bucket["max"], decimal_places) if decimal_places is not None else bucket["max"]
         points.append(
             {
-                "timestamp": _bucket_center_ms(bucket_start, bucket_ms),
+                "timestamp": _bucket_center_ms(bucket_start, granularity_ms),
                 "start": bucket_start,
                 "end": bucket_end,
                 "count": int(bucket["count"]),
@@ -1286,7 +1288,7 @@ def _real_series_points_for_virtual(
     series_name: str,
     start_ms: int,
     end_ms: int,
-    bucket_ms: int,
+    granularity_ms: int,
 ) -> Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     """Execute real series points for virtual as part of TSDB server processing.
 
@@ -1295,14 +1297,14 @@ def _real_series_points_for_virtual(
         series_name: Series name used for lookup and processing.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
 
     Returns:
         Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]: Result produced by this function.
     """
     files = find_candidate_files(data_dir, start_ms, end_ms)
     max_decimal_places: Optional[int] = None
-    if bucket_ms <= 0:
+    if granularity_ms <= 0:
         events: List[Event] = []
         source_sig_parts: List[Tuple[Any, ...]] = []
         for path in files:
@@ -1315,7 +1317,7 @@ def _real_series_points_for_virtual(
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
         events.sort(key=lambda e: e.timestamp_ms)
         points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-        return points, max_decimal_places if max_decimal_places is not None else 3, [os.path.basename(p) for p in files], _points_signature("real", series_name, bucket_ms, tuple(source_sig_parts), points)
+        return points, max_decimal_places if max_decimal_places is not None else 3, [os.path.basename(p) for p in files], _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points)
 
     has_daily_files = bool(files) and all(os.path.basename(path).startswith("data_") for path in files)
     if not has_daily_files:
@@ -1330,19 +1332,19 @@ def _real_series_points_for_virtual(
                 d = decimal_places_from_format_id(fmt)
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
         events.sort(key=lambda e: e.timestamp_ms)
-        points = _downsample_fixed_numeric_events(events, bucket_ms, start_ms, end_ms, decimal_places=max_decimal_places if max_decimal_places is not None else 3)
+        points = _downsample_fixed_numeric_events(events, granularity_ms, start_ms, end_ms, decimal_places=max_decimal_places if max_decimal_places is not None else 3)
         return (
             points,
             max_decimal_places if max_decimal_places is not None else 3,
             [os.path.basename(p) for p in files],
-            _points_signature("real", series_name, bucket_ms, tuple(source_sig_parts), points),
+            _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points),
         )
 
     points: List[Dict[str, Any]] = []
     files_used: List[str] = []
     source_sig_parts = []
     for day in day_range_utc(start_ms, end_ms):
-        day_files, day_points = _get_or_build_downsampled_day_points(data_dir, day, bucket_ms, series_name, start_ms, end_ms)
+        day_files, day_points = _get_or_build_downsampled_day_points(data_dir, day, granularity_ms, series_name, start_ms, end_ms)
         for name in day_files:
             if name not in files_used:
                 files_used.append(name)
@@ -1355,7 +1357,7 @@ def _real_series_points_for_virtual(
             d = decimal_places_from_format_id(fmt)
             max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
     points.sort(key=lambda p: int(p.get("timestamp", 0)))
-    return points, max_decimal_places if max_decimal_places is not None else 3, files_used, _points_signature("real", series_name, bucket_ms, tuple(source_sig_parts), points)
+    return points, max_decimal_places if max_decimal_places is not None else 3, files_used, _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points)
 
 
 def build_error(status: int, code: str, message: str) -> Tuple[int, Dict[str, Any]]:
@@ -2151,13 +2153,13 @@ def _virtual_points_result_signature(entry: VirtualPointsCacheEntry) -> Tuple[An
     return ("virtual-points", entry.definition, entry.left_sig, entry.right_sig)
 
 
-def _points_signature(kind: str, name: str, bucket_ms: int, source_sig: Tuple[Any, ...], points: List[Dict[str, Any]]) -> Tuple[Any, ...]:
+def _points_signature(kind: str, name: str, granularity_ms: int, source_sig: Tuple[Any, ...], points: List[Dict[str, Any]]) -> Tuple[Any, ...]:
     """Execute points signature as part of TSDB server processing.
 
     Args:
         kind: Parameter `kind` of type `str` used by this function.
         name: Parameter `name` of type `str` used by this function.
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         source_sig: Parameter `source_sig` of type `Tuple[Any, ...]` used by this function.
         points: Point list (raw or downsampled) used for chart/stat responses.
 
@@ -2170,7 +2172,7 @@ def _points_signature(kind: str, name: str, bucket_ms: int, source_sig: Tuple[An
             last_ts = int(points[-1].get("timestamp", 0))
         except Exception:
             last_ts = None
-    return (kind, name, int(bucket_ms), source_sig, len(points), last_ts)
+    return (kind, name, int(granularity_ms), source_sig, len(points), last_ts)
 
 
 def _signature_append_info(sig: Tuple[Any, ...]) -> Tuple[Tuple[Any, ...], int, Optional[int]]:
@@ -2380,7 +2382,7 @@ def _resolve_virtual_operand_points(
     prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]],
     start_ms: int,
     end_ms: int,
-    bucket_ms: int,
+    granularity_ms: int,
 ) -> Tuple[bool, Optional[float], List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     """Execute resolve virtual operand points as part of TSDB server processing.
 
@@ -2390,7 +2392,7 @@ def _resolve_virtual_operand_points(
         prior_virtuals: Parameter `prior_virtuals` of type `Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]]` used by this function.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
 
     Returns:
         Tuple[bool, Optional[float], List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]: Result produced by this function.
@@ -2402,7 +2404,7 @@ def _resolve_virtual_operand_points(
     if prior is not None:
         points, dp, files, sig = prior
         return False, None, list(points), int(dp), list(files), sig
-    points, dp, files, sig = _real_series_points_for_virtual(data_dir, operand, start_ms, end_ms, bucket_ms)
+    points, dp, files, sig = _real_series_points_for_virtual(data_dir, operand, start_ms, end_ms, granularity_ms)
     return False, None, points, dp, files, sig
 
 
@@ -2412,7 +2414,7 @@ def _compute_one_virtual_series_points(
     prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]],
     start_ms: int,
     end_ms: int,
-    bucket_ms: int,
+    granularity_ms: int,
     align_window_ms: int,
 ) -> Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     """Compute one virtual series points from input events/points and settings.
@@ -2423,7 +2425,7 @@ def _compute_one_virtual_series_points(
         prior_virtuals: Parameter `prior_virtuals` of type `Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]]` used by this function.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         align_window_ms: Maximum timestamp alignment distance for combining two series.
 
     Returns:
@@ -2439,7 +2441,7 @@ def _compute_one_virtual_series_points(
         operand_start_ms = _day_start_ms(start_day)
         operand_end_ms = _day_start_ms(end_day) + 86_400_000 - 1
     left_is_const, left_const, left_points, left_dp, left_files, left_sig = _resolve_virtual_operand_points(
-        data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, bucket_ms
+        data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, granularity_ms
     )
     if left_is_const and left_const is not None:
         left_const = _apply_left_scaling_value(float(left_const), d.left_scaling)
@@ -2447,33 +2449,33 @@ def _compute_one_virtual_series_points(
         left_points = _apply_left_scaling_points(left_points, d.left_scaling, left_dp)
     if d.op in {"today", "yesterday"}:
         if left_is_const:
-            entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), [], 3, [])
+            entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, (d.op,), [], 3, [])
             return [], 3, [], _virtual_points_result_signature(entry)
         decimal_places = _virtual_decimal_places(d.op, left_dp, 0)
         points = _compute_virtual_points_today(left_points, decimal_places) if d.op == "today" else _compute_virtual_points_yesterday(left_points, decimal_places)
         points = [p for p in points if start_ms <= int(p.get("timestamp", 0)) <= end_ms]
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, (d.op,), list(points), decimal_places, sorted(set(left_files)))
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, (d.op,), list(points), decimal_places, sorted(set(left_files)))
         return points, decimal_places, sorted(set(left_files)), _virtual_points_result_signature(entry)
 
     right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
-        data_dir, d.right, prior_virtuals, start_ms, end_ms, bucket_ms
+        data_dir, d.right, prior_virtuals, start_ms, end_ms, granularity_ms
     )
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     if left_is_const and right_is_const:
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, [], 3, [])
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, [], 3, [])
         return [], 3, [], _virtual_points_result_signature(entry)
     if left_is_const:
         if left_const is None:
             return [], 3, [], ("empty",)
         points = _combine_numeric_points_with_constant(right_points, float(left_const), d.op, True, decimal_places)
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(right_files)))
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(right_files)))
         return points, decimal_places, sorted(set(right_files)), _virtual_points_result_signature(entry)
     if right_is_const:
         points = _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places)
-        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files)))
+        entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files)))
         return points, decimal_places, sorted(set(left_files)), _virtual_points_result_signature(entry)
     points = _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places)
-    entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, bucket_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files + right_files)))
+    entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files + right_files)))
     return points, decimal_places, sorted(set(left_files + right_files)), _virtual_points_result_signature(entry)
 
 
@@ -2534,7 +2536,7 @@ def _compute_virtual_points_incremental(
     decimal_places: int,
     start_ms: int,
     end_ms: int,
-    bucket_ms: int,
+    granularity_ms: int,
     align_window_ms: int,
     left_sig: Tuple[Any, ...],
     right_sig: Tuple[Any, ...],
@@ -2553,7 +2555,7 @@ def _compute_virtual_points_incremental(
         decimal_places: Number of decimal places used for rounding output values.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         align_window_ms: Maximum timestamp alignment distance for combining two series.
         left_sig: Parameter `left_sig` of type `Tuple[Any, ...]` used by this function.
         right_sig: Parameter `right_sig` of type `Tuple[Any, ...]` used by this function.
@@ -2590,7 +2592,7 @@ def _compute_virtual_points_incremental(
             candidate_ts.append(_point_timestamp_ms(right_points[right_old_count]))
         if not candidate_ts:
             return list(existing.points)
-        recompute_from_ts = min(candidate_ts) - max(int(align_window_ms), int(bucket_ms), 0)
+        recompute_from_ts = min(candidate_ts) - max(int(align_window_ms), int(granularity_ms), 0)
         if recompute_from_ts < start_ms:
             recompute_from_ts = start_ms
 
@@ -2619,7 +2621,7 @@ def _compute_one_virtual_series_points_cached(
     prior_virtuals: Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]],
     start_ms: int,
     end_ms: int,
-    bucket_ms: int,
+    granularity_ms: int,
     align_window_ms: int,
 ) -> Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]:
     """Compute one virtual series points cached from input events/points and settings.
@@ -2630,14 +2632,14 @@ def _compute_one_virtual_series_points_cached(
         prior_virtuals: Parameter `prior_virtuals` of type `Dict[str, Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]]` used by this function.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
         align_window_ms: Maximum timestamp alignment distance for combining two series.
 
     Returns:
         Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]: Result produced by this function.
     """
-    cache_key = (os.path.abspath(data_dir), d.name, int(start_ms), int(end_ms), int(bucket_ms))
-    definition = (d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), int(start_ms), int(end_ms), int(bucket_ms))
+    cache_key = (os.path.abspath(data_dir), d.name, int(start_ms), int(end_ms), int(granularity_ms))
+    definition = (d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), int(start_ms), int(end_ms), int(granularity_ms))
     operand_start_ms = start_ms
     operand_end_ms = end_ms
     if d.op in {"today", "yesterday"}:
@@ -2649,7 +2651,7 @@ def _compute_one_virtual_series_points_cached(
         operand_end_ms = _day_start_ms(end_day) + 86_400_000 - 1
 
     left_is_const, left_const, left_points, left_dp, left_files, left_sig = _resolve_virtual_operand_points(
-        data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, bucket_ms
+        data_dir, d.left, prior_virtuals, operand_start_ms, operand_end_ms, granularity_ms
     )
     if left_is_const and left_const is not None:
         left_const = _apply_left_scaling_value(float(left_const), d.left_scaling)
@@ -2659,7 +2661,7 @@ def _compute_one_virtual_series_points_cached(
         right_is_const, right_const, right_points, right_dp, right_files, right_sig = True, None, [], 0, [], (d.op,)
     else:
         right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
-            data_dir, d.right, prior_virtuals, start_ms, end_ms, bucket_ms
+            data_dir, d.right, prior_virtuals, start_ms, end_ms, granularity_ms
         )
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     with _VIRTUAL_SERIES_CACHE_LOCK:
@@ -2681,7 +2683,7 @@ def _compute_one_virtual_series_points_cached(
             decimal_places,
             start_ms,
             end_ms,
-            bucket_ms,
+            granularity_ms,
             align_window_ms,
             left_sig,
             right_sig,
@@ -2858,7 +2860,7 @@ def get_virtual_series_points(
     series_name: str,
     start_ms: int,
     end_ms: int,
-    bucket_ms: int,
+    granularity_ms: int,
 ) -> Optional[Tuple[List[Dict[str, Any]], int, List[str]]]:
     """Get virtual series points from caches/files for request processing.
 
@@ -2867,7 +2869,7 @@ def get_virtual_series_points(
         series_name: Series name used for lookup and processing.
         start_ms: Inclusive start timestamp in Unix milliseconds.
         end_ms: Inclusive end timestamp in Unix milliseconds (unless noted otherwise).
-        bucket_ms: Bucket size in milliseconds; 0 means raw data.
+        granularity_ms: Bucket size in milliseconds; 0 means raw data.
 
     Returns:
         Optional[Tuple[List[Dict[str, Any]], int, List[str]]]: Result produced by this function.
@@ -2888,7 +2890,7 @@ def get_virtual_series_points(
             prior_virtuals,
             start_ms,
             end_ms,
-            bucket_ms,
+            granularity_ms,
             align_window_ms,
         )
         prior_virtuals[d.name] = (points, decimal_places, files, sig)
@@ -3269,19 +3271,19 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         events: List[Event] = []
         max_decimal_places: Optional[int] = None
         if granularity is None:
-            virtual_bucket_ms = _choose_auto_bucket_ms(start_ms, end_ms, min_points)
+            virtual_granularity_ms = _choose_auto_granularity_ms(start_ms, end_ms, min_points)
         else:
-            virtual_bucket_ms = int(granularity)
-        virtual = get_virtual_series_points(data_dir, series, start_ms, end_ms, virtual_bucket_ms) if virtual_bucket_ms > 0 else None
+            virtual_granularity_ms = int(granularity)
+        virtual = get_virtual_series_points(data_dir, series, start_ms, end_ms, virtual_granularity_ms) if virtual_granularity_ms > 0 else None
         if virtual is None:
             virtual = get_virtual_series_events_cached(data_dir, series)
         if virtual is not None:
-            if virtual_bucket_ms > 0 and isinstance(virtual[0], list) and (not virtual[0] or isinstance(virtual[0][0], dict)):
+            if virtual_granularity_ms > 0 and isinstance(virtual[0], list) and (not virtual[0] or isinstance(virtual[0][0], dict)):
                 points = list(virtual[0])
                 max_decimal_places = int(virtual[1])
                 files_used = list(virtual[2])
                 downsampled = True
-                bucket_ms = virtual_bucket_ms
+                granularity_ms = virtual_granularity_ms
                 response: Dict[str, Any] = {
                     "series": series,
                     "start": start_ms,
@@ -3294,7 +3296,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 }
                 if max_decimal_places is not None:
                     response["decimalPlaces"] = max_decimal_places
-                response["bucketMs"] = bucket_ms
+                response["granularityMs"] = granularity_ms
                 _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
                 return response
             all_events, max_decimal_places, virtual_files = virtual
@@ -3312,8 +3314,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         all_numeric = all(isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool) for ev in events)
         files_used = [os.path.basename(p) for p in files]
 
-        bucket_ms = int(granularity) if granularity not in (None, 0) else (virtual_bucket_ms if virtual_bucket_ms > 0 else 0)
-        if granularity == 0 or bucket_ms <= 0:
+        granularity_ms = int(granularity) if granularity not in (None, 0) else (virtual_granularity_ms if virtual_granularity_ms > 0 else 0)
+        if granularity == 0 or granularity_ms <= 0:
             downsampled = False
             points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
         else:
@@ -3321,30 +3323,30 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 if all_numeric:
                     points = _downsample_fixed_numeric_events(
                         events,
-                        bucket_ms,
+                        granularity_ms,
                         start_ms,
                         end_ms,
                         decimal_places=max_decimal_places if max_decimal_places is not None else 3,
                     )
                 else:
                     points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-                    bucket_ms = 0
-                downsampled = bucket_ms > 0
+                    granularity_ms = 0
+                downsampled = granularity_ms > 0
             else:
                 has_daily_files = bool(files) and all(os.path.basename(path).startswith("data_") for path in files)
                 if not has_daily_files:
                     if all_numeric:
                         points = _downsample_fixed_numeric_events(
                             events,
-                            bucket_ms,
+                            granularity_ms,
                             start_ms,
                             end_ms,
                             decimal_places=max_decimal_places if max_decimal_places is not None else 3,
                         )
                     else:
                         points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-                        bucket_ms = 0
-                    downsampled = bucket_ms > 0
+                        granularity_ms = 0
+                    downsampled = granularity_ms > 0
                 else:
                     downsampled = True
                     points = []
@@ -3353,7 +3355,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                         day_files, day_points = _get_or_build_downsampled_day_points(
                             data_dir,
                             day,
-                            bucket_ms,
+                            granularity_ms,
                             series,
                             start_ms,
                             end_ms,
@@ -3378,8 +3380,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if max_decimal_places is not None:
             response["decimalPlaces"] = max_decimal_places
         if downsampled:
-            response["bucketMs"] = bucket_ms
-        if not all_numeric and bucket_ms > 0 and virtual is not None:
+            response["granularityMs"] = granularity_ms
+        if not all_numeric and granularity_ms > 0 and virtual is not None:
             response["note"] = "Series is non-numeric; returned raw values without min/avg/max aggregation."
         _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
         return response
