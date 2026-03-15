@@ -12,7 +12,7 @@ Original data and downsampled data in various granularity are stored in separate
 There are two types of files:
 - Time Stream files: Containing timestamped data (ChannelDefinitionEntries, TimeEntries, ValueEntries).
   These are suitable for incremental writing, but are less compact than Series Array files.
-- Series Array files: Containing only Series Array Entries.
+- Series Array files: Containing only SeriesArrayEntries and StringEntries.
   These are compact but are not suitable for incremental writing.
 
 data_YYYY-MM-DD.tsdb: Original data. Not downsampled. Time Stream file.
@@ -40,7 +40,7 @@ Entry entries[]; // Entries extend to the end of file. Entries are of different 
 
 Entry
 -----
-uint8_t type; // Type determines the layout of entry. ValueEntry, TimeEntry, ChannelDefinitionEntry, SeriesArrayEntry.
+uint8_t type; // Type determines the layout of entry. ValueEntry, TimeEntry, ChannelDefinitionEntry, SeriesArrayEntry, StringEntry.
 uint8_t data[]; // The semantics and layout of data depends on the type and is described below.
 
 ValueEntries
@@ -79,9 +79,9 @@ uint8_t formatId; // Format of the value of ValueEntries for this channel (see t
 uint8_t nameLen; // Length of the name in bytes.
 uint8_t name[nameLen]; // Name of this channel in UTF-8.
 
-Series Array Entry
+SeriesArrayEntry
 ------------------
-Series Array Entry can only represent numeric values. Strings are discarded upon conversion. Series which only contain strings are discarded.
+Series Array Entry represents series which contain only numeric values.
 
 A Series Array Entry contains all information for a series for a certain period of time, typically one day or one hour. It is used to achieve compact completed day files. It is not suitable for incremental writing.
 The time stamp of each time slot is its center time stamp, rounded down to the nearest ms.
@@ -103,7 +103,7 @@ uint8_t name[nameLen];  // Series name in UTF-8. Each series name must occur onl
 LEB128 numTimeSlots;    // Number of time slots.
 LEB128 msPerTimeSlot;   // Duration of one time slot in milliseconds.
 LEB128 timeOffset;      // Start time of this series relative to the start time of the file in milliseconds.
-LEB128 nDecimals;       // Number of decimals of each value. 0 means real_value = value, 1 means real_value = value / 10, 2 means real_value = value / 100 and so on. Valid values are 0..3. Other values are reserved.
+LEB128 nDecimals;       // Number of decimals of each value. 0 means real_value = value, 1 means real_value = value / 10, 2 means real_value = value / 100 and so on. Valid values are 0..3. Other values are reserved. (This is intentionally different than Format Ids.)
 LEB128 valuesPerTimeSlot; // Number of values per time slot: 1 means plain value, 3 means min/avg/max triplet (downsampled data). Valid values are 1 and 3. Other values are reserved.
 ZigZag minus64;         // This value is used to indicate a non-void delta value of -64. Upon encoding, this must be set to any unused delta value (except -64), regardless whether the delta -64 occurs in the series or not.
 SeriesArrayChunk chunks[]; // Array of chunks that represent numTimeSlots*valuesPerTimeSlot scalar values.
@@ -133,7 +133,20 @@ The encoding of "chunks" happens in these sequential steps:
 
 The number of decimals of the input data is preserved, except that values with > 3 decimals get rounded to 3 decimals.
 
-Files containing Series Array Entries (after the header) only contain Series Array Entries and no TimeEntries, no ValueEntries and no ChannelDefinitionEntries.
+StringEntries
+--------------
+String Entries represent series which contain only string values. The string is assumed to be constant for the whole day. This is for example used by "name" series that contain a human readable names for cryptic series names based on a serial number.
+Encoders encode the last string value of a day. All previous values are discarded. Upon decoding the event is attached to the start of the day. This loss of information is ok as these strings change rarely and are usually constant.
+Decoders decode a single event with timestamp 00:00:00 UTC of that day and the string as value. Duplicate string entries for the same series are invalid. The decoder should silently ignore all String Entries following the first one.
+This entry does not use Format Id.
+
+uint8_t type = 0xf9;    // String Entry.
+LEB128 entrySize;       // Size of this entry in bytes including the type byte. This allows to skip the section.
+LEB128 stringEntryVersion; // Must be 0. Defines the layout of this entry. Can be used to extend this entry.
+LEB128 nameLen;         // Length of the series name.
+uint8_t name[nameLen];  // Series name in UTF-8. Each series name must occur only once in a file.
+LEB128 stringLen;       // Length of the payload string. May be 0 for empty strings.
+uint8_t string[stringLen];  // Payload string in UTF-8.
 
 Downsampling
 ------------
@@ -214,3 +227,7 @@ Constraints
   - A channel id X must be defined before any values for channel X occur in the sequence of entries.
   - The initial timestamp must be set before the first value in the sequence of entries.
   - A timestamp applies to all following values until a new timestamp is set.
+- For Series Array files:
+  - Series containing only numeric values are encoded as SeriesArrayEntries.
+  - Series containing only string values are encoded as StringEntries.
+  - Series which contain a mix of string and numeric values are discarded. It is assumed that all useful series either contain only numeric values or only string values.

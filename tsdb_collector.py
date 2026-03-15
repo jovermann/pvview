@@ -412,6 +412,18 @@ def _numeric_series_points_from_db(db: Any) -> dict[str, list[tuple[int, Any]]]:
     }
 
 
+def _string_series_values_from_db(db: Any) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for series_name in db.list_series():
+        last: Optional[str] = None
+        for _ts_ms, value in db.get_series_values(series_name):
+            if isinstance(value, str):
+                last = value
+        if last is not None:
+            values[series_name] = last
+    return values
+
+
 def _write_series_array_timeseries_db_atomic(
     output_path: str,
     day: datetime.date,
@@ -420,6 +432,7 @@ def _write_series_array_timeseries_db_atomic(
     series_decimals: dict[str, int],
     points_by_series: dict[str, list[tuple[int, Any]]],
     elem_size: int,
+    string_values: Optional[dict[str, str]] = None,
 ) -> None:
     tmp_path = f"{output_path}.tmp"
     write_series_array_timeseries_db(
@@ -430,6 +443,7 @@ def _write_series_array_timeseries_db_atomic(
         series_decimals,
         points_by_series,
         elem_size,
+        string_values=string_values,
     )
     os.replace(tmp_path, output_path)
 
@@ -439,6 +453,7 @@ def _downsample_file(path: str, force: bool = False, verbose: int = 0) -> None:
     day, source_bucket_ms = _parse_downsample_input_path(source_path)
     db = read_timeseries_db(source_path)
     source_points_by_series = _numeric_series_points_from_db(db)
+    string_values = _string_series_values_from_db(db)
     series_names = [series_name for series_name in db.list_series() if source_points_by_series.get(series_name)]
     series_decimals = {
         series_name: min(3, decimal_places_from_format_id(db.get_series_format_id(series_name)))
@@ -482,6 +497,7 @@ def _downsample_file(path: str, force: bool = False, verbose: int = 0) -> None:
             series_decimals,
             next_points_by_series,
             elem_size,
+            string_values=string_values,
         )
         print(output_path)
         current_points_by_series = next_points_by_series

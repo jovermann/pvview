@@ -22,6 +22,7 @@ ENTRY_TYPE_CHANNEL_DEF_8 = 0xF5
 ENTRY_TYPE_CHANNEL_DEF_16 = 0xF6
 ENTRY_TYPE_META_INFO = 0xF7
 ENTRY_TYPE_SERIES_ARRAY = 0xF8
+ENTRY_TYPE_STRING_ENTRY = 0xF9
 ENTRY_TYPE_VALUE_16 = 0xFF
 ENTRY_TYPE_CHANNEL_VALUE_16 = ENTRY_TYPE_VALUE_16
 
@@ -342,6 +343,16 @@ def _parse_tsdb_chunk_into_cache(raw: bytes, base_offset: int, cache: CachedTsdb
                 offset = _parse_series_array_entry(raw, entry_start, offset, cache, path)
                 continue
 
+            if entry_type == ENTRY_TYPE_STRING_ENTRY:
+                if cache.channel_defs or cache.current_ts is not None:
+                    raise TsdbParseError("String entries must not be mixed with regular TSDB entries")
+                offset, series_name, value, ts_ms = _parse_string_entry(raw, entry_start, offset, path)
+                # Decoder recovery behavior for malformed files: ignore duplicate entries.
+                if not cache.series_events.get(series_name):
+                    cache.series_events.setdefault(series_name, []).append(Event(ts_ms, value))
+                cache.series_format_ids.setdefault(series_name, FORMAT_STRING_U64)
+                continue
+
             raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {base_offset + offset - 1}")
         except TsdbParseError as exc:
             if _is_incomplete_parse_error(exc):
@@ -520,6 +531,29 @@ def _parse_series_array_entry(raw: bytes, entry_start: int, offset: int, cache: 
     if element_index != num_elements:
         raise TsdbParseError(f"Series array elements {element_index} != numElements {num_elements}")
     return entry_end
+
+
+def _parse_string_entry(raw: bytes, entry_start: int, offset: int, path: str) -> Tuple[int, str, str, int]:
+    entry_size, offset = _read_uleb128(raw, offset)
+    entry_end = entry_start + entry_size
+    if entry_end > len(raw):
+        raise TsdbParseError(f"String entry exceeds file size at offset {entry_start}")
+    string_entry_version, offset = _read_uleb128(raw, offset)
+    if string_entry_version != 0:
+        raise TsdbParseError(f"Unsupported StringEntry version {string_entry_version} at offset {entry_start}")
+    name_len, offset = _read_uleb128(raw, offset)
+    _ensure_available(raw, offset, name_len, "string entry name")
+    series_name = raw[offset:offset + name_len].decode("utf-8")
+    offset += name_len
+    string_len, offset = _read_uleb128(raw, offset)
+    _ensure_available(raw, offset, string_len, "string entry payload")
+    value = raw[offset:offset + string_len].decode("utf-8")
+    offset += string_len
+    if offset != entry_end:
+        raise TsdbParseError(f"String entry parsing did not end on entry boundary at {entry_start}")
+    day = _day_from_tsdb_path(path)
+    ts_ms = int(datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+    return entry_end, series_name, value, ts_ms
 
 
 def _refresh_cache_incremental(path: str, st: os.stat_result, cache: CachedTsdbFile) -> CachedTsdbFile:
@@ -1140,6 +1174,17 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                     raise TsdbParseError("Series array decode did not end at entry boundary")
                 continue
 
+            if entry_type == ENTRY_TYPE_STRING_ENTRY:
+                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "string_entry type")
+                entry_end, series_name, value, ts_ms = _parse_string_entry(raw, entry_start, offset, path)
+                _dump_bytes_chunk(
+                    stream,
+                    raw[offset:entry_end],
+                    f"{series_name} value={value!r} ts={datetime.datetime.fromtimestamp(ts_ms / 1000.0, tz=datetime.timezone.utc).strftime('%H:%M:%S')}",
+                )
+                offset = entry_end
+                continue
+
             _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], f"unknown entry type 0x{entry_type:02x}")
     except TsdbParseError as exc:
         if offset < len(raw):
@@ -1366,6 +1411,16 @@ def stat_timeseries_db(path: str) -> TsdbFileStats:
             value_bytes += non_void_count * value_payload_size
             other_count += 1
             continue
+        if entry_type == ENTRY_TYPE_STRING_ENTRY:
+            entry_end, _series_name, _value, _ts_ms = _parse_string_entry(raw, entry_start, offset, path)
+            entry_size = entry_end - entry_start
+            offset = entry_end
+            value_count += 1
+            value_bytes += entry_size
+            per_format_counts[FORMAT_STRING_U64] = per_format_counts.get(FORMAT_STRING_U64, 0) + 1
+            per_format_total_bytes[FORMAT_STRING_U64] = per_format_total_bytes.get(FORMAT_STRING_U64, 0) + entry_size
+            per_format_value_sizes.setdefault(FORMAT_STRING_U64, set()).add(entry_size)
+            continue
         raise TsdbParseError(f"Unknown entry type 0x{entry_type:02x} at offset {entry_start}")
 
     total_bytes = len(raw)
@@ -1413,7 +1468,7 @@ def read_timeseries_db(path: str, dump_out: Optional[TextIO] = None, verbose: in
     version = int.from_bytes(raw[8:12], "little")
     if version != TSDB_VERSION:
         raise TsdbParseError(f"Unsupported TSDB version {version} in {path!r}")
-    if len(raw) > 12 and raw[12] == ENTRY_TYPE_SERIES_ARRAY:
+    if len(raw) > 12 and raw[12] in (ENTRY_TYPE_SERIES_ARRAY, ENTRY_TYPE_STRING_ENTRY):
         cache = get_cached_tsdb_file(path)
         result = TimeSeriesDbData()
         for key, value in cache.meta_info.items():
@@ -2092,6 +2147,7 @@ def write_series_array_timeseries_db(
     series_decimals: Dict[str, int],
     series_points: Dict[str, List[Tuple[int, Any]]],
     elem_size: int,
+    string_values: Optional[Dict[str, str]] = None,
 ) -> None:
     if elem_size not in (1, 3):
         raise ValueError(f"elem_size must be 1 or 3, got {elem_size}")
@@ -2249,6 +2305,28 @@ def write_series_array_timeseries_db(
                     break
                 entry_size_bytes = next_bytes
             f.write(bytes([ENTRY_TYPE_SERIES_ARRAY]))
+            f.write(entry_size_bytes)
+            f.write(payload)
+
+        for series_name, string_value in sorted((string_values or {}).items()):
+            name_bytes = series_name.encode("utf-8")
+            value_bytes = str(string_value).encode("utf-8")
+            payload = bytearray()
+            payload.extend(_write_uleb128(0))  # stringEntryVersion
+            payload.extend(_write_uleb128(len(name_bytes)))
+            payload.extend(name_bytes)
+            payload.extend(_write_uleb128(len(value_bytes)))
+            payload.extend(value_bytes)
+
+            entry_size_bytes = b""
+            while True:
+                entry_size = 1 + len(entry_size_bytes) + len(payload)
+                next_bytes = _write_uleb128(entry_size)
+                if len(next_bytes) == len(entry_size_bytes) and next_bytes == entry_size_bytes:
+                    break
+                entry_size_bytes = next_bytes
+
+            f.write(bytes([ENTRY_TYPE_STRING_ENTRY]))
             f.write(entry_size_bytes)
             f.write(payload)
     invalidate_tsdb_cache(path)

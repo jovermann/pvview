@@ -641,7 +641,25 @@ def _write_downsampled_day_cache(path: str, entry: DownsampledDayCacheEntry) -> 
         ]
         for name, points in entry.numeric_series.items()
     }
-    write_series_array_timeseries_db(path, entry.day, entry.bucket_ms, series_order, series_decimals, numeric_points, 3)
+    string_values: Dict[str, str] = {}
+    for series_name, points in entry.string_series.items():
+        last_value: Optional[str] = None
+        for p in points:
+            value = p.get("value")
+            if isinstance(value, str):
+                last_value = value
+        if last_value is not None:
+            string_values[series_name] = last_value
+    write_series_array_timeseries_db(
+        path,
+        entry.day,
+        entry.bucket_ms,
+        series_order,
+        series_decimals,
+        numeric_points,
+        3,
+        string_values=string_values,
+    )
 
 
 def _build_all_downsampled_day_files(data_dir: str, day: datetime.date) -> None:
@@ -670,6 +688,16 @@ def _build_all_downsampled_day_files(data_dir: str, day: datetime.date) -> None:
         name: [(ev.timestamp_ms, ev.value) for ev in cache.series_events.get(name, [])]
         for name in series_names
     }
+    string_values: Dict[str, str] = {}
+    for series_name, format_id in cache.series_format_ids.items():
+        if not is_string_format_id(format_id):
+            continue
+        last_value: Optional[str] = None
+        for ev in cache.series_events.get(series_name, []):
+            if isinstance(ev.value, str):
+                last_value = ev.value
+        if last_value is not None:
+            string_values[series_name] = last_value
     for bucket_ms, _label, elem_size in _ALL_DOWNSAMPLE_BUCKETS:
         next_points_by_series: Dict[str, List[Tuple[int, Any]]] = {}
         for series_name in series_names:
@@ -688,6 +716,7 @@ def _build_all_downsampled_day_files(data_dir: str, day: datetime.date) -> None:
             series_decimals,
             next_points_by_series,
             elem_size,
+            string_values=string_values,
         )
         current_points_by_series = next_points_by_series
 
