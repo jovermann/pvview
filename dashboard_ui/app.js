@@ -1180,20 +1180,35 @@
     const p = (async () => {
       const candidates = [`solar/${inverterId}/name`];
       try {
+        const now = new Date();
+        const utcY = now.getUTCFullYear();
+        const utcM = now.getUTCMonth();
+        const utcD = now.getUTCDate();
+        const todayStart = Date.UTC(utcY, utcM, utcD, 0, 0, 0, 0);
+        const tomorrowStart = todayStart + 24 * 60 * 60 * 1000;
+        const yesterdayStart = todayStart - 24 * 60 * 60 * 1000;
+        const yesterdayEnd = todayStart - 1;
+        const todayEnd = tomorrowStart - 1;
+        const ranges = [
+          { start: yesterdayStart, end: yesterdayEnd },
+          { start: todayStart, end: todayEnd },
+        ];
         for (const seriesName of candidates) {
-          const q = new URLSearchParams({
-            series: seriesName,
-            start: '0',
-            end: '9999999999999',
-            minPoints: '1',
-            granularity: 'raw',
-          });
-          const data = await apiJson(`/events?${q}`);
-          const first = Array.isArray(data.points) && data.points.length ? data.points[0] : null;
-          const name = first && typeof first.value === 'string' ? first.value.trim() : '';
-          if (name) {
-            inverterNames.set(inverterId, name);
-            return name;
+          for (const r of ranges) {
+            const q = new URLSearchParams({
+              series: seriesName,
+              start: String(r.start),
+              end: String(r.end),
+              minPoints: '1',
+              granularity: '1h',
+            });
+            const data = await apiJson(`/events?${q}`);
+            const first = Array.isArray(data.points) && data.points.length ? data.points[0] : null;
+            const name = first && typeof first.value === 'string' ? first.value.trim() : '';
+            if (name) {
+              inverterNames.set(inverterId, name);
+              return name;
+            }
           }
         }
       } catch (_err) {
