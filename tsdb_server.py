@@ -3252,6 +3252,98 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _get_events_for_day(
+        self,
+        data_dir: str,
+        day: datetime.date,
+        series_name: str,
+        granularity_ms: int,
+        request_start_ms: int,
+        request_end_ms: int,
+    ) -> Tuple[List[Dict[str, Any]], List[str], Optional[int], bool, bool]:
+        """Load one day of points/files for a series at one fixed granularity.
+
+        Args:
+            self: Current HTTP request handler instance.
+            data_dir: Directory containing TSDB files and server metadata files.
+            day: UTC calendar day being processed.
+            series_name: Series name used for lookup and processing.
+            granularity_ms: Requested granularity in milliseconds; 0 means raw.
+            request_start_ms: Inclusive request start timestamp in Unix milliseconds.
+            request_end_ms: Inclusive request end timestamp in Unix milliseconds.
+
+        Returns:
+            Tuple[List[Dict[str, Any]], List[str], Optional[int], bool, bool]:
+                (points, files_used, decimal_places, all_numeric, downsampled)
+        """
+        day_start_ms = max(request_start_ms, _day_start_ms(day))
+        day_end_ms = min(request_end_ms, _day_start_ms(day) + 86_400_000 - 1)
+        if day_end_ms < day_start_ms:
+            return [], [], None, True, granularity_ms > 0
+
+        def _point_is_numeric(point: Dict[str, Any]) -> bool:
+            if "value" in point:
+                v = point.get("value")
+                return isinstance(v, (int, float)) and not isinstance(v, bool)
+            for key in ("min", "avg", "max"):
+                v = point.get(key)
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    return False
+            return True
+
+        virtual = get_virtual_series_points(data_dir, series_name, day_start_ms, day_end_ms, granularity_ms)
+        if virtual is not None:
+            points, decimal_places, files_used = virtual
+            points = sorted(list(points), key=lambda p: int(p.get("timestamp", 0)))
+            all_numeric = all(_point_is_numeric(p) for p in points)
+            downsampled = granularity_ms > 0 and all_numeric
+            return points, list(files_used), int(decimal_places), all_numeric, downsampled
+
+        files = find_candidate_files(data_dir, day_start_ms, day_end_ms)
+        files_used = [os.path.basename(path) for path in files]
+        max_decimal_places: Optional[int] = None
+
+        if granularity_ms > 0 and files and all(os.path.basename(path).startswith("data_") for path in files):
+            for path in files:
+                fmt = get_series_format_id_in_file(path, series_name)
+                if is_numeric_format_id(fmt):
+                    d = decimal_places_from_format_id(fmt)
+                    max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+            day_files, day_points = _get_or_build_downsampled_day_points(
+                data_dir,
+                day,
+                granularity_ms,
+                series_name,
+                day_start_ms,
+                day_end_ms,
+            )
+            all_numeric = all(_point_is_numeric(p) for p in day_points)
+            if all_numeric:
+                return list(day_points), list(day_files), max_decimal_places, True, True
+
+        events: List[Event] = []
+        for path in files:
+            events.extend(read_tsdb_events_for_series(path, series_name, day_start_ms, day_end_ms))
+            fmt = get_series_format_id_in_file(path, series_name)
+            if is_numeric_format_id(fmt):
+                d = decimal_places_from_format_id(fmt)
+                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+        events.sort(key=lambda e: e.timestamp_ms)
+        all_numeric = all(isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool) for ev in events)
+
+        if granularity_ms > 0 and all_numeric:
+            points = _downsample_fixed_numeric_events(
+                events,
+                granularity_ms,
+                day_start_ms,
+                day_end_ms,
+                decimal_places=max_decimal_places if max_decimal_places is not None else 3,
+            )
+            return points, files_used, max_decimal_places, True, True
+
+        points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
+        return points, files_used, max_decimal_places, all_numeric, False
+
     def _events_for_series(self, data_dir: str, series: str, start_ms: int, end_ms: int, min_points: int, granularity: Optional[int] = None) -> Dict[str, Any]:
         """Execute events for series as part of TSDB server processing.
 
@@ -3267,104 +3359,39 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         Returns:
             Dict[str, Any]: Result produced by this function.
         """
-        files = find_candidate_files(data_dir, start_ms, end_ms)
-        events: List[Event] = []
+        requested_granularity_ms = _choose_auto_granularity_ms(start_ms, end_ms, min_points) if granularity is None else int(granularity)
+        requested_granularity_ms = max(0, requested_granularity_ms)
+        requested_days = list(day_range_utc(start_ms, end_ms))
+
+        points: List[Dict[str, Any]] = []
+        files_used: List[str] = []
+        seen_files: set[str] = set()
         max_decimal_places: Optional[int] = None
-        if granularity is None:
-            virtual_granularity_ms = _choose_auto_granularity_ms(start_ms, end_ms, min_points)
-        else:
-            virtual_granularity_ms = int(granularity)
-        virtual = get_virtual_series_points(data_dir, series, start_ms, end_ms, virtual_granularity_ms) if virtual_granularity_ms > 0 else None
-        if virtual is None:
-            virtual = get_virtual_series_events_cached(data_dir, series)
-        if virtual is not None:
-            if virtual_granularity_ms > 0 and isinstance(virtual[0], list) and (not virtual[0] or isinstance(virtual[0][0], dict)):
-                points = list(virtual[0])
-                max_decimal_places = int(virtual[1])
-                files_used = list(virtual[2])
-                downsampled = True
-                granularity_ms = virtual_granularity_ms
-                response: Dict[str, Any] = {
-                    "series": series,
-                    "start": start_ms,
-                    "end": end_ms,
-                    "requestedMinPoints": min_points,
-                    "returnedPoints": len(points),
-                    "downsampled": downsampled,
-                    "files": files_used,
-                    "points": points,
-                }
-                if max_decimal_places is not None:
-                    response["decimalPlaces"] = max_decimal_places
-                response["granularityMs"] = granularity_ms
-                _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
-                return response
-            all_events, max_decimal_places, virtual_files = virtual
-            events = [e for e in all_events if start_ms <= e.timestamp_ms <= end_ms]
-            files = [os.path.join(data_dir, f) for f in virtual_files]
-        else:
-            for path in files:
-                events.extend(read_tsdb_events_for_series(path, series, start_ms, end_ms))
-                fmt = get_series_format_id_in_file(path, series)
-                if is_numeric_format_id(fmt):
-                    d = decimal_places_from_format_id(fmt)
-                    max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+        all_numeric = True
+        downsampled = requested_granularity_ms > 0
 
-        events.sort(key=lambda e: e.timestamp_ms)
-        all_numeric = all(isinstance(ev.value, (int, float)) and not isinstance(ev.value, bool) for ev in events)
-        files_used = [os.path.basename(p) for p in files]
+        for day in requested_days:
+            day_points, day_files, day_decimals, day_all_numeric, day_downsampled = self._get_events_for_day(
+                data_dir=data_dir,
+                day=day,
+                series_name=series,
+                granularity_ms=requested_granularity_ms,
+                request_start_ms=start_ms,
+                request_end_ms=end_ms,
+            )
+            if day_decimals is not None:
+                max_decimal_places = day_decimals if max_decimal_places is None else max(max_decimal_places, day_decimals)
+            if day_points and not day_all_numeric:
+                all_numeric = False
+            if requested_granularity_ms > 0 and day_points and not day_downsampled:
+                downsampled = False
+            for name in day_files:
+                if name not in seen_files:
+                    seen_files.add(name)
+                    files_used.append(name)
+            points.extend(day_points)
 
-        granularity_ms = int(granularity) if granularity not in (None, 0) else (virtual_granularity_ms if virtual_granularity_ms > 0 else 0)
-        if granularity == 0 or granularity_ms <= 0:
-            downsampled = False
-            points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-        else:
-            if virtual is not None:
-                if all_numeric:
-                    points = _downsample_fixed_numeric_events(
-                        events,
-                        granularity_ms,
-                        start_ms,
-                        end_ms,
-                        decimal_places=max_decimal_places if max_decimal_places is not None else 3,
-                    )
-                else:
-                    points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-                    granularity_ms = 0
-                downsampled = granularity_ms > 0
-            else:
-                has_daily_files = bool(files) and all(os.path.basename(path).startswith("data_") for path in files)
-                if not has_daily_files:
-                    if all_numeric:
-                        points = _downsample_fixed_numeric_events(
-                            events,
-                            granularity_ms,
-                            start_ms,
-                            end_ms,
-                            decimal_places=max_decimal_places if max_decimal_places is not None else 3,
-                        )
-                    else:
-                        points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-                        granularity_ms = 0
-                    downsampled = granularity_ms > 0
-                else:
-                    downsampled = True
-                    points = []
-                    files_used = []
-                    for day in day_range_utc(start_ms, end_ms):
-                        day_files, day_points = _get_or_build_downsampled_day_points(
-                            data_dir,
-                            day,
-                            granularity_ms,
-                            series,
-                            start_ms,
-                            end_ms,
-                        )
-                        if day_files:
-                            for name in day_files:
-                                if name not in files_used:
-                                    files_used.append(name)
-                        points.extend(day_points)
+        points.sort(key=lambda p: int(p.get("timestamp", 0)))
 
         response: Dict[str, Any] = {
             "series": series,
@@ -3380,8 +3407,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if max_decimal_places is not None:
             response["decimalPlaces"] = max_decimal_places
         if downsampled:
-            response["granularityMs"] = granularity_ms
-        if not all_numeric and granularity_ms > 0 and virtual is not None:
+            response["granularityMs"] = requested_granularity_ms
+        if not all_numeric and requested_granularity_ms > 0:
             response["note"] = "Series is non-numeric; returned raw values without min/avg/max aggregation."
         _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
         return response
