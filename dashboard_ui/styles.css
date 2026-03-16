@@ -220,6 +220,10 @@ main { padding: 2px; }
   margin: 0;
 }
 
+.topbar-check {
+  font-size: 13px;
+}
+
 .icon-btn {
   border: 1px solid var(--border);
   background: #222a36;

@@ -24,6 +24,7 @@
   const rangePresetSelect = document.getElementById('rangePreset');
   const autoRefreshSelect = document.getElementById('autoRefresh');
   const globalGranularitySelect = document.getElementById('globalGranularity');
+  const lttbMinAvgMaxInput = document.getElementById('lttbMinAvgMax');
   const dashboardSelect = document.getElementById('dashboardSelect');
   const saveDashboardBtn = document.getElementById('saveDashboard');
   const manageVirtualSeriesBtn = document.getElementById('manageVirtualSeries');
@@ -135,6 +136,7 @@
   let refreshGetCallCount = 0;
   let visibilityRefreshEnabled = true;
   let globalGranularity = 'auto';
+  let lttbMinAvgMaxEnabled = false;
   let showMinPointsDebug = false;
   let showRefreshDurationDebug = false;
   let heatmapResizeTimer = null;
@@ -592,6 +594,7 @@
       )),
       visibilityRefreshEnabled: !!visibilityRefreshEnabled,
       granularity: normalizeChartGranularity(globalGranularity),
+      lttbMinAvgMaxEnabled: !!lttbMinAvgMaxEnabled,
       showMinPointsDebug: !!showMinPointsDebug,
       showRefreshDurationDebug: !!showRefreshDurationDebug,
       range: {
@@ -883,6 +886,46 @@
       out.push(curr);
     }
     return out;
+  }
+
+  function pointsForChartSeries(rawPoints, displayRule, useLttbCandidates) {
+    const points = [];
+    for (const p of (rawPoints || [])) {
+      if (!p || typeof p !== 'object') continue;
+      if (Object.prototype.hasOwnProperty.call(p, 'value')) {
+        const ts = Number(p.timestamp);
+        const value = roundNumeric(applyDisplayScale(p.value, displayRule));
+        if (Number.isFinite(ts) && Number.isFinite(value)) points.push([ts, value]);
+        continue;
+      }
+      const ts = Number(p.timestamp);
+      const avgValue = roundNumeric(applyDisplayScale(p.avg, displayRule));
+      if (!useLttbCandidates) {
+        if (Number.isFinite(ts) && Number.isFinite(avgValue)) points.push([ts, avgValue]);
+        continue;
+      }
+      const startTs = Number(p.start);
+      const endTs = Number(p.end);
+      const minValue = roundNumeric(applyDisplayScale(p.min, displayRule));
+      const maxValue = roundNumeric(applyDisplayScale(p.max, displayRule));
+      const hasFullBucket = Number.isFinite(startTs)
+        && Number.isFinite(endTs)
+        && Number.isFinite(minValue)
+        && Number.isFinite(avgValue)
+        && Number.isFinite(maxValue);
+      if (!hasFullBucket) {
+        if (Number.isFinite(ts) && Number.isFinite(avgValue)) points.push([ts, avgValue]);
+        continue;
+      }
+      const centerTs = Number.isFinite(ts) ? ts : Math.floor((startTs + endTs) / 2);
+      points.push([startTs, minValue]);
+      points.push([centerTs, avgValue]);
+      points.push([endTs, maxValue]);
+    }
+    if (useLttbCandidates) {
+      points.sort((a, b) => Number(a[0]) - Number(b[0]));
+    }
+    return points;
   }
 
   function configureAutoRefresh() {
@@ -1971,16 +2014,12 @@
       };
       const displayRule = effectiveDisplayRuleForSeries(name, unitForSeriesName(name), data.decimalPlaces);
       let latestTimestampMs;
-      const points = (data.points || []).map((p) => {
-        const tsCandidate = Number(
-          Object.prototype.hasOwnProperty.call(p, 'end') ? p.end : p.timestamp
-        );
-        if (Number.isFinite(tsCandidate)) {
-          latestTimestampMs = tsCandidate;
-        }
-        if (Object.prototype.hasOwnProperty.call(p, 'value')) return [p.timestamp, roundNumeric(applyDisplayScale(p.value, displayRule))];
-        return [p.timestamp, roundNumeric(applyDisplayScale(p.avg, displayRule))];
-      });
+      for (const p of (data.points || [])) {
+        const tsCandidate = Number(Object.prototype.hasOwnProperty.call(p, 'end') ? p.end : p.timestamp);
+        if (Number.isFinite(tsCandidate)) latestTimestampMs = tsCandidate;
+      }
+      const useLttbCandidates = !!lttbMinAvgMaxEnabled && !!data.downsampled;
+      const points = pointsForChartSeries(data.points || [], displayRule, useLttbCandidates);
       let legendMax;
       for (const p of (data.points || [])) {
         let candidate;
@@ -2011,6 +2050,7 @@
         downsampled: !!data.downsampled,
         returnedPoints: Number.isFinite(Number(data.returnedPoints)) ? Number(data.returnedPoints) : points.length,
         granularityMs: Number.isFinite(Number(data.granularityMs)) ? Number(data.granularityMs) : null,
+        useLttbCandidates,
       };
     }));
 
@@ -2214,6 +2254,7 @@
           areaStyle: seriesAreaStyle,
           tooltip: { valueFormatter: (value) => formatTooltipValue(value, s.displayRule.decimals) },
           emphasis: { focus: 'series' },
+          sampling: s.useLttbCandidates ? 'lttb' : undefined,
           data: s.points,
         };
       }),
@@ -4150,6 +4191,13 @@
       refreshAllCharts('granularity-change').catch((err) => console.error(err));
     });
   }
+  if (lttbMinAvgMaxInput) {
+    lttbMinAvgMaxInput.addEventListener('change', () => {
+      lttbMinAvgMaxEnabled = !!lttbMinAvgMaxInput.checked;
+      queueSaveSettings();
+      refreshAllCharts('lttb-candidates-change').catch((err) => console.error(err));
+    });
+  }
 
   dashboardSelect.addEventListener('change', () => {
     const name = String(dashboardSelect.value || '').trim();
@@ -4226,6 +4274,9 @@
     globalGranularity = settings && Object.prototype.hasOwnProperty.call(settings, 'granularity')
       ? normalizeChartGranularity(settings.granularity)
       : 'auto';
+    lttbMinAvgMaxEnabled = settings && Object.prototype.hasOwnProperty.call(settings, 'lttbMinAvgMaxEnabled')
+      ? !!settings.lttbMinAvgMaxEnabled
+      : false;
     showMinPointsDebug = settings && Object.prototype.hasOwnProperty.call(settings, 'showMinPointsDebug')
       ? !!settings.showMinPointsDebug
       : false;
@@ -4237,6 +4288,9 @@
     }
     if (globalGranularitySelect) {
       globalGranularitySelect.value = globalGranularity;
+    }
+    if (lttbMinAvgMaxInput) {
+      lttbMinAvgMaxInput.checked = lttbMinAvgMaxEnabled;
     }
     if (showMinPointsDebugInput) {
       showMinPointsDebugInput.checked = showMinPointsDebug;
