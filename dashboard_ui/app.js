@@ -2001,6 +2001,12 @@
       const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
       const gridRight = 8 + Math.floor(axisCount / 2) * axisSlot;
       const gridTop = 12;
+      const displayRuleByLegendName = new Map();
+      for (const s of seriesDefs) {
+        if (!displayRuleByLegendName.has(s.displayName)) {
+          displayRuleByLegendName.set(s.displayName, s.displayRule);
+        }
+      }
 
       cfg.instance.setOption({
         backgroundColor: 'transparent',
@@ -2015,7 +2021,26 @@
         tooltip: {
           trigger: 'axis',
           axisPointer: { type: 'shadow' },
-          valueFormatter: (v) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : ''),
+          formatter: (params) => {
+            const items = Array.isArray(params) ? params : [params];
+            if (!items.length) return '';
+            const axisLabel = String(items[0].axisValueLabel || items[0].name || '');
+            const lines = [htmlEscape(axisLabel)];
+            for (const item of items) {
+              const name = String(item && item.seriesName ? item.seriesName : '');
+              const rule = displayRuleByLegendName.get(name);
+              const unit = rule ? rule.unit : null;
+              const decimals = rule ? rule.decimals : 3;
+              const rawValue = typeof item.data === 'number'
+                ? item.data
+                : (typeof item.value === 'number' ? item.value : Number.NaN);
+              const valueText = (typeof rawValue === 'number' && Number.isFinite(rawValue))
+                ? formatValueWithUnit(rawValue, unit, decimals)
+                : '';
+              lines.push(`${item.marker || ''}${htmlEscape(name)}: ${htmlEscape(valueText)}`);
+            }
+            return lines.join('<br/>');
+          },
         },
         grid: {
           left: gridLeft,
