@@ -1141,7 +1141,7 @@
       return;
     }
     virtualSeriesRows.innerHTML = virtualSeriesDialogDraft.map((d, i) => `
-      <div class="virtual-row" data-index="${i}">
+      <div class="virtual-row" data-index="${i}" data-reorder-index="${i}" draggable="true">
         <input type="text" data-field="name" placeholder="name" value="${htmlEscape(d.name || '')}" />
         <input type="text" data-field="left" placeholder="left series" list="virtualSeriesCandidates" value="${htmlEscape(d.left || '')}" />
         <select data-field="leftScaling">
@@ -3858,6 +3858,11 @@
     updateDashboardDatalist();
     queueSaveSettings();
   });
+
+  attachRowReorderDnD(virtualSeriesRows, (fromIndex, toIndex) => {
+    if (!moveArrayItem(virtualSeriesDialogDraft, fromIndex, toIndex)) return;
+    renderVirtualSeriesRows();
+  }, '.virtual-row[data-reorder-index]');
 
   attachRowReorderDnD(unitOverrideRows, (fromIndex, toIndex) => {
     if (!moveArrayItem(unitOverrideDialogDraft, fromIndex, toIndex)) return;

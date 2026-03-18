@@ -484,6 +484,22 @@ main { padding: 2px; }
   padding: 1px 5px;
 }
 
+.virtual-row[draggable="true"] {
+  cursor: grab;
+}
+
+.virtual-row.dragging {
+  opacity: 0.55;
+}
+
+.virtual-row.drag-over-top {
+  border-top: 1px solid var(--accent);
+}
+
+.virtual-row.drag-over-bottom {
+  border-bottom: 1px solid var(--accent);
+}
+
 .unit-override-row {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) 84px 96px 48px 48px 72px minmax(140px, 0.9fr) auto auto auto;
