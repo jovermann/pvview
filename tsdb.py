@@ -799,6 +799,11 @@ def _format_float_fixed(value: float, decimals: int) -> str:
     return f"{float(value):.{max(0, int(decimals))}f}"
 
 
+def _format_timestamp_hms_ms(timestamp_ms: int) -> str:
+    dt = datetime.datetime.fromtimestamp(int(timestamp_ms) / 1000.0, tz=datetime.timezone.utc)
+    return dt.strftime("%H:%M:%S.%f")[:-3]
+
+
 def _describe_numeric_payload(raw_value_bytes: bytes, format_id: int, decoded_value: Any) -> str:
     if format_id == FORMAT_FLOAT:
         bits = int.from_bytes(raw_value_bytes, "little")
@@ -887,7 +892,8 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                             stream,
                             payload,
                             f"{series_name} {label} { _describe_value_payload(payload, format_id, value) } "
-                            f"ts={current_ts} ds_bucket_ms={ds_bucket_ms}",
+                            f"ts={current_ts} ({_format_timestamp_hms_ms(current_ts) if current_ts is not None else '?'}) "
+                            f"ds_bucket_ms={ds_bucket_ms}",
                         )
                 else:
                     value_start = offset
@@ -896,7 +902,8 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                     _dump_bytes_chunk(
                         stream,
                         payload,
-                        f"{series_name} { _describe_value_payload(payload, format_id, value) } ts={current_ts}",
+                        f"{series_name} { _describe_value_payload(payload, format_id, value) } "
+                        f"ts={current_ts} ({_format_timestamp_hms_ms(current_ts) if current_ts is not None else '?'})",
                     )
                 continue
 
@@ -936,8 +943,11 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 _ensure_available(raw, offset, 8, "absolute timestamp")
                 ts = int.from_bytes(raw[offset:offset + 8], "little")
                 current_ts = ts
-                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time abs type")
-                _dump_bytes_chunk(stream, raw[offset:offset + 8], f"ts_abs u64le={ts} ({ts / 1000.0:.3f}s)")
+                _dump_bytes_chunk(
+                    stream,
+                    raw[entry_start:offset + 8],
+                    f"time abs ts_abs u64le={ts} ({ts / 1000.0:.3f}s) {_format_timestamp_hms_ms(ts)}",
+                )
                 offset += 8
                 continue
 
@@ -945,8 +955,12 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 _ensure_available(raw, offset, 1, "relative timestamp (8-bit)")
                 delta = raw[offset]
                 current_ts = (current_ts or 0) + delta
-                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel8 type")
-                _dump_bytes_chunk(stream, raw[offset:offset + 1], f"delta u8=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                _dump_bytes_chunk(
+                    stream,
+                    raw[entry_start:offset + 1],
+                    f"time rel8 delta u8=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts} "
+                    f"({_format_timestamp_hms_ms(current_ts)})",
+                )
                 offset += 1
                 continue
 
@@ -954,16 +968,24 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 _ensure_available(raw, offset, 2, "relative timestamp (16-bit)")
                 delta = int.from_bytes(raw[offset:offset + 2], "little")
                 current_ts = (current_ts or 0) + delta
-                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel16 type")
-                _dump_bytes_chunk(stream, raw[offset:offset + 2], f"delta u16le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                _dump_bytes_chunk(
+                    stream,
+                    raw[entry_start:offset + 2],
+                    f"time rel16 delta u16le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts} "
+                    f"({_format_timestamp_hms_ms(current_ts)})",
+                )
                 offset += 2
                 continue
 
             if entry_type == ENTRY_TYPE_TIME_REL_24:
                 delta, next_off = _read_u24(raw, offset)
                 current_ts = (current_ts or 0) + delta
-                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel24 type")
-                _dump_bytes_chunk(stream, raw[offset:next_off], f"delta u24le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                _dump_bytes_chunk(
+                    stream,
+                    raw[entry_start:next_off],
+                    f"time rel24 delta u24le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts} "
+                    f"({_format_timestamp_hms_ms(current_ts)})",
+                )
                 offset = next_off
                 continue
 
@@ -971,8 +993,12 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 _ensure_available(raw, offset, 4, "relative timestamp (32-bit)")
                 delta = int.from_bytes(raw[offset:offset + 4], "little")
                 current_ts = (current_ts or 0) + delta
-                _dump_bytes_chunk(stream, raw[entry_start:entry_start + 1], "time rel32 type")
-                _dump_bytes_chunk(stream, raw[offset:offset + 4], f"delta u32le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts}")
+                _dump_bytes_chunk(
+                    stream,
+                    raw[entry_start:offset + 4],
+                    f"time rel32 delta u32le=+{delta} (+{delta / 1000.0:.3f}s) ts={current_ts} "
+                    f"({_format_timestamp_hms_ms(current_ts)})",
+                )
                 offset += 4
                 continue
 
@@ -1180,7 +1206,7 @@ def dump_timeseries_db_bytes(path: str, out: Optional[TextIO] = None) -> None:
                 _dump_bytes_chunk(
                     stream,
                     raw[offset:entry_end],
-                    f"{series_name} value={value!r} ts={datetime.datetime.fromtimestamp(ts_ms / 1000.0, tz=datetime.timezone.utc).strftime('%H:%M:%S')}",
+                    f"{series_name} value={value!r} ts={_format_timestamp_hms_ms(ts_ms)}",
                 )
                 offset = entry_end
                 continue
