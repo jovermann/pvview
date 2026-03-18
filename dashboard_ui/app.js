@@ -140,6 +140,7 @@
   let showMinPointsDebug = false;
   let showRefreshDurationDebug = false;
   let heatmapResizeTimer = null;
+  let barResizeTimer = null;
   let saveDashboardDialogMode = 'save';
   let dashboardSeparatorCounter = 1;
 
@@ -392,6 +393,20 @@
       charts.forEach((c) => {
         if (c.kind === 'heatmap') {
           refreshHeatmap(c.id).catch((err) => console.error(err));
+        }
+      });
+    }, 150);
+  }
+
+  function scheduleBarLayoutRefresh() {
+    if (barResizeTimer !== null) {
+      clearTimeout(barResizeTimer);
+    }
+    barResizeTimer = setTimeout(() => {
+      barResizeTimer = null;
+      charts.forEach((c) => {
+        if (c.kind === 'bar') {
+          refreshBar(c.id).catch((err) => console.error(err));
         }
       });
     }, 150);
@@ -4180,6 +4195,7 @@
       }
     });
     scheduleHeatmapLayoutRefresh();
+    scheduleBarLayoutRefresh();
   });
 
   window.addEventListener('resize', () => {
@@ -4189,6 +4205,7 @@
       }
     });
     scheduleHeatmapLayoutRefresh();
+    scheduleBarLayoutRefresh();
   });
 
   document.addEventListener('visibilitychange', () => {
