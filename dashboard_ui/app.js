@@ -888,6 +888,93 @@
     return out;
   }
 
+  function moveArrayItem(items, fromIndex, toIndex) {
+    if (!Array.isArray(items)) return false;
+    const n = items.length;
+    if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return false;
+    if (fromIndex < 0 || fromIndex >= n) return false;
+    if (toIndex < 0 || toIndex > n) return false;
+    const adjustedTo = (toIndex > fromIndex) ? (toIndex - 1) : toIndex;
+    if (adjustedTo < 0 || adjustedTo >= n || adjustedTo === fromIndex) return false;
+    const [item] = items.splice(fromIndex, 1);
+    items.splice(adjustedTo, 0, item);
+    return true;
+  }
+
+  function attachRowReorderDnD(container, onMove, rowSelector = '.series-item[data-reorder-index]') {
+    if (!(container instanceof HTMLElement) || typeof onMove !== 'function') return;
+    let dragFromIndex = null;
+
+    function clearDragState() {
+      dragFromIndex = null;
+      container.querySelectorAll('.dragging,.drag-over-top,.drag-over-bottom').forEach((el) => {
+        el.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom');
+      });
+    }
+
+    container.addEventListener('dragstart', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.closest('button,input,select,textarea,label,a')) return;
+      const row = target.closest(rowSelector);
+      if (!(row instanceof HTMLElement)) return;
+      const idx = Number(row.dataset.reorderIndex);
+      if (!Number.isInteger(idx) || idx < 0) return;
+      dragFromIndex = idx;
+      row.classList.add('dragging');
+      if (ev.dataTransfer) {
+        ev.dataTransfer.effectAllowed = 'move';
+        ev.dataTransfer.setData('text/plain', String(idx));
+      }
+    });
+
+    container.addEventListener('dragover', (ev) => {
+      if (dragFromIndex === null) return;
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest(rowSelector);
+      if (!(row instanceof HTMLElement)) return;
+      ev.preventDefault();
+      const rect = row.getBoundingClientRect();
+      const before = ev.clientY < (rect.top + rect.height / 2);
+      container.querySelectorAll('.drag-over-top,.drag-over-bottom').forEach((el) => {
+        if (el !== row) el.classList.remove('drag-over-top', 'drag-over-bottom');
+      });
+      row.classList.toggle('drag-over-top', before);
+      row.classList.toggle('drag-over-bottom', !before);
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+    });
+
+    container.addEventListener('drop', (ev) => {
+      if (dragFromIndex === null) return;
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) {
+        clearDragState();
+        return;
+      }
+      const row = target.closest(rowSelector);
+      if (!(row instanceof HTMLElement)) {
+        clearDragState();
+        return;
+      }
+      ev.preventDefault();
+      const toIdxRaw = Number(row.dataset.reorderIndex);
+      if (!Number.isInteger(toIdxRaw) || toIdxRaw < 0) {
+        clearDragState();
+        return;
+      }
+      const rect = row.getBoundingClientRect();
+      const insertAfter = ev.clientY >= (rect.top + rect.height / 2);
+      const toIdx = toIdxRaw + (insertAfter ? 1 : 0);
+      onMove(dragFromIndex, toIdx);
+      clearDragState();
+    });
+
+    container.addEventListener('dragend', () => {
+      clearDragState();
+    });
+  }
+
   function pointsForChartSeries(rawPoints, displayRule, useLttbCandidates) {
     const points = [];
     for (const p of (rawPoints || [])) {
@@ -1082,7 +1169,7 @@
     }
     const unitOptions = ['', 'W', 'kW', 'Wh', 'kWh', 'MWh', 'V', 'A', 'Hz', '°C', 'm', '%', 's', 'h', 'd', 'y', 'rpm'];
     unitOverrideRows.innerHTML = unitOverrideDialogDraft.map((d, i) => `
-      <div class="unit-override-row" data-index="${i}">
+      <div class="unit-override-row" data-index="${i}" data-reorder-index="${i}" draggable="true">
         <input type="text" data-field="suffix" placeholder="series suffix (e.g. power or inv/power)" value="${htmlEscape(d.suffix || '')}" />
         <select data-field="unit">
           ${unitOptions.map((u) => `<option value="${htmlEscape(u)}" ${String(d.unit || '') === u ? 'selected' : ''}>${u || '(default)'}</option>`).join('')}
@@ -1098,8 +1185,6 @@
           ${['max', 'nomax'].map((m) => `<option value="${m}" ${String(d.maxMode || 'max') === m ? 'selected' : ''}>${m}</option>`).join('')}
         </select>
         <input type="text" data-field="axisKey" placeholder="axis key" value="${htmlEscape(d.axisKey || '')}" />
-        <button type="button" class="icon-btn" data-action="unit-override-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
-        <button type="button" class="icon-btn" data-action="unit-override-down" data-index="${i}" ${i === unitOverrideDialogDraft.length - 1 ? 'disabled' : ''}>↓</button>
         <button type="button" class="icon-btn danger" data-action="delete-unit-override-row" data-index="${i}">🗑️</button>
       </div>
     `).join('');
@@ -2925,11 +3010,9 @@
     dashboardManageList.innerHTML = dashboardMenuItems.map((item, idx) => {
       if (item.type === 'separator') {
         return `
-          <div class="series-item">
+          <div class="series-item" data-reorder-index="${idx}" draggable="true">
             <span>${DASHBOARD_SEPARATOR_TEXT}</span>
             <span style="margin-left:auto;display:inline-flex;gap:6px">
-              <button type="button" class="icon-btn" data-action="dashboard-item-up" data-index="${idx}" ${idx === 0 ? 'disabled' : ''}>↑</button>
-              <button type="button" class="icon-btn" data-action="dashboard-item-down" data-index="${idx}" ${idx === dashboardMenuItems.length - 1 ? 'disabled' : ''}>↓</button>
               <button type="button" class="icon-btn danger" data-action="dashboard-separator-delete" data-index="${idx}" title="Delete separator">🗑️</button>
             </span>
           </div>
@@ -2937,13 +3020,11 @@
       }
       const name = String(item.name || '');
       return `
-        <div class="series-item">
+        <div class="series-item" data-reorder-index="${idx}" draggable="true">
           <span>${htmlEscape(name)}</span>
           <span style="margin-left:auto;display:inline-flex;gap:6px">
             <button type="button" class="icon-btn" data-action="dashboard-load" data-name="${htmlEscape(name)}">Load</button>
             <button type="button" class="icon-btn" data-action="dashboard-rename" data-name="${htmlEscape(name)}">Rename</button>
-            <button type="button" class="icon-btn" data-action="dashboard-item-up" data-index="${idx}" ${idx === 0 ? 'disabled' : ''}>↑</button>
-            <button type="button" class="icon-btn" data-action="dashboard-item-down" data-index="${idx}" ${idx === dashboardMenuItems.length - 1 ? 'disabled' : ''}>↓</button>
             <button type="button" class="icon-btn danger" data-action="dashboard-delete" data-name="${htmlEscape(name)}" title="Delete dashboard">🗑️</button>
           </span>
         </div>
@@ -3043,7 +3124,7 @@
       return;
     }
     chartSettingsSeriesList.innerHTML = chartSettingsSeriesDraft.map((name, i) => `
-      <div class="series-item">
+      <div class="series-item" data-reorder-index="${i}" draggable="true">
         <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
         <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
         <span class="chart-color-grid" title="Series color">
@@ -3074,8 +3155,6 @@
         </span>
         <span style="margin-left:auto;display:inline-flex;gap:6px">
           <button type="button" class="icon-btn danger" data-action="chart-series-delete" data-index="${i}" title="Remove series">🗑️</button>
-          <button type="button" class="icon-btn" data-action="chart-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
-          <button type="button" class="icon-btn" data-action="chart-series-down" data-index="${i}" ${i === chartSettingsSeriesDraft.length - 1 ? 'disabled' : ''}>↓</button>
         </span>
       </div>
     `).join('');
@@ -3126,7 +3205,7 @@
       return;
     }
     barSettingsSeriesList.innerHTML = barSettingsSeriesDraft.map((name, i) => `
-      <div class="series-item">
+      <div class="series-item" data-reorder-index="${i}" draggable="true">
         <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
         <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
         <span class="chart-color-grid" title="Series color">
@@ -3157,8 +3236,6 @@
         </span>
         <span style="margin-left:auto;display:inline-flex;gap:6px">
           <button type="button" class="icon-btn danger" data-action="bar-series-delete" data-index="${i}" title="Remove series">🗑️</button>
-          <button type="button" class="icon-btn" data-action="bar-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
-          <button type="button" class="icon-btn" data-action="bar-series-down" data-index="${i}" ${i === barSettingsSeriesDraft.length - 1 ? 'disabled' : ''}>↓</button>
         </span>
       </div>
     `).join('');
@@ -3171,13 +3248,11 @@
       return;
     }
     statSettingsSeriesList.innerHTML = statSettingsSeriesDraft.map((name, i) => `
-      <div class="series-item">
+      <div class="series-item" data-reorder-index="${i}" draggable="true">
         <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
         <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
         <span style="margin-left:auto;display:inline-flex;gap:6px">
           <button type="button" class="icon-btn danger" data-action="stat-series-delete" data-index="${i}" title="Remove row">🗑️</button>
-          <button type="button" class="icon-btn" data-action="stat-series-up" data-index="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
-          <button type="button" class="icon-btn" data-action="stat-series-down" data-index="${i}" ${i === statSettingsSeriesDraft.length - 1 ? 'disabled' : ''}>↓</button>
         </span>
       </div>
     `).join('');
@@ -3426,31 +3501,7 @@
       return;
     }
 
-    if (target.dataset.action === 'chart-series-up' || target.dataset.action === 'chart-series-down') {
-      const idx = Number(target.dataset.index);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= chartSettingsSeriesDraft.length) return;
-      const delta = target.dataset.action === 'chart-series-up' ? -1 : 1;
-      const other = idx + delta;
-      if (other < 0 || other >= chartSettingsSeriesDraft.length) return;
-      const tmp = chartSettingsSeriesDraft[idx];
-      chartSettingsSeriesDraft[idx] = chartSettingsSeriesDraft[other];
-      chartSettingsSeriesDraft[other] = tmp;
-      renderChartSettingsSeriesList();
-      return;
-    }
 
-    if (target.dataset.action === 'stat-series-up' || target.dataset.action === 'stat-series-down') {
-      const idx = Number(target.dataset.index);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= statSettingsSeriesDraft.length) return;
-      const delta = target.dataset.action === 'stat-series-up' ? -1 : 1;
-      const other = idx + delta;
-      if (other < 0 || other >= statSettingsSeriesDraft.length) return;
-      const tmp = statSettingsSeriesDraft[idx];
-      statSettingsSeriesDraft[idx] = statSettingsSeriesDraft[other];
-      statSettingsSeriesDraft[other] = tmp;
-      renderStatSettingsSeriesList();
-      return;
-    }
 
     if (target.dataset.action === 'stat-series-delete') {
       const idx = Number(target.dataset.index);
@@ -3468,18 +3519,6 @@
       return;
     }
 
-    if (target.dataset.action === 'bar-series-up' || target.dataset.action === 'bar-series-down') {
-      const idx = Number(target.dataset.index);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= barSettingsSeriesDraft.length) return;
-      const delta = target.dataset.action === 'bar-series-up' ? -1 : 1;
-      const other = idx + delta;
-      if (other < 0 || other >= barSettingsSeriesDraft.length) return;
-      const tmp = barSettingsSeriesDraft[idx];
-      barSettingsSeriesDraft[idx] = barSettingsSeriesDraft[other];
-      barSettingsSeriesDraft[other] = tmp;
-      renderBarSettingsSeriesList();
-      return;
-    }
 
     if (target.dataset.action === 'remove-console') {
       appendConsoleLine('console removed');
@@ -3797,26 +3836,40 @@
     activeColumnsStatId = null;
   });
 
+  attachRowReorderDnD(chartSettingsSeriesList, (fromIndex, toIndex) => {
+    if (!moveArrayItem(chartSettingsSeriesDraft, fromIndex, toIndex)) return;
+    renderChartSettingsSeriesList();
+  });
+
+  attachRowReorderDnD(statSettingsSeriesList, (fromIndex, toIndex) => {
+    if (!moveArrayItem(statSettingsSeriesDraft, fromIndex, toIndex)) return;
+    renderStatSettingsSeriesList();
+  });
+
+  attachRowReorderDnD(barSettingsSeriesList, (fromIndex, toIndex) => {
+    if (!moveArrayItem(barSettingsSeriesDraft, fromIndex, toIndex)) return;
+    renderBarSettingsSeriesList();
+  });
+
+  attachRowReorderDnD(dashboardManageList, (fromIndex, toIndex) => {
+    if (!moveArrayItem(dashboardMenuItems, fromIndex, toIndex)) return;
+    reconcileDashboardMenuItems();
+    renderDashboardManageList();
+    updateDashboardDatalist();
+    queueSaveSettings();
+  });
+
+  attachRowReorderDnD(unitOverrideRows, (fromIndex, toIndex) => {
+    if (!moveArrayItem(unitOverrideDialogDraft, fromIndex, toIndex)) return;
+    renderUnitOverrideRows();
+  }, '.unit-override-row[data-reorder-index]');
+
   dashboardManageList.addEventListener('click', async (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
     const action = target.dataset.action;
     if (!action) return;
     try {
-      if (action === 'dashboard-item-up' || action === 'dashboard-item-down') {
-        const idx = Number(target.dataset.index);
-        if (!Number.isInteger(idx) || idx < 0 || idx >= dashboardMenuItems.length) return;
-        const other = idx + (action === 'dashboard-item-up' ? -1 : 1);
-        if (other < 0 || other >= dashboardMenuItems.length) return;
-        const tmp = dashboardMenuItems[idx];
-        dashboardMenuItems[idx] = dashboardMenuItems[other];
-        dashboardMenuItems[other] = tmp;
-        reconcileDashboardMenuItems();
-        renderDashboardManageList();
-        updateDashboardDatalist();
-        queueSaveSettings();
-        return;
-      }
       if (action === 'dashboard-separator-delete') {
         const idx = Number(target.dataset.index);
         if (!Number.isInteger(idx) || idx < 0 || idx >= dashboardMenuItems.length) return;
@@ -3986,14 +4039,6 @@
         unitOverrideDialogDraft.splice(idx, 1);
         renderUnitOverrideRows();
         return;
-      }
-      if (target.dataset.action === 'unit-override-up' || target.dataset.action === 'unit-override-down') {
-        const other = idx + (target.dataset.action === 'unit-override-up' ? -1 : 1);
-        if (other < 0 || other >= unitOverrideDialogDraft.length) return;
-        const tmp = unitOverrideDialogDraft[idx];
-        unitOverrideDialogDraft[idx] = unitOverrideDialogDraft[other];
-        unitOverrideDialogDraft[other] = tmp;
-        renderUnitOverrideRows();
       }
     });
   }

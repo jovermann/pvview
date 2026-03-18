@@ -438,6 +438,22 @@ main { padding: 2px; }
   font-size: 13px;
 }
 
+.series-item[draggable="true"] {
+  cursor: grab;
+}
+
+.series-item.dragging {
+  opacity: 0.55;
+}
+
+.series-item.drag-over-top {
+  border-top: 1px solid var(--accent);
+}
+
+.series-item.drag-over-bottom {
+  border-bottom: 1px solid var(--accent);
+}
+
 #dashboardManageList .series-item {
   gap: 4px;
   padding: 2px 1px;
@@ -474,6 +490,22 @@ main { padding: 2px; }
   gap: 4px;
   align-items: center;
   padding: 2px 1px;
+}
+
+.unit-override-row[draggable="true"] {
+  cursor: grab;
+}
+
+.unit-override-row.dragging {
+  opacity: 0.55;
+}
+
+.unit-override-row.drag-over-top {
+  border-top: 1px solid var(--accent);
+}
+
+.unit-override-row.drag-over-bottom {
+  border-bottom: 1px solid var(--accent);
 }
 
 .unit-override-head {
