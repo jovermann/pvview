@@ -2379,7 +2379,9 @@
           itemStyle: { color: lineColor },
           lineStyle: { width: 1, color: lineColor },
           areaStyle: seriesAreaStyle,
-          tooltip: { valueFormatter: (value) => formatTooltipValue(value, s.displayRule.decimals) },
+          tooltip: {
+            valueFormatter: (value) => formatValueWithUnit(value, s.displayRule.unit, s.displayRule.decimals),
+          },
           emphasis: { focus: 'series' },
           sampling: s.useLttbCandidates ? 'lttb' : undefined,
           data: s.points,
