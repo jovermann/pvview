@@ -1866,7 +1866,9 @@
       const groupWidthPx = enabledSeriesCount * barWidthPx + Math.max(0, enabledSeriesCount - 1) * barGapPx;
       const slotWidthPx = Math.max(10, groupWidthPx + barGroupGapPx);
       const slotCount = Math.max(1, Math.floor(plotWidth / slotWidthPx));
-      const visibleEnd = Math.floor(Number(end) / intervalMs) * intervalMs;
+      // Use exclusive end at the *next* interval boundary so the current
+      // open interval (e.g. today) is included in the bar window.
+      const visibleEnd = (Math.floor(Number(end) / intervalMs) + 1) * intervalMs;
       const visibleStart = visibleEnd - slotCount * intervalMs;
       const fetchEnd = visibleEnd + intervalMs;
       const fetchStart = visibleStart;
