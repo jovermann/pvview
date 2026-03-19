@@ -242,7 +242,7 @@
   }
 
   function chartMinPointsForPanel(id) {
-    const chartEl = document.getElementById(`chart-${id}`);
+    const chartEl = document.getElementById(`chart-${id}`) || document.getElementById(`duration-${id}`);
     const width = chartEl instanceof HTMLElement ? chartEl.getBoundingClientRect().width : 0;
     return normalizeMinPoints(Math.floor(width / 2), 10);
   }
@@ -452,6 +452,16 @@
     return ids;
   }
 
+  function durationIds() {
+    const ids = [];
+    for (const [id, cfg] of charts.entries()) {
+      if (cfg && cfg.kind === 'duration') {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
   function heatmapIds() {
     const ids = [];
     for (const [id, cfg] of charts.entries()) {
@@ -620,26 +630,28 @@
 
   async function refreshAllCharts(reason = 'manual') {
     const ids = chartIds();
+    const durationPanelIds = durationIds();
     const barPanelIds = barIds();
     const heatmapPanelIds = heatmapIds();
     const statPanelIds = statIds();
     const t0 = performance.now();
     refreshGetCallCount = 0;
-    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length}`);
+    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length}`);
     const chartResults = await Promise.allSettled(ids.map((id) => refreshChart(id)));
+    const durationResults = await Promise.allSettled(durationPanelIds.map((id) => refreshDuration(id)));
     const barResults = await Promise.allSettled(barPanelIds.map((id) => refreshBar(id)));
     const heatmapResults = await Promise.allSettled(heatmapPanelIds.map((id) => refreshHeatmap(id)));
     const statResults = await Promise.allSettled(statPanelIds.map((id) => refreshStat(id)));
-    const results = [...chartResults, ...barResults, ...heatmapResults, ...statResults];
+    const results = [...chartResults, ...durationResults, ...barResults, ...heatmapResults, ...statResults];
     const failed = results.filter((r) => r.status === 'rejected').length;
-    const allIds = [...ids, ...barPanelIds, ...heatmapPanelIds, ...statPanelIds];
+    const allIds = [...ids, ...durationPanelIds, ...barPanelIds, ...heatmapPanelIds, ...statPanelIds];
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         appendConsoleLine(`panel ${allIds[i]} refresh error ${r.reason}`);
       }
     });
     const elapsed = Math.round(performance.now() - t0);
-    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -1466,6 +1478,26 @@
     return wrapper;
   }
 
+  function createDurationPanel(id) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'panel';
+    wrapper.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">Duration ${id}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
+          <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
+          <button class="settings-gadget" data-action="settings" data-id="${id}" title="Settings">⚙️</button>
+        </div>
+      </div>
+      <div class="chart" id="duration-${id}"></div>
+    `;
+    return wrapper;
+  }
+
   function createConsolePanel(options = {}) {
     if (consolePanelId && charts.has(consolePanelId)) {
       appendConsoleLine(`console already exists as panel=${consolePanelId}`);
@@ -1620,6 +1652,11 @@
     }
     if (c.kind === 'bar') {
       titleEl.textContent = c.label || `Bar ${id}`;
+      if (metaEl) metaEl.textContent = c.titleMeta || '';
+      return;
+    }
+    if (c.kind === 'duration') {
+      titleEl.textContent = c.label || `Duration ${id}`;
       if (metaEl) metaEl.textContent = c.titleMeta || '';
       return;
     }
@@ -2143,6 +2180,215 @@
     }
   }
 
+  async function refreshDuration(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'duration' || !cfg.instance) return;
+    setPanelBusy(id, true);
+    try {
+      const panelName = cfg.label || `Duration ${id}`;
+      const refreshT0 = performance.now();
+      appendConsoleLine(`duration ${id} refresh start name="${panelName}" series=${cfg.series.length}`);
+      const { start, end } = getRange();
+      await ensureInverterNames(cfg.series);
+      if (!cfg.series.length) {
+        setPanelTitleMeta(id, '');
+        cfg.instance.clear();
+        cfg.instance.setOption({
+          backgroundColor: 'transparent',
+          title: { text: 'No series selected', left: 'center', top: 'middle', textStyle: { color: '#8ca0b8' } },
+        });
+        appendConsoleLine(`duration ${id} refresh done (no series) elapsed=${Math.round(performance.now() - refreshT0)}ms`);
+        return;
+      }
+
+      const minPoints = chartMinPointsForPanel(id);
+      const granularity = normalizeChartGranularity(globalGranularity);
+      const displaySeries = cfg.series.map((s) => displaySeriesName(s));
+      const prefix = displayPrefixForSeries(displaySeries);
+      const batchQ = new URLSearchParams({
+        start: String(start),
+        end: String(end),
+        minPoints: String(minPoints),
+      });
+      if (granularity !== 'auto') batchQ.set('granularity', granularity);
+      for (const name of cfg.series) batchQ.append('series', name);
+      const batchReqT0 = performance.now();
+      appendConsoleLine(`duration ${id} request start batch series=${cfg.series.length} granularity=${granularity} minPoints=${minPoints}`);
+      const batchResp = await apiJson(`/events?${batchQ}`);
+      const eventItems = Array.isArray(batchResp && batchResp.events)
+        ? batchResp.events
+        : ((batchResp && typeof batchResp.series === 'string') ? [batchResp] : []);
+      const eventsBySeries = new Map(eventItems.filter((x) => x && typeof x === 'object' && typeof x.series === 'string').map((x) => [x.series, x]));
+      const batchReqElapsedMs = Math.round(performance.now() - batchReqT0);
+      appendConsoleLine(
+        `duration ${id} request done batch series=${cfg.series.length} returned=${eventItems.length} `
+        + `elapsed=${batchReqElapsedMs}ms`
+      );
+
+      const seriesResponses = cfg.series.map((name) => {
+        const data = eventsBySeries.get(name) || {
+          series: name,
+          points: [],
+          downsampled: false,
+          files: [],
+        };
+        const displayRule = effectiveDisplayRuleForSeries(name, unitForSeriesName(name), data.decimalPlaces);
+        const values = [];
+        for (const p of (data.points || [])) {
+          let rawValue;
+          if (Object.prototype.hasOwnProperty.call(p, 'value')) rawValue = p.value;
+          else if (Object.prototype.hasOwnProperty.call(p, 'avg')) rawValue = p.avg;
+          else continue;
+          const scaled = roundNumeric(applyDisplayScale(rawValue, displayRule));
+          if (typeof scaled === 'number' && Number.isFinite(scaled)) values.push(scaled);
+        }
+        values.sort((a, b) => a - b);
+        const n = values.length;
+        const points = values.map((v, idx) => [n <= 1 ? 0 : (idx * 100) / (n - 1), v]);
+        appendConsoleLine(
+          `duration ${id} batch item series=${name} points=${points.length} downsampled=${!!data.downsampled} `
+          + `files=${Array.isArray(data.files) ? data.files.length : 0}`
+        );
+        return {
+          name,
+          displayName: compactSeriesLabel(displaySeriesName(name), prefix),
+          points,
+          displayRule,
+          axisKey: (displayRule && displayRule.axisKey) || axisGroupKeyForSuffix(String(name).split('/').pop() || String(name)),
+        };
+      });
+
+      const axisOrder = [];
+      const axisIndexByKey = new Map();
+      for (const s of seriesResponses) {
+        if (!axisIndexByKey.has(s.axisKey)) {
+          axisIndexByKey.set(s.axisKey, axisOrder.length);
+          axisOrder.push(s.axisKey);
+        }
+      }
+
+      const displayNameToSeries = new Map();
+      for (const s of seriesResponses) {
+        const bucket = displayNameToSeries.get(s.displayName) || [];
+        bucket.push(s.name);
+        displayNameToSeries.set(s.displayName, bucket);
+      }
+      cfg.displayNameToSeries = displayNameToSeries;
+      const legendSelected = {};
+      for (const [legendName, rawSeriesList] of displayNameToSeries.entries()) {
+        let enabled = true;
+        for (const rawName of rawSeriesList) {
+          if (cfg.legendEnabledBySeries && cfg.legendEnabledBySeries[rawName] === false) {
+            enabled = false;
+            break;
+          }
+        }
+        legendSelected[legendName] = enabled;
+      }
+
+      const axisSlot = 36;
+      const axisUnitByKey = new Map();
+      for (const s of seriesResponses) {
+        if (!axisUnitByKey.has(s.axisKey) && s.displayRule && s.displayRule.unit) {
+          axisUnitByKey.set(s.axisKey, s.displayRule.unit);
+        }
+      }
+      const yAxes = axisOrder.map((axisKey, i) => ({
+        type: 'value',
+        name: axisUnitByKey.has(axisKey) ? `${String(axisKey)} / ${axisUnitByKey.get(axisKey)}` : axisLabelForSuffix(axisKey),
+        position: (i % 2 === 0) ? 'left' : 'right',
+        offset: Math.floor(i / 2) * axisSlot,
+        min: Number.isFinite(cfg.yMin) ? cfg.yMin : null,
+        max: Number.isFinite(cfg.yMax) ? cfg.yMax : null,
+        alignTicks: true,
+        axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
+        axisLabel: { color: '#aebbc9' },
+        splitLine: { show: i === 0, lineStyle: { color: '#2b3544' } },
+        nameTextStyle: { color: '#aebbc9', fontSize: 10 },
+        nameLocation: 'middle',
+        nameGap: 32 + Math.floor(i / 2) * 6,
+      }));
+
+      const axisCount = yAxes.length;
+      const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
+      const gridRight = 8 + Math.floor(axisCount / 2) * axisSlot;
+      const gridTop = 12;
+      const chartMetaParts = [];
+      if (showRefreshDurationDebug) chartMetaParts.push(`${batchReqElapsedMs} ms`);
+      setPanelTitleMeta(id, chartMetaParts.join(', '));
+      const dots = dotVisual(cfg.dotStyle);
+      const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
+
+      cfg.instance.setOption({
+        backgroundColor: 'transparent',
+        animation: false,
+        legend: {
+          orient: 'vertical',
+          left: gridLeft,
+          top: gridTop,
+          selected: legendSelected,
+          textStyle: { color: '#c6d2e0' },
+        },
+        tooltip: { trigger: 'axis' },
+        grid: {
+          left: gridLeft,
+          right: gridRight,
+          top: gridTop,
+          bottom: 30,
+        },
+        xAxis: {
+          type: 'value',
+          min: 0,
+          max: 100,
+          name: 'Duration / %',
+          axisLine: { lineStyle: { color: '#4d5b70' } },
+          splitLine: { lineStyle: { color: '#2b3544' } },
+          axisLabel: { color: '#aebbc9' },
+          nameTextStyle: { color: '#aebbc9', fontSize: 10 },
+        },
+        yAxis: yAxes,
+        series: seriesResponses.map((s, i) => {
+          const overrideColor = (cfg.seriesColorByName && typeof cfg.seriesColorByName[s.name] === 'string')
+            ? String(cfg.seriesColorByName[s.name]).trim()
+            : '';
+          const lineColor = overrideColor === AUTO_DARK_COLOR
+            ? seriesPaletteDark[i % seriesPaletteDark.length]
+            : (overrideColor || seriesPalette[i % seriesPalette.length]);
+          const seriesAreaStyle = areaOpacity > 0 ? {
+            origin: 'auto',
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: rgbaFromHex(lineColor, areaOpacity) },
+              { offset: 1, color: rgbaFromHex(lineColor, 0) },
+            ]),
+          } : undefined;
+          return {
+            name: s.displayName,
+            type: 'line',
+            yAxisIndex: axisIndexByKey.get(s.axisKey) || 0,
+            showSymbol: dots.showSymbol,
+            symbol: dots.symbol,
+            symbolSize: dots.symbolSize,
+            smooth: 0,
+            itemStyle: { color: lineColor },
+            lineStyle: { width: 1, color: lineColor },
+            areaStyle: seriesAreaStyle,
+            tooltip: {
+              valueFormatter: (value) => formatValueWithUnit(value, s.displayRule.unit, s.displayRule.decimals),
+            },
+            emphasis: { focus: 'series' },
+            data: s.points,
+          };
+        }),
+      }, true);
+      appendConsoleLine(
+        `duration ${id} refresh done name="${panelName}" series=${seriesResponses.length} axes=${axisCount} `
+        + `elapsed=${Math.round(performance.now() - refreshT0)}ms`
+      );
+    } finally {
+      setPanelBusy(id, false);
+    }
+  }
+
   async function refreshChart(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'chart' || !cfg.instance) return;
@@ -2638,6 +2884,73 @@
     return id;
   }
 
+  function addDuration(initialSeries = [], options = {}) {
+    chartCounter += 1;
+    const id = String(chartCounter);
+
+    const widgetEl = document.createElement('div');
+    widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 6,
+      h: options.h || 3,
+    });
+
+    const panel = createDurationPanel(id);
+    node.querySelector('.grid-stack-item-content').appendChild(panel);
+
+    const chartEl = document.getElementById(`duration-${id}`);
+    const instance = echarts.init(chartEl, null, { renderer: 'canvas' });
+    const initialDotStyle = normalizeDotStyle(
+      options.dotStyle !== undefined ? options.dotStyle : (options.showSymbols ? 1 : 0)
+    );
+    const initialAreaOpacity = options.areaOpacity !== undefined
+      ? normalizeAreaOpacity(options.areaOpacity)
+      : 0.3;
+    charts.set(id, {
+      id,
+      kind: 'duration',
+      node,
+      instance,
+      series: [...initialSeries],
+      dotStyle: initialDotStyle,
+      areaOpacity: initialAreaOpacity,
+      yMin: optionalFiniteNumber(options.yMin),
+      yMax: optionalFiniteNumber(options.yMax),
+      seriesColorByName: (options.seriesColorByName && typeof options.seriesColorByName === 'object')
+        ? { ...options.seriesColorByName }
+        : {},
+      legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
+      displayNameToSeries: new Map(),
+      label: options.label || null,
+      busyCount: 0,
+      titleMeta: '',
+    });
+    instance.on('legendselectchanged', (ev) => {
+      const c = charts.get(id);
+      if (!c || c.kind !== 'duration') return;
+      const displayName = ev && typeof ev.name === 'string' ? ev.name : '';
+      if (!displayName) return;
+      const list = c.displayNameToSeries instanceof Map ? c.displayNameToSeries.get(displayName) : null;
+      if (!Array.isArray(list) || list.length === 0) return;
+      const selected = !!(ev && ev.selected && ev.selected[displayName]);
+      if (!c.legendEnabledBySeries || typeof c.legendEnabledBySeries !== 'object') {
+        c.legendEnabledBySeries = {};
+      }
+      for (const rawName of list) {
+        c.legendEnabledBySeries[rawName] = selected;
+      }
+      appendConsoleLine(`duration ${id} legend ${selected ? 'enabled' : 'disabled'} name=${displayName}`);
+    });
+    appendConsoleLine(`duration ${id} created series=${initialSeries.length}`);
+    updateTitle(id);
+    if (!options.deferRefresh) {
+      refreshDuration(id).catch((err) => console.error(err));
+    }
+    return id;
+  }
+
   function addStat(initialSeries = [], options = {}) {
     chartCounter += 1;
     const id = String(chartCounter);
@@ -2801,7 +3114,7 @@
     const c = charts.get(id);
     if (!c) return;
     appendConsoleLine(`panel ${id} removed type=${c.kind || 'unknown'}`);
-    if ((c.kind === 'chart' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
+    if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
       c.instance.dispose();
     }
     if (consolePanelId === id) {
@@ -2814,7 +3127,7 @@
 
   function removeChart(id) {
     const c = charts.get(id);
-    if (!c || c.kind !== 'chart') return;
+    if (!c || (c.kind !== 'chart' && c.kind !== 'duration')) return;
     removePanel(id);
   }
 
@@ -2936,6 +3249,26 @@
         });
         continue;
       }
+      if (c.kind === 'duration') {
+        chartList.push({
+          type: 'duration',
+          x: Number(nodeInfo.x || 0),
+          y: Number(nodeInfo.y || 0),
+          w: Number(nodeInfo.w || 6),
+          h: Number(nodeInfo.h || 3),
+          series: Array.isArray(c.series) ? [...c.series] : [],
+          dotStyle: normalizeDotStyle(c.dotStyle),
+          areaOpacity: normalizeAreaOpacity(c.areaOpacity),
+          yMin: Number.isFinite(c.yMin) ? c.yMin : null,
+          yMax: Number.isFinite(c.yMax) ? c.yMax : null,
+          seriesColorByName: (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+            ? { ...c.seriesColorByName }
+            : {},
+          legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
+          label: c.label || null,
+        });
+        continue;
+      }
       chartList.push({
         type: 'chart',
         x: Number(nodeInfo.x || 0),
@@ -3027,6 +3360,28 @@
             : {},
           seriesColorByName: (ch.seriesColorByName && typeof ch.seriesColorByName === 'object')
             ? { ...ch.seriesColorByName }
+            : {},
+          label: typeof ch.label === 'string' ? ch.label : null,
+          deferRefresh: true,
+        });
+        continue;
+      }
+      if (ch.type === 'duration') {
+        const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+        addDuration(series, {
+          x: Number(ch.x),
+          y: Number(ch.y),
+          w: Number(ch.w) || 6,
+          h: Number(ch.h) || 3,
+          dotStyle: normalizeDotStyle(ch.dotStyle),
+          areaOpacity: normalizeAreaOpacity(ch.areaOpacity),
+          yMin: optionalFiniteNumber(ch.yMin),
+          yMax: optionalFiniteNumber(ch.yMax),
+          seriesColorByName: (ch.seriesColorByName && typeof ch.seriesColorByName === 'object')
+            ? { ...ch.seriesColorByName }
+            : {},
+          legendEnabledBySeries: (ch.legendEnabledBySeries && typeof ch.legendEnabledBySeries === 'object')
+            ? { ...ch.legendEnabledBySeries }
             : {},
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
@@ -3173,6 +3528,8 @@
           refreshBar(id).catch((err) => console.error(err));
         } else if (c.kind === 'heatmap') {
           refreshHeatmap(id).catch((err) => console.error(err));
+        } else if (c.kind === 'duration') {
+          refreshDuration(id).catch((err) => console.error(err));
         } else {
           refreshChart(id).catch((err) => console.error(err));
         }
@@ -3434,6 +3791,8 @@
       refreshBar(activeChartId).catch((err) => console.error(err));
     } else if (c.kind === 'heatmap') {
       refreshHeatmap(activeChartId).catch((err) => console.error(err));
+    } else if (c.kind === 'duration') {
+      refreshDuration(activeChartId).catch((err) => console.error(err));
     } else {
       refreshChart(activeChartId).catch((err) => console.error(err));
     }
@@ -3498,6 +3857,7 @@
       setAddWindowMenuOpen(false);
       const kind = String(target.dataset.kind || '').toLowerCase();
       if (kind === 'chart') addChart();
+      else if (kind === 'duration') addDuration();
       else if (kind === 'stat') addStat();
       else if (kind === 'bar') addBar();
       else if (kind === 'heatmap') addHeatmap();
@@ -3738,7 +4098,11 @@
       + ` yMin=${c.yMin === null ? 'auto' : c.yMin} yMax=${c.yMax === null ? 'auto' : c.yMax}`
     );
     updateTitle(activeSettingsChartId);
-    refreshChart(activeSettingsChartId).catch((err) => console.error(err));
+    if (c.kind === 'duration') {
+      refreshDuration(activeSettingsChartId).catch((err) => console.error(err));
+    } else {
+      refreshChart(activeSettingsChartId).catch((err) => console.error(err));
+    }
     activeSettingsChartId = null;
     chartSettingsSeriesDraft = [];
     chartSettingsSeriesColorDraft = {};
@@ -4297,7 +4661,7 @@
 
   grid.on('resizestop', () => {
     charts.forEach((c) => {
-      if ((c.kind === 'chart' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
         c.instance.resize();
       }
     });
@@ -4307,7 +4671,7 @@
 
   window.addEventListener('resize', () => {
     charts.forEach((c) => {
-      if ((c.kind === 'chart' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
         c.instance.resize();
       }
     });
