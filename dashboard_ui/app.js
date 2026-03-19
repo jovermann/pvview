@@ -69,6 +69,7 @@
   const heatmapSettingsDialog = document.getElementById('heatmapSettingsDialog');
   const heatmapSettingsName = document.getElementById('heatmapSettingsName');
   const heatmapSettingsGap = document.getElementById('heatmapSettingsGap');
+  const heatmapSettingsSeriesList = document.getElementById('heatmapSettingsSeriesList');
   const barSettingsDialog = document.getElementById('barSettingsDialog');
   const barSettingsName = document.getElementById('barSettingsName');
   const barSettingsWidth = document.getElementById('barSettingsWidth');
@@ -86,6 +87,7 @@
   let chartSettingsSeriesDraft = [];
   let chartSettingsSeriesColorDraft = {};
   let statSettingsSeriesDraft = [];
+  let heatmapSettingsSeriesDraft = [];
   let barSettingsSeriesDraft = [];
   let barSettingsSeriesColorDraft = {};
   let activeSettingsStatId = null;
@@ -3633,11 +3635,27 @@
     if (!c || c.kind !== 'heatmap') return;
     activeSettingsHeatmapId = id;
     heatmapSettingsName.value = c.label || '';
+    heatmapSettingsSeriesDraft = Array.isArray(c.series) ? [...c.series] : [];
     if (heatmapSettingsGap) {
       const raw = Number(c.cellGap);
       heatmapSettingsGap.value = String(Number.isFinite(raw) ? Math.max(0, Math.min(12, Math.floor(raw))) : 1);
     }
+    renderHeatmapSettingsSeriesList();
     heatmapSettingsDialog.showModal();
+  }
+
+  function renderHeatmapSettingsSeriesList() {
+    if (!(heatmapSettingsSeriesList instanceof HTMLElement)) return;
+    if (!Array.isArray(heatmapSettingsSeriesDraft) || heatmapSettingsSeriesDraft.length === 0) {
+      heatmapSettingsSeriesList.innerHTML = '<div class="series-item"><span>No series selected</span></div>';
+      return;
+    }
+    heatmapSettingsSeriesList.innerHTML = heatmapSettingsSeriesDraft.map((name, i) => `
+      <div class="series-item" data-reorder-index="${i}" draggable="true">
+        <span style="width:2ch;text-align:right;color:#90a0b3">${i + 1}</span>
+        <span style="flex:1;min-width:0">${htmlEscape(displaySeriesName(name))}</span>
+      </div>
+    `).join('');
   }
 
   function openBarSettingsDialog(id) {
@@ -4192,15 +4210,22 @@
     }
     c.label = String(heatmapSettingsName.value || '').trim() || null;
     c.cellGap = Math.max(0, Math.min(12, Math.floor(Number(heatmapSettingsGap ? heatmapSettingsGap.value : 1) || 0)));
+    c.series = Array.isArray(heatmapSettingsSeriesDraft) ? [...heatmapSettingsSeriesDraft] : [];
+    if (!c.series.includes(c.activeSeries)) {
+      c.activeSeries = c.series[0] || '';
+    }
+    updateHeatmapSeriesSelect(activeSettingsHeatmapId);
     appendConsoleLine(`heatmap ${activeSettingsHeatmapId} settings updated gap=${c.cellGap}`);
     updateTitle(activeSettingsHeatmapId);
     refreshHeatmap(activeSettingsHeatmapId).catch((err) => console.error(err));
     activeSettingsHeatmapId = null;
+    heatmapSettingsSeriesDraft = [];
     heatmapSettingsDialog.close();
   });
 
   document.getElementById('cancelHeatmapSettings').addEventListener('click', () => {
     activeSettingsHeatmapId = null;
+    heatmapSettingsSeriesDraft = [];
     heatmapSettingsDialog.close();
   });
 
@@ -4211,12 +4236,14 @@
     }
     const removeId = activeSettingsHeatmapId;
     activeSettingsHeatmapId = null;
+    heatmapSettingsSeriesDraft = [];
     heatmapSettingsDialog.close();
     removePanel(removeId);
   });
 
   heatmapSettingsDialog.addEventListener('close', () => {
     activeSettingsHeatmapId = null;
+    heatmapSettingsSeriesDraft = [];
   });
 
   document.getElementById('barSettingsForm').addEventListener('submit', (e) => {
@@ -4312,6 +4339,11 @@
   attachRowReorderDnD(statSettingsSeriesList, (fromIndex, toIndex) => {
     if (!moveArrayItem(statSettingsSeriesDraft, fromIndex, toIndex)) return;
     renderStatSettingsSeriesList();
+  });
+
+  attachRowReorderDnD(heatmapSettingsSeriesList, (fromIndex, toIndex) => {
+    if (!moveArrayItem(heatmapSettingsSeriesDraft, fromIndex, toIndex)) return;
+    renderHeatmapSettingsSeriesList();
   });
 
   attachRowReorderDnD(barSettingsSeriesList, (fromIndex, toIndex) => {
