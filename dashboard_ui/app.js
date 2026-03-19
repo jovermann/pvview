@@ -22,6 +22,7 @@
   const startInput = document.getElementById('startTime');
   const endInput = document.getElementById('endTime');
   const rangePresetSelect = document.getElementById('rangePreset');
+  const quickRangeButtons = document.getElementById('quickRangeButtons');
   const autoRefreshSelect = document.getElementById('autoRefresh');
   const addWindowButton = document.getElementById('addWindowButton');
   const addWindowMenu = document.getElementById('addWindowMenu');
@@ -40,11 +41,14 @@
   const virtualSeriesTabBtn = document.getElementById('virtualSeriesTabBtn');
   const unitOverridesTabBtn = document.getElementById('unitOverridesTabBtn');
   const dashboardSettingsTabBtn = document.getElementById('dashboardSettingsTabBtn');
+  const timeRangesTabBtn = document.getElementById('timeRangesTabBtn');
   const debugSettingsTabBtn = document.getElementById('debugSettingsTabBtn');
   const virtualSeriesTabPane = document.getElementById('virtualSeriesTabPane');
   const unitOverridesTabPane = document.getElementById('unitOverridesTabPane');
   const dashboardSettingsTabPane = document.getElementById('dashboardSettingsTabPane');
+  const timeRangesTabPane = document.getElementById('timeRangesTabPane');
   const debugSettingsTabPane = document.getElementById('debugSettingsTabPane');
+  const timeRangeSettingsList = document.getElementById('timeRangeSettingsList');
   const visibilityRefreshEnabledInput = document.getElementById('visibilityRefreshEnabled');
   const showMinPointsDebugInput = document.getElementById('showMinPointsDebug');
   const showRefreshDurationDebugInput = document.getElementById('showRefreshDurationDebug');
@@ -139,6 +143,7 @@
   let visibilityRefreshEnabled = true;
   let globalGranularity = 'auto';
   let lttbMinAvgMaxEnabled = false;
+  let quickRangeButtonsEnabled = ['12h', '1d', '2d'];
   let showMinPointsDebug = false;
   let showRefreshDurationDebug = false;
   let heatmapResizeTimer = null;
@@ -488,6 +493,37 @@
     return new Date(value).getTime();
   }
 
+  const PREDEFINED_TIME_RANGES = [
+    '1m', '2m', '5m', '10m', '15m', '30m',
+    '1h', '2h', '3h', '6h', '12h',
+    '1d', '2d', '3d', '4d', '7d', '14d', '21d', '28d',
+    '60d', '90d', '180d', '1y', '2y', '3y', '5y', '10y',
+  ];
+  const DEFAULT_QUICK_RANGE_BUTTONS = ['12h', '1d', '2d'];
+
+  function normalizeQuickRangeButtons(raw, fallbackDefault = true) {
+    const selected = new Set();
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        const key = String(item || '').trim();
+        if (!PREDEFINED_TIME_RANGES.includes(key)) continue;
+        selected.add(key);
+      }
+    }
+    const out = PREDEFINED_TIME_RANGES.filter((key) => selected.has(key));
+    if (!out.length && fallbackDefault) return [...DEFAULT_QUICK_RANGE_BUTTONS];
+    return out;
+  }
+
+  function renderQuickRangeButtons() {
+    if (!(quickRangeButtons instanceof HTMLElement)) return;
+    quickRangeButtons.innerHTML = quickRangeButtonsEnabled
+      .map((rangeKey) => (
+        `<button class="preset ${activePreset === rangeKey ? 'active' : ''}" data-range="${htmlEscape(rangeKey)}">${htmlEscape(rangeKey)}</button>`
+      ))
+      .join('');
+  }
+
   function setRangeByPreset(rangeKey) {
     const hours = {
       '1m': 1 / 60,
@@ -523,18 +559,14 @@
     const start = end - hours * 3600 * 1000;
     startInput.value = toDatetimeLocalValue(start);
     endInput.value = toDatetimeLocalValue(end);
-    document.querySelectorAll('.preset').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.range === rangeKey);
-    });
+    renderQuickRangeButtons();
     if (rangePresetSelect) {
       rangePresetSelect.value = rangeKey;
     }
   }
 
   function clearPresetSelection() {
-    document.querySelectorAll('.preset').forEach((btn) => {
-      btn.classList.remove('active');
-    });
+    renderQuickRangeButtons();
     if (rangePresetSelect) {
       rangePresetSelect.value = 'custom';
     }
@@ -619,6 +651,7 @@
           : { type: 'dashboard', name: String(item && item.name ? item.name : '') }
       )),
       visibilityRefreshEnabled: !!visibilityRefreshEnabled,
+      quickRangeButtons: [...quickRangeButtonsEnabled],
       granularity: normalizeChartGranularity(globalGranularity),
       lttbMinAvgMaxEnabled: !!lttbMinAvgMaxEnabled,
       showMinPointsDebug: !!showMinPointsDebug,
@@ -1221,15 +1254,27 @@
     renderUnitOverrideRows();
   }
 
+  function renderTimeRangeSettingsList() {
+    if (!(timeRangeSettingsList instanceof HTMLElement)) return;
+    timeRangeSettingsList.innerHTML = PREDEFINED_TIME_RANGES.map((rangeKey) => (
+      `<label class="series-item">
+        <input type="checkbox" data-range-key="${htmlEscape(rangeKey)}" ${quickRangeButtonsEnabled.includes(rangeKey) ? 'checked' : ''} />
+        <span>${htmlEscape(rangeKey)}</span>
+      </label>`
+    )).join('');
+  }
+
   function setVirtualDialogTab(tab) {
-    virtualDialogActiveTab = (tab === 'units' || tab === 'dashboards' || tab === 'debug') ? tab : 'virtual';
+    virtualDialogActiveTab = (tab === 'units' || tab === 'dashboards' || tab === 'timeranges' || tab === 'debug') ? tab : 'virtual';
     if (virtualSeriesTabBtn) virtualSeriesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'virtual');
     if (unitOverridesTabBtn) unitOverridesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'units');
     if (dashboardSettingsTabBtn) dashboardSettingsTabBtn.classList.toggle('active', virtualDialogActiveTab === 'dashboards');
+    if (timeRangesTabBtn) timeRangesTabBtn.classList.toggle('active', virtualDialogActiveTab === 'timeranges');
     if (debugSettingsTabBtn) debugSettingsTabBtn.classList.toggle('active', virtualDialogActiveTab === 'debug');
     if (virtualSeriesTabPane) virtualSeriesTabPane.classList.toggle('active', virtualDialogActiveTab === 'virtual');
     if (unitOverridesTabPane) unitOverridesTabPane.classList.toggle('active', virtualDialogActiveTab === 'units');
     if (dashboardSettingsTabPane) dashboardSettingsTabPane.classList.toggle('active', virtualDialogActiveTab === 'dashboards');
+    if (timeRangesTabPane) timeRangesTabPane.classList.toggle('active', virtualDialogActiveTab === 'timeranges');
     if (debugSettingsTabPane) debugSettingsTabPane.classList.toggle('active', virtualDialogActiveTab === 'debug');
   }
 
@@ -1254,6 +1299,7 @@
     if (virtualAlignWindowMsInput) virtualAlignWindowMsInput.value = String(virtualAlignWindowMs);
     renderVirtualSeriesRows();
     renderUnitOverrideRows();
+    renderTimeRangeSettingsList();
     setVirtualDialogTab(initialTab || virtualDialogActiveTab || 'virtual');
     virtualSeriesDialog.showModal();
   }
@@ -4121,8 +4167,26 @@
   if (dashboardSettingsTabBtn) {
     dashboardSettingsTabBtn.addEventListener('click', () => setVirtualDialogTab('dashboards'));
   }
+  if (timeRangesTabBtn) {
+    timeRangesTabBtn.addEventListener('click', () => setVirtualDialogTab('timeranges'));
+  }
   if (debugSettingsTabBtn) {
     debugSettingsTabBtn.addEventListener('click', () => setVirtualDialogTab('debug'));
+  }
+  if (timeRangeSettingsList) {
+    timeRangeSettingsList.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return;
+      const rangeKey = String(target.dataset.rangeKey || '').trim();
+      if (!PREDEFINED_TIME_RANGES.includes(rangeKey)) return;
+      const set = new Set(quickRangeButtonsEnabled);
+      if (target.checked) set.add(rangeKey);
+      else set.delete(rangeKey);
+      quickRangeButtonsEnabled = normalizeQuickRangeButtons(Array.from(set), false);
+      renderTimeRangeSettingsList();
+      renderQuickRangeButtons();
+      queueSaveSettings();
+    });
   }
   if (visibilityRefreshEnabledInput) {
     visibilityRefreshEnabledInput.addEventListener('change', () => {
@@ -4381,6 +4445,7 @@
     visibilityRefreshEnabled = settings && Object.prototype.hasOwnProperty.call(settings, 'visibilityRefreshEnabled')
       ? !!settings.visibilityRefreshEnabled
       : true;
+    quickRangeButtonsEnabled = normalizeQuickRangeButtons(settings && settings.quickRangeButtons);
     globalGranularity = settings && Object.prototype.hasOwnProperty.call(settings, 'granularity')
       ? normalizeChartGranularity(settings.granularity)
       : 'auto';
@@ -4408,6 +4473,7 @@
     if (showRefreshDurationDebugInput) {
       showRefreshDurationDebugInput.checked = showRefreshDurationDebug;
     }
+    renderQuickRangeButtons();
     if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
       currentDashboardName = desiredDashboard;
       dashboardSelect.value = desiredDashboard;

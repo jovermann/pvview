@@ -39,6 +39,11 @@ body {
 }
 
 .range-controls { display: flex; gap: 6px; }
+.quick-range-buttons {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 
 .icon-gadget {
   border: none;

@@ -67,9 +67,7 @@
             <option value="custom">Custom</option>
           </select>
         </label>
-        <button class="preset" data-range="12h">12h</button>
-        <button class="preset" data-range="1d">1d</button>
-        <button class="preset active" data-range="2d">2d</button>
+        <span id="quickRangeButtons" class="quick-range-buttons"></span>
       </div>
       <label class="date-field"><input id="startTime" type="datetime-local" step="5" /></label>
       <label class="date-field">to <input id="endTime" type="datetime-local" step="5" /></label>
@@ -273,6 +271,7 @@
         <button type="button" class="dialog-tab active" id="virtualSeriesTabBtn" data-tab="virtual">Virtual Series</button>
         <button type="button" class="dialog-tab" id="unitOverridesTabBtn" data-tab="units">Units</button>
         <button type="button" class="dialog-tab" id="dashboardSettingsTabBtn" data-tab="dashboards">Dashboards</button>
+        <button type="button" class="dialog-tab" id="timeRangesTabBtn" data-tab="timeranges">Time Ranges</button>
         <button type="button" class="dialog-tab" id="debugSettingsTabBtn" data-tab="debug">Debug</button>
       </div>
       <div id="virtualSeriesTabPane" class="dialog-tab-pane active">
@@ -312,6 +311,9 @@
         <div id="dashboardManageList" class="series-list"></div>
         <button id="addDashboardSeparator" type="button" class="btn">Add separator</button>
         <button id="clearCurrentDashboard" type="button" class="btn danger">Clear current dashboard</button>
+      </div>
+      <div id="timeRangesTabPane" class="dialog-tab-pane">
+        <div id="timeRangeSettingsList" class="series-list"></div>
       </div>
       <div id="debugSettingsTabPane" class="dialog-tab-pane">
         <div class="settings-grid">
