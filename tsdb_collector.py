@@ -208,6 +208,8 @@ def collect_to_tsdb(
 
     if client is not None:
         client.loop_start()
+    flush_interval_s = 10.0
+    poll_interval_s = http_poll_interval_ms / 1000.0
     last_flush = time.monotonic()
     next_http_poll = time.monotonic()
     try:
@@ -256,15 +258,25 @@ def collect_to_tsdb(
                         pending_events.extend(http_events)
                 if verbose and http_urls:
                     print(f"http poll done urls={len(http_urls)} emitted={emitted}")
-                next_http_poll = now + (http_poll_interval_ms / 1000.0)
+                poll_done = time.monotonic()
+                while next_http_poll <= poll_done:
+                    next_http_poll += poll_interval_s
+                now = poll_done
 
-            if now - last_flush >= 10.0:
+            # Always check flushing right after a poll cycle and before sleeping.
+            if now - last_flush >= flush_interval_s:
                 with lock:
                     batch = list(pending_events)
                     pending_events.clear()
                 flush_batch(batch)
                 last_flush = now
-            time.sleep(0.2)
+
+            now = time.monotonic()
+            next_flush_deadline = last_flush + flush_interval_s
+            sleep_until = min(next_http_poll, next_flush_deadline) if http_urls else next_flush_deadline
+            sleep_s = max(0.0, sleep_until - now)
+            if sleep_s > 0:
+                time.sleep(sleep_s)
     except KeyboardInterrupt:
         pass
     finally:
