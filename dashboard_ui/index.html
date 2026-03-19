@@ -17,6 +17,16 @@
         </select>
       </label>
       <button id="saveDashboard" class="btn">Save</button>
+      <div class="add-menu-wrap">
+        <button id="addWindowButton" class="btn" title="Add window">✚</button>
+        <div id="addWindowMenu" class="add-menu" hidden>
+          <button class="add-menu-item" data-action="add-window" data-kind="chart">Chart</button>
+          <button class="add-menu-item" data-action="add-window" data-kind="stat">Stat</button>
+          <button class="add-menu-item" data-action="add-window" data-kind="bar">Bar</button>
+          <button class="add-menu-item" data-action="add-window" data-kind="heatmap">Heatmap</button>
+          <button class="add-menu-item" data-action="add-window" data-kind="console">Console</button>
+        </div>
+      </div>
       <button id="manageVirtualSeries" class="icon-gadget" title="Settings">⚙️</button>
       <div class="range-controls">
         <button id="pageBack" class="btn" title="Shift window left by half range">&lt;</button>
@@ -63,12 +73,6 @@
       </div>
       <label class="date-field"><input id="startTime" type="datetime-local" step="5" /></label>
       <label class="date-field">to <input id="endTime" type="datetime-local" step="5" /></label>
-      <span class="date-field">Add</span>
-      <button id="addChart" class="btn accent">Chart</button>
-      <button id="addStat" class="btn">Stat</button>
-      <button id="addBar" class="btn">Bar</button>
-      <button id="addHeatmap" class="btn">Heatmap</button>
-      <button id="addConsole" class="btn">Console</button>
       <select id="globalGranularity" title="Granularity">
         <option value="auto" selected>Auto</option>
         <option value="raw">raw</option>

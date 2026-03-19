@@ -113,6 +113,47 @@ input[type="datetime-local"], input[type="search"], input[type="text"], input[ty
   min-width: 0;
 }
 
+.add-menu-wrap {
+  position: relative;
+}
+
+.add-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 128px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  z-index: 120;
+}
+
+.add-menu[hidden] {
+  display: none !important;
+}
+
+.add-menu-item {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  border-radius: 4px;
+  text-align: left;
+  padding: 4px 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.add-menu-item:hover,
+.add-menu-item:focus {
+  background: #1a3c61;
+  border-color: #2e6ea9;
+  color: #dfefff;
+}
+
 .topbar input[type="datetime-local"] {
   width: 13.5rem;
 }

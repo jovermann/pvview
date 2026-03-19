@@ -23,6 +23,8 @@
   const endInput = document.getElementById('endTime');
   const rangePresetSelect = document.getElementById('rangePreset');
   const autoRefreshSelect = document.getElementById('autoRefresh');
+  const addWindowButton = document.getElementById('addWindowButton');
+  const addWindowMenu = document.getElementById('addWindowMenu');
   const globalGranularitySelect = document.getElementById('globalGranularity');
   const lttbMinAvgMaxInput = document.getElementById('lttbMinAvgMax');
   const dashboardSelect = document.getElementById('dashboardSelect');
@@ -424,6 +426,15 @@
 
   function isApiTraceEnabled() {
     return !!apiTraceEnabled;
+  }
+
+  function setAddWindowMenuOpen(open) {
+    if (!(addWindowMenu instanceof HTMLElement)) return;
+    addWindowMenu.hidden = !open;
+  }
+
+  function isAddWindowMenuOpen() {
+    return (addWindowMenu instanceof HTMLElement) && !addWindowMenu.hidden;
   }
 
   function chartIds() {
@@ -3420,6 +3431,34 @@
   document.addEventListener('click', (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
+    if (isAddWindowMenuOpen()) {
+      const withinMenu = !!target.closest('#addWindowMenu');
+      const onButton = !!target.closest('#addWindowButton');
+      if (!withinMenu && !onButton) {
+        setAddWindowMenuOpen(false);
+      }
+      if (withinMenu && target.dataset.action !== 'add-window') {
+        setAddWindowMenuOpen(false);
+        return;
+      }
+    }
+
+    if (target.id === 'addWindowButton') {
+      setAddWindowMenuOpen(!isAddWindowMenuOpen());
+      return;
+    }
+
+    if (target.dataset.action === 'add-window') {
+      setAddWindowMenuOpen(false);
+      const kind = String(target.dataset.kind || '').toLowerCase();
+      if (kind === 'chart') addChart();
+      else if (kind === 'stat') addStat();
+      else if (kind === 'bar') addBar();
+      else if (kind === 'heatmap') addHeatmap();
+      else if (kind === 'console') createConsolePanel();
+      return;
+    }
+
     const colorActionEl = target.closest('[data-action="chart-series-color-set"]');
     if (colorActionEl instanceof HTMLElement) {
       const seriesName = String(colorActionEl.dataset.series || '');
@@ -3474,31 +3513,6 @@
     if (target.id === 'refreshAll') {
       alignRangeEndToNow();
       refreshAllCharts('manual-refresh').catch((err) => console.error(err));
-      return;
-    }
-
-    if (target.id === 'addChart') {
-      addChart();
-      return;
-    }
-
-    if (target.id === 'addStat') {
-      addStat();
-      return;
-    }
-
-    if (target.id === 'addBar') {
-      addBar();
-      return;
-    }
-
-    if (target.id === 'addHeatmap') {
-      addHeatmap();
-      return;
-    }
-
-    if (target.id === 'addConsole') {
-      createConsolePanel();
       return;
     }
 
