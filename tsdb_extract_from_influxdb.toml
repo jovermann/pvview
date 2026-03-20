@@ -1,0 +1,174 @@
+# InfluxDB -> TSDB extraction config
+# Empty mapping target ("") means this Influx field is discarded.
+
+[influxdb]
+url = "http://192.168.1.14:8086"
+database = "housedata"
+username = ""
+password = ""
+
+# All series names from data/dsda_2026-03-19.1h.tsdb
+# main/bat/e_consumed
+# main/bat/power
+# main/bat/soc
+# main/bat/temperature
+# main/bat/yieldtotal
+# main/dc1/power
+# main/dc1/u
+# main/dc1/yieldtotal
+# main/dc2/power
+# main/dc2/u
+# main/dc2/yieldtotal
+# main/inv/freq
+# main/inv/p1
+# main/inv/p2
+# main/inv/p3
+# main/inv/power
+# main/inv/temperature
+# main/inv/temperature1
+# main/inv/temperature3
+# main/inv/temperature4
+# main/inv/yieldtotal
+# main/meter/e_consumed
+# main/meter/p1
+# main/meter/p2
+# main/meter/p3
+# main/meter/power
+# main/meter/yieldtotal
+# solar/114172608275/0/power
+# solar/114172608275/0/temperature
+# solar/114172608275/0/voltage
+# solar/114172608275/0/yieldday
+# solar/114172608275/0/yieldtotal
+# solar/114172608275/1/name
+# solar/114172608275/1/power
+# solar/114172608275/1/voltage
+# solar/114172608275/1/yieldday
+# solar/114172608275/1/yieldtotal
+# solar/114172608275/2/name
+# solar/114172608275/2/power
+# solar/114172608275/2/voltage
+# solar/114172608275/2/yieldday
+# solar/114172608275/2/yieldtotal
+# solar/114172608275/name
+# solar/114184509128/0/power
+# solar/114184509128/0/temperature
+# solar/114184509128/0/voltage
+# solar/114184509128/0/yieldday
+# solar/114184509128/0/yieldtotal
+# solar/114184509128/1/name
+# solar/114184509128/1/power
+# solar/114184509128/1/voltage
+# solar/114184509128/1/yieldday
+# solar/114184509128/1/yieldtotal
+# solar/114184509128/2/name
+# solar/114184509128/2/power
+# solar/114184509128/2/voltage
+# solar/114184509128/2/yieldday
+# solar/114184509128/2/yieldtotal
+# solar/114184509128/name
+# solar/114190160689/0/power
+# solar/114190160689/0/temperature
+# solar/114190160689/0/voltage
+# solar/114190160689/0/yieldday
+# solar/114190160689/0/yieldtotal
+# solar/114190160689/1/name
+# solar/114190160689/1/power
+# solar/114190160689/1/voltage
+# solar/114190160689/1/yieldday
+# solar/114190160689/1/yieldtotal
+# solar/114190160689/2/name
+# solar/114190160689/2/power
+# solar/114190160689/2/voltage
+# solar/114190160689/2/yieldday
+# solar/114190160689/2/yieldtotal
+# solar/114190160689/name
+# solar/116183929528/0/power
+# solar/116183929528/0/temperature
+# solar/116183929528/0/voltage
+# solar/116183929528/0/yieldday
+# solar/116183929528/0/yieldtotal
+# solar/116183929528/1/name
+# solar/116183929528/1/power
+# solar/116183929528/1/voltage
+# solar/116183929528/1/yieldday
+# solar/116183929528/1/yieldtotal
+# solar/116183929528/2/name
+# solar/116183929528/2/power
+# solar/116183929528/2/voltage
+# solar/116183929528/2/yieldday
+# solar/116183929528/2/yieldtotal
+# solar/116183929528/3/name
+# solar/116183929528/3/power
+# solar/116183929528/3/voltage
+# solar/116183929528/3/yieldday
+# solar/116183929528/3/yieldtotal
+# solar/116183929528/4/name
+# solar/116183929528/4/power
+# solar/116183929528/4/voltage
+# solar/116183929528/4/yieldday
+# solar/116183929528/4/yieldtotal
+# solar/116183929528/name
+# solar/ac/power
+# solar/ac/yieldday
+# solar/ac/yieldtotal
+
+[mapping]
+# pvdata
+"pvdata/bat_i" = ""
+"pvdata/bat_p" = ""
+"pvdata/bat_soc" = ""
+"pvdata/bat_temp" = ""
+"pvdata/bat_u" = ""
+"pvdata/hm_limitabs" = ""
+"pvdata/hm_power" = ""
+"pvdata/hm_temp" = ""
+"pvdata/hm_voltage" = ""
+"pvdata/house_p" = ""
+"pvdata/house_p1" = ""
+"pvdata/house_p2" = ""
+"pvdata/house_p3" = ""
+"pvdata/inv_p" = ""
+"pvdata/inv_p1" = ""
+"pvdata/inv_p2" = ""
+"pvdata/inv_p3" = ""
+"pvdata/meter_freq" = ""
+"pvdata/meter_p" = ""
+"pvdata/meter_p1" = ""
+"pvdata/meter_p1m" = ""
+"pvdata/meter_p2" = ""
+"pvdata/meter_p2m" = ""
+"pvdata/meter_p3" = ""
+"pvdata/meter_p3m" = ""
+"pvdata/pf_bat" = ""
+"pvdata/pf_grid" = ""
+"pvdata/pf_load" = ""
+"pvdata/pf_pv" = ""
+"pvdata/pf_rel_aut" = ""
+"pvdata/pf_rel_self" = ""
+"pvdata/pv_i1" = ""
+"pvdata/pv_i2" = ""
+"pvdata/pv_p" = ""
+"pvdata/pv_p1" = ""
+"pvdata/pv_p2" = ""
+"pvdata/pv_u1" = ""
+"pvdata/pv_u2" = ""
+
+# pvdatacum
+"pvdatacum/energy_ac_consumed" = ""
+"pvdatacum/energy_ac_consumed1" = ""
+"pvdatacum/energy_ac_consumed2" = ""
+"pvdatacum/energy_ac_consumed3" = ""
+"pvdatacum/energy_ac_produced" = ""
+"pvdatacum/energy_ac_produced1" = ""
+"pvdatacum/energy_ac_produced2" = ""
+"pvdatacum/energy_ac_produced3" = ""
+"pvdatacum/energy_bat_charged" = ""
+"pvdatacum/energy_bat_discharged" = ""
+"pvdatacum/energy_hm_day" = ""
+"pvdatacum/energy_hm_total" = ""
+"pvdatacum/energy_meter_consumed" = ""
+"pvdatacum/energy_meter_produced" = ""
+"pvdatacum/energy_pv" = ""
+"pvdatacum/energy_pv1" = ""
+"pvdatacum/energy_pv2" = ""
