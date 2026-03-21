@@ -91,6 +91,19 @@ def _parse_config(path: str) -> tuple[dict[str, Any], dict[tuple[str, str], list
     return config, parsed_mapping
 
 
+def _validate_no_target_conflicts(mapping: dict[tuple[str, str], list[str]]) -> list[tuple[str, list[str]]]:
+    target_to_sources: dict[str, set[str]] = {}
+    for (measurement, field), targets in mapping.items():
+        source_key = f"{measurement}/{field}"
+        for target in targets:
+            target_to_sources.setdefault(target, set()).add(source_key)
+    conflicts: list[tuple[str, list[str]]] = []
+    for target, sources in sorted(target_to_sources.items()):
+        if len(sources) > 1:
+            conflicts.append((target, sorted(sources)))
+    return conflicts
+
+
 def _escape_influx_ident(name: str) -> str:
     return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -562,6 +575,14 @@ def main() -> int:
         return 2
 
     active_mapping = {(measurement, field): list(targets) for (measurement, field), targets in mapping.items() if targets}
+    conflicts = _validate_no_target_conflicts(active_mapping)
+    if conflicts:
+        print("Invalid config: conflicting mappings (multiple sources map to same target):")
+        for target, sources in conflicts:
+            print(f"  {target} <= {', '.join(sources)}")
+        print("Please resolve conflicts before extraction.")
+        return 2
+
     mapped_sources = len(active_mapping)
     mapped_targets = sum(len(targets) for targets in active_mapping.values())
     print(
