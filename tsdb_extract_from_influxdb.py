@@ -451,6 +451,40 @@ def _extract_events(
     return events_by_day, source_stats_by_day
 
 
+def _resolve_requested_days(
+    influx_cfg: dict[str, Any],
+    mapping: dict[tuple[str, str], list[str]],
+    day_filter: datetime.date | None,
+    num_days: int,
+    timeout_s: float,
+) -> list[datetime.date]:
+    """Resolve the ordered list of days that should be processed."""
+    if day_filter is not None:
+        return [day_filter + datetime.timedelta(days=offset) for offset in range(max(1, int(num_days)))]
+
+    source_measurements = sorted({measurement for (measurement, _field), targets in mapping.items() if targets})
+    min_day: datetime.date | None = None
+    max_day: datetime.date | None = None
+    for measurement in source_measurements:
+        bounds = _measurement_time_bounds_ms(influx_cfg, measurement, timeout_s)
+        if bounds is None:
+            continue
+        day_lo = _utc_day_from_ms(bounds[0])
+        day_hi = _utc_day_from_ms(bounds[1])
+        if min_day is None or day_lo < min_day:
+            min_day = day_lo
+        if max_day is None or day_hi > max_day:
+            max_day = day_hi
+    if min_day is None or max_day is None:
+        return []
+    out: list[datetime.date] = []
+    day = min_day
+    while day <= max_day:
+        out.append(day)
+        day = day + datetime.timedelta(days=1)
+    return out
+
+
 def _source_missing_reason(stats: dict[str, int]) -> str:
     if int(stats.get("numeric", 0)) > 0:
         return ""
@@ -593,12 +627,11 @@ def main() -> int:
     )
 
     try:
-        events_by_day, source_stats_by_day = _extract_events(
+        requested_days = _resolve_requested_days(
             influx_cfg=influx_cfg if isinstance(influx_cfg, dict) else {},
             mapping=mapping,
             day_filter=day_filter,
             num_days=int(args.num_days),
-            verbose=int(args.verbose or 0),
             timeout_s=float(args.timeout),
         )
     except urllib.error.URLError as exc:
@@ -608,19 +641,12 @@ def main() -> int:
         print(f"Extraction failed: {exc}")
         return 2
 
-    if not events_by_day:
-        print("No mapped numeric events found.")
-        for day in sorted(source_stats_by_day.keys()):
-            _print_unrepresented_mappings(
-                day=day,
-                active_mapping=active_mapping,
-                day_source_stats=source_stats_by_day.get(day, {}),
-                represented_series=set(),
-            )
+    if not requested_days:
+        print("No days to process.")
         return 0
 
     planned_outputs: list[str] = []
-    for day in sorted(events_by_day.keys()):
+    for day in requested_days:
         for _bucket_ms, label, _elem_size in _DOWNSAMPLE_LEVELS:
             planned_outputs.append(os.path.join(data_dir, _dsda_filename_for_utc_day(day, label)))
 
@@ -628,13 +654,32 @@ def main() -> int:
         print("Dry run: no files will be written.")
         total_events = 0
         per_series_total: dict[str, int] = {}
-        for day in sorted(events_by_day.keys()):
-            day_events = events_by_day[day]
+        any_events = False
+        for day in requested_days:
+            try:
+                day_events_map, day_stats_map = _extract_events(
+                    influx_cfg=influx_cfg if isinstance(influx_cfg, dict) else {},
+                    mapping=mapping,
+                    day_filter=day,
+                    num_days=1,
+                    verbose=int(args.verbose or 0),
+                    timeout_s=float(args.timeout),
+                )
+            except urllib.error.URLError as exc:
+                print(f"InfluxDB request failed: {exc}")
+                return 2
+            except Exception as exc:
+                print(f"Extraction failed: {exc}")
+                return 2
+            day_events = day_events_map.get(day, [])
+            day_stats = day_stats_map.get(day, {})
             total_events += len(day_events)
             per_series_day: dict[str, int] = {}
             for _ts, series, _value in day_events:
                 per_series_day[series] = per_series_day.get(series, 0) + 1
                 per_series_total[series] = per_series_total.get(series, 0) + 1
+            if day_events:
+                any_events = True
             print(f"day {day.isoformat()}: events={len(day_events)} series={len(per_series_day)}")
             for series in sorted(per_series_day.keys()):
                 print(f"  {series}: {per_series_day[series]}")
@@ -643,9 +688,11 @@ def main() -> int:
             _print_unrepresented_mappings(
                 day=day,
                 active_mapping=active_mapping,
-                day_source_stats=source_stats_by_day.get(day, {}),
+                day_source_stats=day_stats,
                 represented_series=set(per_series_day.keys()),
             )
+        if not any_events:
+            print("No mapped numeric events found.")
         print(f"total events: {total_events}")
         print(f"total series: {len(per_series_total)}")
         return 0
@@ -662,8 +709,34 @@ def main() -> int:
             print(path)
         return 2
 
-    for day in sorted(events_by_day.keys()):
-        day_events = events_by_day[day]
+    any_events = False
+    for day in requested_days:
+        try:
+            day_events_map, day_stats_map = _extract_events(
+                influx_cfg=influx_cfg if isinstance(influx_cfg, dict) else {},
+                mapping=mapping,
+                day_filter=day,
+                num_days=1,
+                verbose=int(args.verbose or 0),
+                timeout_s=float(args.timeout),
+            )
+        except urllib.error.URLError as exc:
+            print(f"InfluxDB request failed: {exc}")
+            return 2
+        except Exception as exc:
+            print(f"Extraction failed: {exc}")
+            return 2
+        day_events = day_events_map.get(day, [])
+        day_stats = day_stats_map.get(day, {})
+        if not day_events:
+            _print_unrepresented_mappings(
+                day=day,
+                active_mapping=active_mapping,
+                day_source_stats=day_stats,
+                represented_series=set(),
+            )
+            continue
+        any_events = True
         series_names, _raw_points_by_series, series_decimals = _extract_series_points(day_events)
         levels_points = _build_downsampled_levels_for_day(day, day_events)
         for bucket_ms, label, elem_size in _DOWNSAMPLE_LEVELS:
@@ -684,9 +757,12 @@ def main() -> int:
         _print_unrepresented_mappings(
             day=day,
             active_mapping=active_mapping,
-            day_source_stats=source_stats_by_day.get(day, {}),
+            day_source_stats=day_stats,
             represented_series=set(series_names),
         )
+
+    if not any_events:
+        print("No mapped numeric events found.")
 
     return 0
 
