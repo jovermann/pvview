@@ -356,6 +356,11 @@ main { padding: 2px; }
   font-size: 12px;
 }
 
+select[id^="solarnoon-method-"] {
+  min-width: 260px;
+  max-width: 300px;
+}
+
 .stat-wrap {
   flex: 1;
   overflow: auto;

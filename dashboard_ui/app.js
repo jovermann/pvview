@@ -315,6 +315,28 @@
     return Math.max(0, Math.min(120, Math.floor(n)));
   }
 
+  function normalizeSolarNoonMethod(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    if (mode === 'half') return 'half';
+    if (mode === 'symmetry') return 'symmetry';
+    return 'weighted';
+  }
+
+  function normalizeSolarNoonYears(value) {
+    const n = Number(value);
+    if (n === 2 || n === 3 || n === 4 || n === 5 || n === 10) return n;
+    return 1;
+  }
+
+  function normalizeSolarNoonSmoothing(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    if (
+      mode === 'ma3' || mode === 'ma7' || mode === 'ma14' || mode === 'ma28'
+      || mode === 'ema3' || mode === 'ema7' || mode === 'ema14' || mode === 'ema28'
+    ) return mode;
+    return 'plain';
+  }
+
   function barIntervalMs(value) {
     const key = normalizeBarInterval(value);
     if (key === 'hour') return 3600000;
@@ -337,6 +359,146 @@
     const d = new Date(Number(ts));
     const pad2 = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  function dayKeyUtc(tsMs) {
+    const d = new Date(Number(tsMs));
+    const pad2 = (n) => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  }
+
+  function dayNoonUtcMs(dayKey) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dayKey || ''));
+    if (!m) return NaN;
+    return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0);
+  }
+
+  function computeSolarNoonShiftByDay(points, method, bucketMs = 300000) {
+    const mode = normalizeSolarNoonMethod(method);
+    const dayEntries = new Map();
+    for (const p of (points || [])) {
+      if (!p || typeof p !== 'object') continue;
+      const start = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
+      if (!Number.isFinite(start)) continue;
+      let end = Number(p.end);
+      if (!Number.isFinite(end) || end <= start) end = start + Number(bucketMs || 300000);
+      const raw = Object.prototype.hasOwnProperty.call(p, 'avg') ? p.avg : p.value;
+      const value = Number(raw);
+      if (!Number.isFinite(value)) continue;
+      const durationHours = Math.max(0, (end - start) / 3600000);
+      const key = dayKeyUtc(start);
+      const arr = dayEntries.get(key) || [];
+      arr.push({
+        start,
+        end,
+        mid: start + (end - start) / 2,
+        value,
+        energy: Math.max(0, value) * durationHours,
+      });
+      dayEntries.set(key, arr);
+    }
+
+    const out = new Map();
+    for (const [dayKey, arr] of dayEntries.entries()) {
+      if (!Array.isArray(arr) || arr.length === 0) continue;
+      arr.sort((a, b) => a.start - b.start);
+      const noonMs = dayNoonUtcMs(dayKey);
+      if (!Number.isFinite(noonMs)) continue;
+      let midpointMs = NaN;
+      if (mode === 'weighted') {
+        let sumEnergy = 0;
+        let sumWeightedTime = 0;
+        for (const e of arr) {
+          if (!(e.energy > 0)) continue;
+          sumEnergy += e.energy;
+          sumWeightedTime += e.mid * e.energy;
+        }
+        if (sumEnergy > 0) midpointMs = sumWeightedTime / sumEnergy;
+      } else if (mode === 'half') {
+        let totalEnergy = 0;
+        for (const e of arr) {
+          if (e.energy > 0) totalEnergy += e.energy;
+        }
+        if (totalEnergy > 0) {
+          const target = totalEnergy / 2;
+          let cum = 0;
+          for (const e of arr) {
+            if (!(e.energy > 0)) continue;
+            if (cum + e.energy >= target) {
+              const ratio = (target - cum) / e.energy;
+              midpointMs = e.start + ratio * (e.end - e.start);
+              break;
+            }
+            cum += e.energy;
+          }
+        }
+      } else {
+        let peak = 0;
+        for (const e of arr) {
+          if (e.value > peak) peak = e.value;
+        }
+        if (peak > 0) {
+          const threshold = peak * 0.1;
+          let first = NaN;
+          let last = NaN;
+          for (const e of arr) {
+            if (e.value >= threshold) {
+              if (!Number.isFinite(first)) first = e.start;
+              last = e.end;
+            }
+          }
+          if (Number.isFinite(first) && Number.isFinite(last)) {
+            midpointMs = first + (last - first) / 2;
+          }
+        }
+      }
+      if (!Number.isFinite(midpointMs)) continue;
+      out.set(dayKey, roundNumeric((midpointMs - noonMs) / 60000));
+    }
+    return out;
+  }
+
+  function smoothSeriesValues(values, mode) {
+    const smoothing = normalizeSolarNoonSmoothing(mode);
+    const out = new Array(values.length).fill(null);
+    if (smoothing === 'plain') {
+      for (let i = 0; i < values.length; i += 1) out[i] = values[i];
+      return out;
+    }
+    if (smoothing === 'ema3' || smoothing === 'ema7' || smoothing === 'ema14' || smoothing === 'ema28') {
+      const alpha = (
+        smoothing === 'ema3' ? 0.5
+          : (smoothing === 'ema7' ? 0.25 : (smoothing === 'ema14' ? 0.15 : 0.08))
+      );
+      let last = null;
+      for (let i = 0; i < values.length; i += 1) {
+        const v = values[i];
+        if (typeof v !== 'number' || !Number.isFinite(v)) {
+          out[i] = null;
+          continue;
+        }
+        last = (last === null) ? v : (alpha * v + (1 - alpha) * last);
+        out[i] = roundNumeric(last);
+      }
+      return out;
+    }
+    const halfWindow = (
+      smoothing === 'ma28' ? 14
+        : (smoothing === 'ma14' ? 7 : (smoothing === 'ma7' ? 3 : 1))
+    );
+    for (let i = 0; i < values.length; i += 1) {
+      let sum = 0;
+      let count = 0;
+      for (let j = i - halfWindow; j <= i + halfWindow; j += 1) {
+        if (j < 0 || j >= values.length) continue;
+        const v = values[j];
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+        sum += v;
+        count += 1;
+      }
+      out[i] = count > 0 ? roundNumeric(sum / count) : null;
+    }
+    return out;
   }
 
   function summarizeGranularityMode(items, countKey, startMs, endMs, ignorePredicate = null) {
@@ -486,6 +648,16 @@
     const ids = [];
     for (const [id, cfg] of charts.entries()) {
       if (cfg && cfg.kind === 'bar') {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  function solarNoonIds() {
+    const ids = [];
+    for (const [id, cfg] of charts.entries()) {
+      if (cfg && cfg.kind === 'solarnoon') {
         ids.push(id);
       }
     }
@@ -643,25 +815,27 @@
     const durationPanelIds = durationIds();
     const barPanelIds = barIds();
     const heatmapPanelIds = heatmapIds();
+    const solarNoonPanelIds = solarNoonIds();
     const statPanelIds = statIds();
     const t0 = performance.now();
     refreshGetCallCount = 0;
-    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length}`);
+    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} solarnoon=${solarNoonPanelIds.length} stats=${statPanelIds.length}`);
     const chartResults = await Promise.allSettled(ids.map((id) => refreshChart(id)));
     const durationResults = await Promise.allSettled(durationPanelIds.map((id) => refreshDuration(id)));
     const barResults = await Promise.allSettled(barPanelIds.map((id) => refreshBar(id)));
     const heatmapResults = await Promise.allSettled(heatmapPanelIds.map((id) => refreshHeatmap(id)));
+    const solarNoonResults = await Promise.allSettled(solarNoonPanelIds.map((id) => refreshSolarNoon(id)));
     const statResults = await Promise.allSettled(statPanelIds.map((id) => refreshStat(id)));
-    const results = [...chartResults, ...durationResults, ...barResults, ...heatmapResults, ...statResults];
+    const results = [...chartResults, ...durationResults, ...barResults, ...heatmapResults, ...solarNoonResults, ...statResults];
     const failed = results.filter((r) => r.status === 'rejected').length;
-    const allIds = [...ids, ...durationPanelIds, ...barPanelIds, ...heatmapPanelIds, ...statPanelIds];
+    const allIds = [...ids, ...durationPanelIds, ...barPanelIds, ...heatmapPanelIds, ...solarNoonPanelIds, ...statPanelIds];
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         appendConsoleLine(`panel ${allIds[i]} refresh error ${r.reason}`);
       }
     });
     const elapsed = Math.round(performance.now() - t0);
-    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} solarnoon=${solarNoonPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -1658,6 +1832,50 @@
     return wrapper;
   }
 
+  function createSolarNoonPanel(id) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'panel';
+    wrapper.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">Solar Noon Shift ${id}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
+          <select class="heatmap-series-select" id="solarnoon-method-${id}" data-action="solarnoon-method" data-id="${id}" title="Method">
+            <option value="weighted">Energy-Weighted midpoint</option>
+            <option value="half">Half-Energy time</option>
+            <option value="symmetry">Symmetry midpoint (10% threshold)</option>
+          </select>
+          <select class="heatmap-series-select" id="solarnoon-smoothing-${id}" data-action="solarnoon-smoothing" data-id="${id}" title="Smoothing">
+            <option value="plain">Plain</option>
+            <option value="ma3">Moving Avg (3d)</option>
+            <option value="ma7">Moving Avg (7d)</option>
+            <option value="ma14">Moving Avg (14d)</option>
+            <option value="ma28">Moving Avg (28d)</option>
+            <option value="ema3">EMA (3d)</option>
+            <option value="ema7">EMA (7d)</option>
+            <option value="ema14">EMA (14d)</option>
+            <option value="ema28">EMA (28d)</option>
+          </select>
+          <select class="heatmap-series-select" id="solarnoon-years-${id}" data-action="solarnoon-years" data-id="${id}" title="X axis width">
+            <option value="1">1y</option>
+            <option value="2">2y</option>
+            <option value="3">3y</option>
+            <option value="4">4y</option>
+            <option value="5">5y</option>
+            <option value="10">10y</option>
+          </select>
+          <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
+          <button class="settings-gadget" data-action="settings" data-id="${id}" title="Settings">⚙️</button>
+        </div>
+      </div>
+      <div class="chart" id="solarnoon-${id}"></div>
+    `;
+    return wrapper;
+  }
+
   function updateTitle(id) {
     const c = charts.get(id);
     const titleEl = document.getElementById(`title-${id}`);
@@ -1675,6 +1893,11 @@
     }
     if (c.kind === 'bar') {
       titleEl.textContent = c.label || `Bar ${id}`;
+      if (metaEl) metaEl.textContent = c.titleMeta || '';
+      return;
+    }
+    if (c.kind === 'solarnoon') {
+      titleEl.textContent = c.label || `Solar Noon Shift ${id}`;
       if (metaEl) metaEl.textContent = c.titleMeta || '';
       return;
     }
@@ -2291,6 +2514,158 @@
 
       setPanelTitleMeta(id, showRefreshDurationDebug ? `${reqMs} ms` : '');
       appendConsoleLine(`bar ${id} refresh done name="${panelName}" series=${seriesDefs.length} slots=${slotCount}`);
+    } finally {
+      setPanelBusy(id, false);
+    }
+  }
+
+  async function refreshSolarNoon(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'solarnoon' || !cfg.instance) return;
+    setPanelBusy(id, true);
+    try {
+      const selectedSeries = Array.isArray(cfg.series)
+        ? cfg.series.map((s) => String(s || '').trim()).filter((s) => s.length > 0)
+        : [];
+      cfg.series = selectedSeries;
+      const panelName = cfg.label || `Solar Noon Shift ${id}`;
+      appendConsoleLine(`solarnoon ${id} refresh start name="${panelName}" series=${selectedSeries.length}`);
+      await ensureInverterNames(selectedSeries);
+      if (selectedSeries.length === 0) {
+        setPanelTitleMeta(id, '');
+        cfg.instance.clear();
+        cfg.instance.setOption({
+          backgroundColor: 'transparent',
+          title: { text: 'No series selected', left: 'center', top: 'middle', textStyle: { color: '#8ca0b8' } },
+        });
+        appendConsoleLine(`solarnoon ${id} refresh done (no series)`);
+        return;
+      }
+      const method = normalizeSolarNoonMethod(cfg.noonMethod);
+      const smoothing = normalizeSolarNoonSmoothing(cfg.noonSmoothing);
+      const years = normalizeSolarNoonYears(cfg.noonYears);
+      const { end } = getRange();
+      const endDate = new Date(Number(end));
+      const endDayUtcMs = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate(), 0, 0, 0, 0);
+      const startDate = new Date(endDayUtcMs);
+      startDate.setUTCFullYear(startDate.getUTCFullYear() - years);
+      const visibleStart = startDate.getTime();
+      const visibleEnd = endDayUtcMs + 86_400_000;
+      const days = Math.max(1, Math.floor((visibleEnd - visibleStart) / 86_400_000));
+      const q = new URLSearchParams({
+        start: String(visibleStart),
+        end: String(visibleEnd),
+        minPoints: '1',
+        granularity: '5m',
+      });
+      for (const name of selectedSeries) q.append('series', name);
+      const reqT0 = performance.now();
+      appendConsoleLine(`solarnoon ${id} request start batch series=${selectedSeries.length} years=${years} method=${method} smoothing=${smoothing}`);
+      const batchResp = await apiJson(`/events?${q}`);
+      const reqMs = Math.round(performance.now() - reqT0);
+      const eventItems = Array.isArray(batchResp && batchResp.events)
+        ? batchResp.events
+        : ((batchResp && typeof batchResp.series === 'string') ? [batchResp] : []);
+      const eventsBySeries = new Map(eventItems
+        .filter((item) => item && typeof item === 'object' && typeof item.series === 'string')
+        .map((item) => [item.series, item]));
+      appendConsoleLine(`solarnoon ${id} request done batch series=${selectedSeries.length} returned=${eventItems.length} elapsed=${reqMs}ms`);
+
+      const dayKeys = [];
+      for (let i = 0; i < days; i += 1) {
+        dayKeys.push(dayKeyUtc(visibleStart + i * 86_400_000));
+      }
+      const xLabels = dayKeys.map((key) => key.slice(2));
+      const displaySeries = selectedSeries.map((s) => displaySeriesName(s));
+      const prefix = displayPrefixForSeries(displaySeries);
+      const seriesDefs = [];
+      for (const seriesName of selectedSeries) {
+        const data = eventsBySeries.get(seriesName) || { points: [] };
+        const points = Array.isArray(data.points) ? data.points : [];
+        const shiftByDay = computeSolarNoonShiftByDay(points, method, 300000);
+        const valuesPlain = dayKeys.map((k) => (shiftByDay.has(k) ? shiftByDay.get(k) : null));
+        const values = smoothSeriesValues(valuesPlain, smoothing);
+        seriesDefs.push({
+          rawName: seriesName,
+          displayName: compactSeriesLabel(displaySeriesName(seriesName), prefix),
+          values,
+        });
+      }
+
+      const displayNameToSeries = new Map();
+      for (const s of seriesDefs) {
+        const bucket = displayNameToSeries.get(s.displayName) || [];
+        bucket.push(s.rawName);
+        displayNameToSeries.set(s.displayName, bucket);
+      }
+      cfg.displayNameToSeries = displayNameToSeries;
+      const legendSelected = {};
+      for (const [legendName, rawSeriesList] of displayNameToSeries.entries()) {
+        let enabled = true;
+        for (const rawName of rawSeriesList) {
+          if (cfg.legendEnabledBySeries && cfg.legendEnabledBySeries[rawName] === false) {
+            enabled = false;
+            break;
+          }
+        }
+        legendSelected[legendName] = enabled;
+      }
+
+      setPanelTitleMeta(id, showRefreshDurationDebug ? `${reqMs} ms` : '');
+      cfg.instance.setOption({
+        backgroundColor: 'transparent',
+        animation: false,
+        tooltip: {
+          trigger: 'axis',
+          valueFormatter: (value) => {
+            if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+            return `${Number(value).toFixed(2)} min`;
+          },
+        },
+        legend: {
+          type: 'scroll',
+          orient: 'vertical',
+          left: 70,
+          top: 12,
+          textStyle: { color: '#dbe8f6', fontSize: 12 },
+          selected: legendSelected,
+        },
+        grid: {
+          left: 70,
+          right: 24,
+          top: 12,
+          bottom: 28,
+          containLabel: true,
+        },
+        xAxis: {
+          type: 'category',
+          data: xLabels,
+          axisLine: { lineStyle: { color: '#4d5b70' } },
+          axisLabel: { color: '#aebbc9', interval: 'auto' },
+        },
+        yAxis: {
+          type: 'value',
+          name: 'shift / min',
+          min: Number.isFinite(cfg.yMin) ? Number(cfg.yMin) : null,
+          max: Number.isFinite(cfg.yMax) ? Number(cfg.yMax) : null,
+          nameTextStyle: { color: '#aebbc9', fontSize: 10 },
+          axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
+          axisLabel: { color: '#aebbc9' },
+          splitLine: { lineStyle: { color: '#2b3544' } },
+        },
+        series: seriesDefs.map((s) => ({
+          name: s.displayName,
+          type: 'line',
+          smooth: false,
+          connectNulls: false,
+          showSymbol: false,
+          symbol: 'circle',
+          symbolSize: 1,
+          lineStyle: { width: 1 },
+          data: s.values,
+        })),
+      }, true);
+      appendConsoleLine(`solarnoon ${id} refresh done name="${panelName}" series=${seriesDefs.length} days=${days}`);
     } finally {
       setPanelBusy(id, false);
     }
@@ -3226,11 +3601,76 @@
     return id;
   }
 
+  function addSolarNoon(initialSeries = [], options = {}) {
+    chartCounter += 1;
+    const id = String(chartCounter);
+    const widgetEl = document.createElement('div');
+    widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 6,
+      h: options.h || 3,
+    });
+    const panel = createSolarNoonPanel(id);
+    node.querySelector('.grid-stack-item-content').appendChild(panel);
+    const hostEl = document.getElementById(`solarnoon-${id}`);
+    const instance = echarts.init(hostEl, null, { renderer: 'canvas' });
+    const noonMethod = normalizeSolarNoonMethod(options.noonMethod || 'weighted');
+    const noonSmoothing = normalizeSolarNoonSmoothing(options.noonSmoothing || 'ma7');
+    const noonYears = normalizeSolarNoonYears(options.noonYears || 1);
+    charts.set(id, {
+      id,
+      kind: 'solarnoon',
+      node,
+      hostEl,
+      instance,
+      series: [...initialSeries],
+      noonMethod,
+      noonSmoothing,
+      noonYears,
+      noonCache: null,
+      legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
+      displayNameToSeries: new Map(),
+      label: options.label || null,
+      busyCount: 0,
+      titleMeta: '',
+    });
+    instance.on('legendselectchanged', (ev) => {
+      const c = charts.get(id);
+      if (!c || c.kind !== 'solarnoon') return;
+      const displayName = ev && typeof ev.name === 'string' ? ev.name : '';
+      if (!displayName) return;
+      const list = c.displayNameToSeries instanceof Map ? c.displayNameToSeries.get(displayName) : null;
+      if (!Array.isArray(list) || list.length === 0) return;
+      const selected = !!(ev && ev.selected && ev.selected[displayName]);
+      if (!c.legendEnabledBySeries || typeof c.legendEnabledBySeries !== 'object') {
+        c.legendEnabledBySeries = {};
+      }
+      for (const rawName of list) {
+        c.legendEnabledBySeries[rawName] = selected;
+      }
+      refreshSolarNoon(id).catch((err) => console.error(err));
+    });
+    const methodSelect = document.getElementById(`solarnoon-method-${id}`);
+    if (methodSelect instanceof HTMLSelectElement) methodSelect.value = noonMethod;
+    const smoothingSelect = document.getElementById(`solarnoon-smoothing-${id}`);
+    if (smoothingSelect instanceof HTMLSelectElement) smoothingSelect.value = noonSmoothing;
+    const yearsSelect = document.getElementById(`solarnoon-years-${id}`);
+    if (yearsSelect instanceof HTMLSelectElement) yearsSelect.value = String(noonYears);
+    appendConsoleLine(`solarnoon ${id} created series=${initialSeries.length} method=${noonMethod} smoothing=${noonSmoothing} years=${noonYears}`);
+    updateTitle(id);
+    if (!options.deferRefresh) {
+      refreshSolarNoon(id).catch((err) => console.error(err));
+    }
+    return id;
+  }
+
   function removePanel(id) {
     const c = charts.get(id);
     if (!c) return;
     appendConsoleLine(`panel ${id} removed type=${c.kind || 'unknown'}`);
-    if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
+    if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar' || c.kind === 'solarnoon') && c.instance) {
       c.instance.dispose();
     }
     if (consolePanelId === id) {
@@ -3243,7 +3683,7 @@
 
   function removeChart(id) {
     const c = charts.get(id);
-    if (!c || (c.kind !== 'chart' && c.kind !== 'duration')) return;
+    if (!c || (c.kind !== 'chart' && c.kind !== 'duration' && c.kind !== 'solarnoon')) return;
     removePanel(id);
   }
 
@@ -3365,6 +3805,22 @@
         });
         continue;
       }
+      if (c.kind === 'solarnoon') {
+        chartList.push({
+          type: 'solarnoon',
+          x: Number(nodeInfo.x || 0),
+          y: Number(nodeInfo.y || 0),
+          w: Number(nodeInfo.w || 6),
+          h: Number(nodeInfo.h || 3),
+          series: Array.isArray(c.series) ? [...c.series] : [],
+          noonMethod: normalizeSolarNoonMethod(c.noonMethod || 'weighted'),
+          noonSmoothing: normalizeSolarNoonSmoothing(c.noonSmoothing || 'ma7'),
+          noonYears: normalizeSolarNoonYears(c.noonYears || 1),
+          legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
+          label: c.label || null,
+        });
+        continue;
+      }
       if (c.kind === 'duration') {
         chartList.push({
           type: 'duration',
@@ -3476,6 +3932,24 @@
             : {},
           seriesColorByName: (ch.seriesColorByName && typeof ch.seriesColorByName === 'object')
             ? { ...ch.seriesColorByName }
+            : {},
+          label: typeof ch.label === 'string' ? ch.label : null,
+          deferRefresh: true,
+        });
+        continue;
+      }
+      if (ch.type === 'solarnoon') {
+        const series = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+        addSolarNoon(series, {
+          x: Number(ch.x),
+          y: Number(ch.y),
+          w: Number(ch.w) || 6,
+          h: Number(ch.h) || 3,
+          noonMethod: normalizeSolarNoonMethod(ch.noonMethod || 'weighted'),
+          noonSmoothing: normalizeSolarNoonSmoothing(ch.noonSmoothing || 'ma7'),
+          noonYears: normalizeSolarNoonYears(ch.noonYears || 1),
+          legendEnabledBySeries: (ch.legendEnabledBySeries && typeof ch.legendEnabledBySeries === 'object')
+            ? { ...ch.legendEnabledBySeries }
             : {},
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
@@ -3642,6 +4116,8 @@
           refreshStat(id).catch((err) => console.error(err));
         } else if (c.kind === 'bar') {
           refreshBar(id).catch((err) => console.error(err));
+        } else if (c.kind === 'solarnoon') {
+          refreshSolarNoon(id).catch((err) => console.error(err));
         } else if (c.kind === 'heatmap') {
           refreshHeatmap(id).catch((err) => console.error(err));
         } else if (c.kind === 'duration') {
@@ -3921,6 +4397,8 @@
       refreshStat(activeChartId).catch((err) => console.error(err));
     } else if (c.kind === 'bar') {
       refreshBar(activeChartId).catch((err) => console.error(err));
+    } else if (c.kind === 'solarnoon') {
+      refreshSolarNoon(activeChartId).catch((err) => console.error(err));
     } else if (c.kind === 'heatmap') {
       refreshHeatmap(activeChartId).catch((err) => console.error(err));
     } else if (c.kind === 'duration') {
@@ -3993,6 +4471,7 @@
       else if (kind === 'stat') addStat();
       else if (kind === 'bar') addBar();
       else if (kind === 'heatmap') addHeatmap();
+      else if (kind === 'solarnoon') addSolarNoon();
       else if (kind === 'console') createConsolePanel();
       return;
     }
@@ -4185,6 +4664,33 @@
       refreshBar(id).catch((err) => console.error(err));
       return;
     }
+    if (target.dataset.action === 'solarnoon-method') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'solarnoon') return;
+      panel.noonMethod = normalizeSolarNoonMethod(target.value || 'weighted');
+      refreshSolarNoon(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'solarnoon-years') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'solarnoon') return;
+      panel.noonYears = normalizeSolarNoonYears(target.value || 1);
+      refreshSolarNoon(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'solarnoon-smoothing') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'solarnoon') return;
+      panel.noonSmoothing = normalizeSolarNoonSmoothing(target.value || 'plain');
+      refreshSolarNoon(id).catch((err) => console.error(err));
+      return;
+    }
     if (target.dataset.action === 'api-trace') {
       if (!(target instanceof HTMLInputElement)) return;
       const id = target.dataset.id;
@@ -4232,6 +4738,8 @@
     updateTitle(activeSettingsChartId);
     if (c.kind === 'duration') {
       refreshDuration(activeSettingsChartId).catch((err) => console.error(err));
+    } else if (c.kind === 'solarnoon') {
+      refreshSolarNoon(activeSettingsChartId).catch((err) => console.error(err));
     } else {
       refreshChart(activeSettingsChartId).catch((err) => console.error(err));
     }
@@ -4806,7 +5314,7 @@
 
   grid.on('resizestop', () => {
     charts.forEach((c) => {
-      if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar' || c.kind === 'solarnoon') && c.instance) {
         c.instance.resize();
       }
     });
@@ -4816,7 +5324,7 @@
 
   window.addEventListener('resize', () => {
     charts.forEach((c) => {
-      if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar') && c.instance) {
+      if ((c.kind === 'chart' || c.kind === 'duration' || c.kind === 'heatmap' || c.kind === 'bar' || c.kind === 'solarnoon') && c.instance) {
         c.instance.resize();
       }
     });
