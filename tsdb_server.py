@@ -1099,8 +1099,6 @@ def _combine_numeric_points(
             continue
         right_stats.append(stats)
         right_ts.append(int(stats["timestamp"]))
-    if not right_stats:
-        return result
     window = max(0, int(align_window_ms))
     for point in left_points:
         left = _point_numeric_stats(point)
@@ -1121,8 +1119,17 @@ def _combine_numeric_points(
                 best_idx = cand
                 best_dist = dist
         if best_idx is None:
-            continue
-        right = right_stats[best_idx]
+            right = {
+                "timestamp": lt,
+                "start": int(left["start"]),
+                "end": int(left["end"]),
+                "count": int(left["count"]),
+                "min": 0.0,
+                "avg": 0.0,
+                "max": 0.0,
+            }
+        else:
+            right = right_stats[best_idx]
         avg_out = _apply_numeric_op(op, float(left["avg"]), float(right["avg"]))
         if avg_out is None or avg_out != avg_out or abs(avg_out) == float("inf"):
             continue
@@ -1130,12 +1137,13 @@ def _combine_numeric_points(
         if min_out is None or max_out is None:
             min_out = avg_out
             max_out = avg_out
+        out_count = int(left["count"]) if best_idx is None else min(int(left["count"]), int(right["count"]))
         result.append(
             {
                 "timestamp": lt,
                 "start": int(left["start"]),
                 "end": int(left["end"]),
-                "count": min(int(left["count"]), int(right["count"])),
+                "count": out_count,
                 "min": round(min_out, decimal_places),
                 "avg": round(avg_out, decimal_places),
                 "max": round(max_out, decimal_places),
@@ -1304,9 +1312,10 @@ def _real_series_points_for_virtual(
     """
     files = find_candidate_files(data_dir, start_ms, end_ms)
     max_decimal_places: Optional[int] = None
+    source_sig_parts: List[Tuple[Any, ...]] = []
+
     if granularity_ms <= 0:
         events: List[Event] = []
-        source_sig_parts: List[Tuple[Any, ...]] = []
         for path in files:
             cache = get_cached_tsdb_file(path)
             source_sig_parts.append((os.path.basename(path), cache.parsed_offset, cache.mtime_ns, cache.size))
@@ -1317,47 +1326,101 @@ def _real_series_points_for_virtual(
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
         events.sort(key=lambda e: e.timestamp_ms)
         points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
-        return points, max_decimal_places if max_decimal_places is not None else 3, [os.path.basename(p) for p in files], _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points)
-
-    has_daily_files = bool(files) and all(os.path.basename(path).startswith("data_") for path in files)
-    if not has_daily_files:
-        events = []
-        source_sig_parts = []
-        for path in files:
-            cache = get_cached_tsdb_file(path)
-            source_sig_parts.append((os.path.basename(path), cache.parsed_offset, cache.mtime_ns, cache.size))
-            events.extend(read_tsdb_events_for_series(path, series_name, start_ms, end_ms))
-            fmt = cache.series_format_ids.get(series_name)
+        if points:
+            return (
+                points,
+                max_decimal_places if max_decimal_places is not None else 3,
+                [os.path.basename(p) for p in files],
+                _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points),
+            )
+        # Raw fallback: use 1s dsda when raw day files are missing.
+        fallback_granularity_ms = 1_000
+        ds_points: List[Dict[str, Any]] = []
+        files_used: List[str] = []
+        for day in day_range_utc(start_ms, end_ms):
+            ds_path = _downsampled_file_for_day(data_dir, day, fallback_granularity_ms)
+            if not os.path.isfile(ds_path):
+                continue
+            _downsampled, day_points = _downsampled_points_from_ds_file(
+                ds_path,
+                day,
+                fallback_granularity_ms,
+                series_name,
+                start_ms,
+                end_ms,
+            )
+            ds_points.extend(day_points)
+            name = os.path.basename(ds_path)
+            if name not in files_used:
+                files_used.append(name)
+            fmt = get_series_format_id_in_file(ds_path, series_name)
             if is_numeric_format_id(fmt):
                 d = decimal_places_from_format_id(fmt)
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
-        events.sort(key=lambda e: e.timestamp_ms)
-        points = _downsample_fixed_numeric_events(events, granularity_ms, start_ms, end_ms, decimal_places=max_decimal_places if max_decimal_places is not None else 3)
+            cache = get_cached_tsdb_file(ds_path)
+            source_sig_parts.append((name, cache.parsed_offset, cache.mtime_ns, cache.size))
+        ds_points.sort(key=lambda p: int(p.get("timestamp", 0)))
         return (
-            points,
+            ds_points,
             max_decimal_places if max_decimal_places is not None else 3,
-            [os.path.basename(p) for p in files],
-            _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points),
+            files_used,
+            _points_signature("real", series_name, fallback_granularity_ms, tuple(source_sig_parts), ds_points),
         )
 
     points: List[Dict[str, Any]] = []
     files_used: List[str] = []
-    source_sig_parts = []
     for day in day_range_utc(start_ms, end_ms):
-        day_files, day_points = _get_or_build_downsampled_day_points(data_dir, day, granularity_ms, series_name, start_ms, end_ms)
-        for name in day_files:
+        ds_path = _downsampled_file_for_day(data_dir, day, granularity_ms)
+        if os.path.isfile(ds_path):
+            _downsampled, day_points = _downsampled_points_from_ds_file(
+                ds_path,
+                day,
+                granularity_ms,
+                series_name,
+                start_ms,
+                end_ms,
+            )
+            points.extend(day_points)
+            name = os.path.basename(ds_path)
             if name not in files_used:
                 files_used.append(name)
-        if day_files:
-            source_sig_parts.append((day.isoformat(), tuple(day_files), len(day_points), int(day_points[-1]["timestamp"]) if day_points else None))
-        points.extend(day_points)
-    for path in files:
-        fmt = get_series_format_id_in_file(path, series_name)
-        if is_numeric_format_id(fmt):
-            d = decimal_places_from_format_id(fmt)
-            max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+            fmt = get_series_format_id_in_file(ds_path, series_name)
+            if is_numeric_format_id(fmt):
+                d = decimal_places_from_format_id(fmt)
+                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+            cache = get_cached_tsdb_file(ds_path)
+            source_sig_parts.append((name, cache.parsed_offset, cache.mtime_ns, cache.size, len(day_points)))
+            continue
+
+        # Fallback to original file only if present.
+        original_path = _original_file_for_day(data_dir, day)
+        if os.path.isfile(original_path):
+            day_files, day_points = _get_or_build_downsampled_day_points(
+                data_dir,
+                day,
+                granularity_ms,
+                series_name,
+                start_ms,
+                end_ms,
+            )
+            points.extend(day_points)
+            for name in day_files:
+                if name not in files_used:
+                    files_used.append(name)
+            if day_files:
+                source_sig_parts.append((day.isoformat(), tuple(day_files), len(day_points), int(day_points[-1]["timestamp"]) if day_points else None))
+            fmt = get_series_format_id_in_file(original_path, series_name)
+            if is_numeric_format_id(fmt):
+                d = decimal_places_from_format_id(fmt)
+                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+
     points.sort(key=lambda p: int(p.get("timestamp", 0)))
-    return points, max_decimal_places if max_decimal_places is not None else 3, files_used, _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points)
+    return (
+        points,
+        max_decimal_places if max_decimal_places is not None else 3,
+        files_used,
+        _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points),
+    )
 
 
 def build_error(status: int, code: str, message: str) -> Tuple[int, Dict[str, Any]]:
@@ -1843,8 +1906,6 @@ def _compute_virtual_events(left_events: List[Event], right_events: List[Event],
         rv = ev.value
         if isinstance(rv, (int, float)) and not isinstance(rv, bool):
             right_numeric.append((ev.timestamp_ms, float(rv)))
-    if not right_numeric:
-        return result
     right_ts = [t for t, _v in right_numeric]
     for lev in left_events:
         lv = lev.value
@@ -1864,10 +1925,8 @@ def _compute_virtual_events(left_events: List[Event], right_events: List[Event],
             if best_dist is None or dist < best_dist or (dist == best_dist and rt < right_numeric[best_idx][0]):  # prefer earlier on tie
                 best_idx = cand
                 best_dist = dist
-        if best_idx is None:
-            continue
         a = float(lv)
-        b = right_numeric[best_idx][1]
+        b = 0.0 if best_idx is None else right_numeric[best_idx][1]
         out: Optional[float]
         if op == "+":
             out = a + b
