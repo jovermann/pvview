@@ -835,11 +835,20 @@
   }
 
   function series_is_cumulative(unit) {
-    return series_has_max(unit);
+    return !series_has_max(unit);
   }
 
   function isYieldSuffix(suffix) {
     return String(suffix || '').toLowerCase().startsWith('yield');
+  }
+
+  function normalizeUnitText(unit) {
+    return String(unit || '').trim().toLowerCase();
+  }
+
+  function isPowerUnit(unit) {
+    const text = normalizeUnitText(unit);
+    return text === 'w' || text === 'kw';
   }
 
   function normalizeDotStyle(value) {
@@ -1997,55 +2006,120 @@
       for (const seriesName of cfg.series) {
         const data = eventsBySeries.get(seriesName) || { points: [], decimalPlaces: undefined };
         const displayRule = effectiveDisplayRuleForSeries(seriesName, unitForSeriesName(seriesName), data.decimalPlaces);
-        const isCumulative = !series_is_cumulative(displayRule.unit);
-        const slotMins = new Array(slotCount + 1).fill(null);
-        const slotMaxs = new Array(slotCount + 1).fill(null);
+        const isCumulative = series_is_cumulative(displayRule.unit);
+        const barUnit = (!isCumulative && isPowerUnit(displayRule.unit)) ? 'kWh' : (displayRule.unit || '');
+        const pointStartValue = new Array(slotCount + 1).fill(null);
+        const pointEndValue = new Array(slotCount + 1).fill(null);
+        const pointFirstTs = new Array(slotCount + 1).fill(null);
+        const pointLastTs = new Array(slotCount + 1).fill(null);
+        const slotEnergyKwh = new Array(slotCount).fill(0);
         const points = Array.isArray(data.points) ? data.points : [];
-        for (const p of points) {
+        for (let pointIdx = 0; pointIdx < points.length; pointIdx += 1) {
+          const p = points[pointIdx];
           if (!p || typeof p !== 'object') continue;
           const ts = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
           if (!Number.isFinite(ts) || ts < fetchStart || ts >= fetchEnd) continue;
           const slotIdx = Math.floor((ts - visibleStart) / intervalMs);
           if (slotIdx < 0 || slotIdx > slotCount) continue;
-          let rawValue;
-          if (Object.prototype.hasOwnProperty.call(p, 'min')) rawValue = p.min;
-          else if (Object.prototype.hasOwnProperty.call(p, 'value')) rawValue = p.value;
-          else rawValue = p.avg;
-          const scaled = applyDisplayScale(rawValue, displayRule);
-          if (typeof scaled !== 'number' || !Number.isFinite(scaled)) continue;
-          if (slotMins[slotIdx] === null || scaled < slotMins[slotIdx]) {
-            slotMins[slotIdx] = scaled;
+          const rawStart = Object.prototype.hasOwnProperty.call(p, 'min')
+            ? p.min
+            : (Object.prototype.hasOwnProperty.call(p, 'value') ? p.value : p.avg);
+          const rawEnd = Object.prototype.hasOwnProperty.call(p, 'max')
+            ? p.max
+            : (Object.prototype.hasOwnProperty.call(p, 'value') ? p.value : p.avg);
+          const scaledStart = applyDisplayScale(rawStart, displayRule);
+          const scaledEnd = applyDisplayScale(rawEnd, displayRule);
+          if (typeof scaledStart === 'number' && Number.isFinite(scaledStart)) {
+            if (pointFirstTs[slotIdx] === null || ts < pointFirstTs[slotIdx]) {
+              pointFirstTs[slotIdx] = ts;
+              pointStartValue[slotIdx] = scaledStart;
+            }
           }
-          if (slotMaxs[slotIdx] === null || scaled > slotMaxs[slotIdx]) {
-            slotMaxs[slotIdx] = scaled;
+          if (typeof scaledEnd === 'number' && Number.isFinite(scaledEnd)) {
+            if (pointLastTs[slotIdx] === null || ts >= pointLastTs[slotIdx]) {
+              pointLastTs[slotIdx] = ts;
+              pointEndValue[slotIdx] = scaledEnd;
+            }
+          }
+          if (!isCumulative && isPowerUnit(displayRule.unit)) {
+            const rawPower = Object.prototype.hasOwnProperty.call(p, 'avg')
+              ? p.avg
+              : (Object.prototype.hasOwnProperty.call(p, 'value') ? p.value : rawStart);
+            const scaledPower = applyDisplayScale(rawPower, displayRule);
+            if (typeof scaledPower !== 'number' || !Number.isFinite(scaledPower)) continue;
+            let segStart = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
+            let segEnd = Number(p.end);
+            if (!Number.isFinite(segStart)) continue;
+            if (!Number.isFinite(segEnd) || segEnd <= segStart) {
+              const next = points[pointIdx + 1];
+              const nextTs = next && typeof next === 'object'
+                ? Number(Object.prototype.hasOwnProperty.call(next, 'start') ? next.start : next.timestamp)
+                : NaN;
+              if (Number.isFinite(nextTs) && nextTs > segStart) segEnd = nextTs;
+              else segEnd = segStart + granularityMsByName(granularity);
+            }
+            const clippedStart = Math.max(segStart, visibleStart);
+            const clippedEnd = Math.min(segEnd, visibleEnd);
+            if (!(clippedEnd > clippedStart)) continue;
+            const startIdx = Math.max(0, Math.floor((clippedStart - visibleStart) / intervalMs));
+            const endIdx = Math.min(slotCount - 1, Math.floor((clippedEnd - 1 - visibleStart) / intervalMs));
+            for (let i = startIdx; i <= endIdx; i += 1) {
+              const slotStartMs = visibleStart + i * intervalMs;
+              const slotEndMs = slotStartMs + intervalMs;
+              const overlapMs = Math.min(clippedEnd, slotEndMs) - Math.max(clippedStart, slotStartMs);
+              if (overlapMs <= 0) continue;
+              const hours = overlapMs / 3_600_000;
+              const energyKwh = normalizeUnitText(displayRule.unit) === 'kw'
+                ? (scaledPower * hours)
+                : ((scaledPower * hours) / 1000.0);
+              slotEnergyKwh[i] += energyKwh;
+            }
           }
         }
         const barValues = [];
-        for (let i = 0; i < slotCount; i += 1) {
-          const cur = slotMins[i];
-          const next = slotMins[i + 1];
-          const prevMax = i > 0 ? slotMaxs[i - 1] : null;
-          const curMax = slotMaxs[i];
-          const left = (typeof cur === 'number' && Number.isFinite(cur)) ? cur
-            : ((typeof prevMax === 'number' && Number.isFinite(prevMax)) ? prevMax : null);
-          const right = (typeof next === 'number' && Number.isFinite(next)) ? next
-            : ((typeof curMax === 'number' && Number.isFinite(curMax)) ? curMax : null);
-          const isZeroToNonZero = isCumulative && left === 0 && right !== 0;
-          if (
-            typeof left !== 'number' || !Number.isFinite(left)
-            || typeof right !== 'number' || !Number.isFinite(right)
-            || isZeroToNonZero
-          ) {
-            barValues.push(0);
-          } else {
-            barValues.push(roundNumeric(right - left));
+        if (isCumulative) {
+          const slotStarts = new Array(slotCount + 1).fill(0);
+          for (let i = 0; i <= slotCount; i += 1) {
+            const curStart = pointStartValue[i];
+            const prevLast = i > 0 ? pointEndValue[i - 1] : null;
+            if (typeof curStart === 'number' && Number.isFinite(curStart)) {
+              slotStarts[i] = curStart;
+            } else if (typeof prevLast === 'number' && Number.isFinite(prevLast)) {
+              slotStarts[i] = prevLast;
+            } else if (i > 0) {
+              slotStarts[i] = slotStarts[i - 1];
+            } else {
+              slotStarts[i] = 0;
+            }
           }
+          for (let i = 0; i < slotCount; i += 1) {
+            const startVal = slotStarts[i];
+            const nextStart = slotStarts[i + 1];
+            const lastVal = pointEndValue[i];
+            let endVal = nextStart;
+            if (i === slotCount - 1) {
+              endVal = (typeof lastVal === 'number' && Number.isFinite(lastVal)) ? lastVal : startVal;
+            }
+            if (
+              typeof startVal !== 'number' || !Number.isFinite(startVal)
+              || typeof endVal !== 'number' || !Number.isFinite(endVal)
+              || startVal === 0
+            ) {
+              barValues.push(0);
+            } else {
+              barValues.push(roundNumeric(endVal - startVal));
+            }
+          }
+        } else if (isPowerUnit(displayRule.unit)) {
+          for (let i = 0; i < slotCount; i += 1) barValues.push(roundNumeric(slotEnergyKwh[i]));
+        } else {
+          for (let i = 0; i < slotCount; i += 1) barValues.push(0);
         }
         seriesDefs.push({
           rawName: seriesName,
           displayName: compactSeriesLabel(displaySeriesName(seriesName), prefix),
           values: barValues,
-          displayRule,
+          displayRule: { ...displayRule, unit: barUnit },
         });
       }
       const displayNameToSeries = new Map();
