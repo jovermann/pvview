@@ -2644,6 +2644,13 @@
         }
         legendSelected[legendName] = enabled;
       }
+      const axisSlot = 36;
+      const axisCount = 1;
+      const gridLeft = 8 + Math.floor((axisCount + 1) / 2) * axisSlot;
+      const gridRight = 8 + Math.floor(axisCount / 2) * axisSlot;
+      const gridTop = 12;
+      const dots = dotVisual(cfg.dotStyle);
+      const areaOpacity = normalizeAreaOpacity(cfg.areaOpacity);
 
       setPanelTitleMeta(id, showRefreshDurationDebug ? `${reqMs} ms` : '');
       cfg.instance.setOption({
@@ -2659,17 +2666,16 @@
         legend: {
           type: 'scroll',
           orient: 'vertical',
-          left: 70,
-          top: 12,
-          textStyle: { color: '#dbe8f6', fontSize: 12 },
+          left: gridLeft,
+          top: gridTop,
+          textStyle: { color: '#c6d2e0', fontSize: 12 },
           selected: legendSelected,
         },
         grid: {
-          left: 70,
-          right: 24,
-          top: 12,
-          bottom: 28,
-          containLabel: true,
+          left: gridLeft,
+          right: gridRight,
+          top: gridTop,
+          bottom: 30,
         },
         xAxis: {
           type: 'category',
@@ -2683,6 +2689,8 @@
           min: Number.isFinite(cfg.yMin) ? Number(cfg.yMin) : null,
           max: Number.isFinite(cfg.yMax) ? Number(cfg.yMax) : null,
           nameTextStyle: { color: '#aebbc9', fontSize: 10 },
+          nameLocation: 'middle',
+          nameGap: 32,
           axisLine: { show: true, lineStyle: { color: '#4d5b70' } },
           axisLabel: { color: '#aebbc9' },
           splitLine: { lineStyle: { color: '#2b3544' } },
@@ -2692,10 +2700,51 @@
           type: 'line',
           smooth: false,
           connectNulls: false,
-          showSymbol: false,
-          symbol: 'circle',
-          symbolSize: 1,
-          lineStyle: { width: 1 },
+          showSymbol: dots.showSymbol,
+          symbol: dots.symbol,
+          symbolSize: dots.symbolSize,
+          itemStyle: {
+            color: (() => {
+              const idx = cfg.series.indexOf(s.rawName);
+              const overrideColor = (cfg.seriesColorByName && typeof cfg.seriesColorByName[s.rawName] === 'string')
+                ? String(cfg.seriesColorByName[s.rawName]).trim()
+                : '';
+              if (overrideColor === AUTO_DARK_COLOR) {
+                return seriesPaletteDark[(idx >= 0 ? idx : 0) % seriesPaletteDark.length];
+              }
+              return overrideColor || seriesPalette[(idx >= 0 ? idx : 0) % seriesPalette.length];
+            })(),
+          },
+          lineStyle: {
+            width: 1,
+            color: (() => {
+              const idx = cfg.series.indexOf(s.rawName);
+              const overrideColor = (cfg.seriesColorByName && typeof cfg.seriesColorByName[s.rawName] === 'string')
+                ? String(cfg.seriesColorByName[s.rawName]).trim()
+                : '';
+              if (overrideColor === AUTO_DARK_COLOR) {
+                return seriesPaletteDark[(idx >= 0 ? idx : 0) % seriesPaletteDark.length];
+              }
+              return overrideColor || seriesPalette[(idx >= 0 ? idx : 0) % seriesPalette.length];
+            })(),
+          },
+          areaStyle: (() => {
+            if (areaOpacity <= 0) return undefined;
+            const idx = cfg.series.indexOf(s.rawName);
+            const overrideColor = (cfg.seriesColorByName && typeof cfg.seriesColorByName[s.rawName] === 'string')
+              ? String(cfg.seriesColorByName[s.rawName]).trim()
+              : '';
+            const lineColor = (overrideColor === AUTO_DARK_COLOR)
+              ? seriesPaletteDark[(idx >= 0 ? idx : 0) % seriesPaletteDark.length]
+              : (overrideColor || seriesPalette[(idx >= 0 ? idx : 0) % seriesPalette.length]);
+            return {
+              origin: 'auto',
+              color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: rgbaFromHex(lineColor, areaOpacity) },
+                { offset: 1, color: rgbaFromHex(lineColor, 0) },
+              ]),
+            };
+          })(),
           data: s.values,
         })),
       }, true);
