@@ -2,6 +2,7 @@
 """Extract mapped time series from InfluxDB (read-only) into TSDB files."""
 
 import argparse
+import concurrent.futures
 import datetime
 import json
 import math
@@ -246,22 +247,41 @@ def _extract_series_points(
 def _build_downsampled_levels_for_day(
     day: datetime.date,
     day_events: list[tuple[int, str, NumericWithDecimals]],
+    workers: int,
 ) -> dict[str, dict[str, list[tuple[int, Any]]]]:
     series_names, raw_points_by_series, series_decimals = _extract_series_points(day_events)
     levels_points: dict[str, dict[str, list[tuple[int, Any]]]] = {}
     if not series_names:
         return levels_points
     current_points_by_series = raw_points_by_series
+    worker_count = max(1, int(workers))
     for bucket_ms, label, elem_size in _DOWNSAMPLE_LEVELS:
         next_points_by_series: dict[str, list[tuple[int, Any]]] = {}
-        for series_name in series_names:
-            next_points_by_series[series_name] = downsample_series_points(
-                current_points_by_series.get(series_name, []),
-                day,
-                bucket_ms,
-                elem_size,
-                series_decimals.get(series_name, 0),
-            )
+        if worker_count <= 1 or len(series_names) <= 1:
+            for series_name in series_names:
+                next_points_by_series[series_name] = downsample_series_points(
+                    current_points_by_series.get(series_name, []),
+                    day,
+                    bucket_ms,
+                    elem_size,
+                    series_decimals.get(series_name, 0),
+                )
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_by_series = {
+                    executor.submit(
+                        downsample_series_points,
+                        current_points_by_series.get(series_name, []),
+                        day,
+                        bucket_ms,
+                        elem_size,
+                        series_decimals.get(series_name, 0),
+                    ): series_name
+                    for series_name in series_names
+                }
+                for future in concurrent.futures.as_completed(future_by_series):
+                    series_name = future_by_series[future]
+                    next_points_by_series[series_name] = future.result()
         levels_points[label] = next_points_by_series
         current_points_by_series = next_points_by_series
     return levels_points
@@ -623,6 +643,13 @@ def parse_args() -> argparse.Namespace:
         help="Number of sequential UTC days to extract, starting at --day (default: 1)",
     )
     parser.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        default=0,
+        help="Number of worker threads for downsampling only (default: auto CPU count)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Do not write files; print what would be written",
@@ -653,6 +680,14 @@ def main() -> int:
     if int(args.num_days) <= 0:
         print(f"Invalid --num-days value {args.num_days!r}; expected > 0")
         return 2
+    workers = int(args.workers)
+    if workers <= 0:
+        workers = int(os.cpu_count() or 4)
+    if workers <= 0:
+        workers = 4
+    if workers <= 0:
+        print(f"Invalid --workers value {args.workers!r}; expected > 0")
+        return 2
 
     active_mapping = {(measurement, field): list(targets) for (measurement, field), targets in mapping.items() if targets}
     conflicts = _validate_no_target_conflicts(active_mapping)
@@ -669,7 +704,7 @@ def main() -> int:
         f"Loaded config: url={influx_cfg.get('url')} database={influx_cfg.get('database')} "
         f"mapped_sources={mapped_sources} mapped_targets={mapped_targets} "
         f"day={day_filter.isoformat() if day_filter else 'all'} "
-        f"num_days={int(args.num_days)}"
+        f"num_days={int(args.num_days)} workers={workers}"
     )
 
     try:
@@ -794,7 +829,7 @@ def main() -> int:
             continue
         any_events = True
         series_names, _raw_points_by_series, series_decimals = _extract_series_points(day_events)
-        levels_points = _build_downsampled_levels_for_day(day, day_events)
+        levels_points = _build_downsampled_levels_for_day(day, day_events, workers)
         for bucket_ms, label, elem_size in _DOWNSAMPLE_LEVELS:
             out_path = os.path.join(data_dir, _dsda_filename_for_utc_day(day, label))
             if os.path.exists(out_path) and args.force:
