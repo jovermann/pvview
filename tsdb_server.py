@@ -131,6 +131,7 @@ _REQUEST_TRACE = threading.local()
 
 _SERIES_STATS_CACHE_LOCK = threading.Lock()
 _SERIES_STATS_CACHE: Dict[Tuple[str, str], SeriesStatSummaryCacheEntry] = {}
+_DATA_DIR_FALLBACK: Dict[str, str] = {}
 
 _VIRTUAL_LEFT_SCALING_FACTORS = (
     1000,
@@ -230,6 +231,27 @@ def day_range_utc(start_ms: int, end_ms: int) -> Iterable[datetime.date]:
         day += datetime.timedelta(days=1)
 
 
+def _candidate_data_dirs(data_dir: str) -> List[str]:
+    """Return ordered data directories for file lookup (primary, then fallback)."""
+    primary = os.path.abspath(data_dir)
+    dirs = [primary]
+    fallback = _DATA_DIR_FALLBACK.get(primary)
+    if fallback:
+        fb = os.path.abspath(fallback)
+        if fb not in dirs:
+            dirs.append(fb)
+    return dirs
+
+
+def _first_existing_path(data_dir: str, relative_name: str) -> Optional[str]:
+    """Resolve a relative file name in primary/fallback data dirs by priority."""
+    for base in _candidate_data_dirs(data_dir):
+        candidate = os.path.join(base, relative_name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def find_candidate_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]:
     """Find candidate files that match the given constraints.
 
@@ -243,12 +265,12 @@ def find_candidate_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]
     """
     files: List[str] = []
     for day in day_range_utc(start_ms, end_ms):
-        p = os.path.join(data_dir, f"data_{day.isoformat()}.tsdb")
-        if os.path.isfile(p):
+        p = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+        if p is not None:
             files.append(p)
 
-    fallback = os.path.join(data_dir, "data.tsdb")
-    if not files and os.path.isfile(fallback):
+    fallback = _first_existing_path(data_dir, "data.tsdb")
+    if not files and fallback is not None:
         files.append(fallback)
 
     return files
@@ -264,7 +286,7 @@ def _original_file_for_day(data_dir: str, day: datetime.date) -> str:
     Returns:
         str: Result produced by this function.
     """
-    return os.path.join(data_dir, f"data_{day.isoformat()}.tsdb")
+    return os.path.join(os.path.abspath(data_dir), f"data_{day.isoformat()}.tsdb")
 
 
 def _downsampled_file_for_day(data_dir: str, day: datetime.date, granularity_ms: int) -> str:
@@ -281,7 +303,7 @@ def _downsampled_file_for_day(data_dir: str, day: datetime.date, granularity_ms:
     label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
     if label is None:
         raise ValueError(f"Unsupported bucket size: {granularity_ms}")
-    return os.path.join(data_dir, f"dsda_{day.isoformat()}.{label}.tsdb")
+    return os.path.join(os.path.abspath(data_dir), f"dsda_{day.isoformat()}.{label}.tsdb")
 
 
 def _day_start_ms(day: datetime.date) -> int:
@@ -833,8 +855,8 @@ def _get_or_build_downsampled_day_points(
     Returns:
         Tuple[List[str], List[Dict[str, Any]]]: Result produced by this function.
     """
-    original_path = _original_file_for_day(data_dir, day)
-    if not os.path.isfile(original_path):
+    original_path = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+    if original_path is None:
         return [], []
 
     today = datetime.datetime.now(datetime.timezone.utc).date()
@@ -847,9 +869,12 @@ def _get_or_build_downsampled_day_points(
         _downsampled, points = _downsampled_points_from_day_cache(entry, series_name, start_ms, end_ms)
         return entry.files, points
 
-    ds_path = _downsampled_file_for_day(data_dir, day, granularity_ms)
+    ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
+    if ds_label is None:
+        return [os.path.basename(original_path)], []
+    ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb")
     original_stat = os.stat(original_path)
-    if os.path.isfile(ds_path):
+    if ds_path is not None and os.path.isfile(ds_path):
         ds_stat = os.stat(ds_path)
         if ds_stat.st_mtime_ns >= original_stat.st_mtime_ns:
             _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, granularity_ms, series_name, start_ms, end_ms)
@@ -1349,8 +1374,8 @@ def _real_series_points_for_virtual(
         ds_points: List[Dict[str, Any]] = []
         files_used: List[str] = []
         for day in day_range_utc(start_ms, end_ms):
-            ds_path = _downsampled_file_for_day(data_dir, day, fallback_granularity_ms)
-            if not os.path.isfile(ds_path):
+            ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1s.tsdb")
+            if ds_path is None:
                 continue
             _downsampled, day_points = _downsampled_points_from_ds_file(
                 ds_path,
@@ -1381,8 +1406,9 @@ def _real_series_points_for_virtual(
     points: List[Dict[str, Any]] = []
     files_used: List[str] = []
     for day in day_range_utc(start_ms, end_ms):
-        ds_path = _downsampled_file_for_day(data_dir, day, granularity_ms)
-        if os.path.isfile(ds_path):
+        ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
+        ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb") if ds_label else None
+        if ds_path is not None and os.path.isfile(ds_path):
             _downsampled, day_points = _downsampled_points_from_ds_file(
                 ds_path,
                 day,
@@ -1404,8 +1430,8 @@ def _real_series_points_for_virtual(
             continue
 
         # Fallback to original file only if present.
-        original_path = _original_file_for_day(data_dir, day)
-        if os.path.isfile(original_path):
+        original_path = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+        if original_path is not None and os.path.isfile(original_path):
             day_files, day_points = _get_or_build_downsampled_day_points(
                 data_dir,
                 day,
@@ -1785,16 +1811,19 @@ def _all_tsdb_files(data_dir: str) -> List[str]:
     Returns:
         List[str]: Result produced by this function.
     """
-    try:
-        names = os.listdir(data_dir)
-    except OSError:
-        return []
     files: List[str] = []
-    for name in names:
-        if name == "data.tsdb" or (name.startswith("data_") and name.endswith(".tsdb")):
-            path = os.path.join(data_dir, name)
-            if os.path.isfile(path):
-                files.append(path)
+    seen: set[str] = set()
+    for base in _candidate_data_dirs(data_dir):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            if name == "data.tsdb" or (name.startswith("data_") and name.endswith(".tsdb")):
+                path = os.path.join(base, name)
+                if os.path.isfile(path) and path not in seen:
+                    files.append(path)
+                    seen.add(path)
     files.sort()
     return files
 
@@ -3388,11 +3417,12 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             downsampled = granularity_ms > 0 and all_numeric
             return points, list(files_used), int(decimal_places), all_numeric, downsampled
 
-        original_path = _original_file_for_day(data_dir, day)
+        original_path = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
 
         if granularity_ms > 0:
-            ds_path = _downsampled_file_for_day(data_dir, day, granularity_ms)
-            if os.path.isfile(ds_path):
+            ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
+            ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb") if ds_label else None
+            if ds_path is not None and os.path.isfile(ds_path):
                 _downsampled, ds_points = _downsampled_points_from_ds_file(
                     ds_path,
                     day,
@@ -3406,7 +3436,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 day_decimals = decimal_places_from_format_id(fmt) if is_numeric_format_id(fmt) else None
                 return list(ds_points), [os.path.basename(ds_path)], day_decimals, all_numeric, bool(all_numeric)
 
-            if os.path.isfile(original_path):
+            if original_path is not None and os.path.isfile(original_path):
                 fmt = get_series_format_id_in_file(original_path, series_name)
                 max_decimal_places: Optional[int] = decimal_places_from_format_id(fmt) if is_numeric_format_id(fmt) else None
                 day_files, day_points = _get_or_build_downsampled_day_points(
@@ -3447,8 +3477,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
         if granularity_ms == 0 and not events:
             fallback_granularity_ms = 1_000
-            fallback_path = _downsampled_file_for_day(data_dir, day, fallback_granularity_ms)
-            if os.path.isfile(fallback_path):
+            fallback_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1s.tsdb")
+            if fallback_path is not None and os.path.isfile(fallback_path):
                 _downsampled, ds_points = _downsampled_points_from_ds_file(
                     fallback_path,
                     day,
@@ -3945,7 +3975,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
 
 class TsdbHttpServer(ThreadingHTTPServer):
-    def __init__(self, server_address: Tuple[str, int], data_dir: str, ui_dir: Optional[str]):
+    def __init__(self, server_address: Tuple[str, int], data_dir: str, ui_dir: Optional[str], data_dir2: Optional[str] = None):
         """Execute init as part of TSDB server processing.
 
         Args:
@@ -3953,12 +3983,14 @@ class TsdbHttpServer(ThreadingHTTPServer):
             server_address: Parameter `server_address` of type `Tuple[str, int]` used by this function.
             data_dir: Directory containing TSDB files and server metadata files.
             ui_dir: Parameter `ui_dir` of type `Optional[str]` used by this function.
+            data_dir2: Optional fallback directory for missing day files.
 
         Returns:
             Result produced by this function.
         """
         super().__init__(server_address, TsdbRequestHandler)
         self.data_dir = data_dir
+        self.data_dir2 = data_dir2
         self.ui_dir = ui_dir
 
 
@@ -3977,6 +4009,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing TSDB files like data_YYYY-MM-DD.tsdb (default: data)",
     )
     parser.add_argument(
+        "--data-dir2",
+        default="",
+        help="Fallback directory for missing day files (lower priority than --data-dir)",
+    )
+    parser.add_argument(
         "--ui-dir",
         default=os.path.join(os.path.dirname(__file__), "dashboard_ui"),
         help="Directory containing frontend assets (default: ./dashboard_ui next to tsdb_server.py)",
@@ -3992,18 +4029,23 @@ def main() -> int:
     """
     args = parse_args()
     data_dir = os.path.abspath(args.data_dir)
+    data_dir2 = os.path.abspath(args.data_dir2) if str(args.data_dir2 or "").strip() else None
     ui_dir = os.path.abspath(args.ui_dir) if args.ui_dir else None
 
     os.makedirs(data_dir, exist_ok=True)
+    if data_dir2 and not os.path.isdir(data_dir2):
+        raise SystemExit(f"Fallback data directory not found: {data_dir2}")
+    if data_dir2:
+        _DATA_DIR_FALLBACK[data_dir] = data_dir2
     if ui_dir is not None and not os.path.isdir(ui_dir):
         raise SystemExit(f"UI directory not found: {ui_dir}")
     if not (1 <= args.port <= 65535):
         raise SystemExit("--port must be in range 1..65535")
 
-    httpd = TsdbHttpServer((args.host, args.port), data_dir, ui_dir)
+    httpd = TsdbHttpServer((args.host, args.port), data_dir, ui_dir, data_dir2)
     print(
         f"Serving TSDB REST API on http://{args.host}:{args.port} "
-        f"(data_dir={data_dir}, ui_dir={ui_dir})"
+        f"(data_dir={data_dir}, data_dir2={data_dir2}, ui_dir={ui_dir})"
     )
     try:
         httpd.serve_forever()
