@@ -3299,27 +3299,42 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             downsampled = granularity_ms > 0 and all_numeric
             return points, list(files_used), int(decimal_places), all_numeric, downsampled
 
+        original_path = _original_file_for_day(data_dir, day)
+
+        if granularity_ms > 0:
+            ds_path = _downsampled_file_for_day(data_dir, day, granularity_ms)
+            if os.path.isfile(ds_path):
+                _downsampled, ds_points = _downsampled_points_from_ds_file(
+                    ds_path,
+                    day,
+                    granularity_ms,
+                    series_name,
+                    day_start_ms,
+                    day_end_ms,
+                )
+                all_numeric = all(_point_is_numeric(p) for p in ds_points)
+                fmt = get_series_format_id_in_file(ds_path, series_name)
+                day_decimals = decimal_places_from_format_id(fmt) if is_numeric_format_id(fmt) else None
+                return list(ds_points), [os.path.basename(ds_path)], day_decimals, all_numeric, bool(all_numeric)
+
+            if os.path.isfile(original_path):
+                fmt = get_series_format_id_in_file(original_path, series_name)
+                max_decimal_places: Optional[int] = decimal_places_from_format_id(fmt) if is_numeric_format_id(fmt) else None
+                day_files, day_points = _get_or_build_downsampled_day_points(
+                    data_dir,
+                    day,
+                    granularity_ms,
+                    series_name,
+                    day_start_ms,
+                    day_end_ms,
+                )
+                all_numeric = all(_point_is_numeric(p) for p in day_points)
+                if all_numeric:
+                    return list(day_points), list(day_files), max_decimal_places, True, True
+
         files = find_candidate_files(data_dir, day_start_ms, day_end_ms)
         files_used = [os.path.basename(path) for path in files]
         max_decimal_places: Optional[int] = None
-
-        if granularity_ms > 0 and files and all(os.path.basename(path).startswith("data_") for path in files):
-            for path in files:
-                fmt = get_series_format_id_in_file(path, series_name)
-                if is_numeric_format_id(fmt):
-                    d = decimal_places_from_format_id(fmt)
-                    max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
-            day_files, day_points = _get_or_build_downsampled_day_points(
-                data_dir,
-                day,
-                granularity_ms,
-                series_name,
-                day_start_ms,
-                day_end_ms,
-            )
-            all_numeric = all(_point_is_numeric(p) for p in day_points)
-            if all_numeric:
-                return list(day_points), list(day_files), max_decimal_places, True, True
 
         events: List[Event] = []
         for path in files:
@@ -3340,6 +3355,23 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 decimal_places=max_decimal_places if max_decimal_places is not None else 3,
             )
             return points, files_used, max_decimal_places, True, True
+
+        if granularity_ms == 0 and not events:
+            fallback_granularity_ms = 1_000
+            fallback_path = _downsampled_file_for_day(data_dir, day, fallback_granularity_ms)
+            if os.path.isfile(fallback_path):
+                _downsampled, ds_points = _downsampled_points_from_ds_file(
+                    fallback_path,
+                    day,
+                    fallback_granularity_ms,
+                    series_name,
+                    day_start_ms,
+                    day_end_ms,
+                )
+                all_numeric = all(_point_is_numeric(p) for p in ds_points)
+                fmt = get_series_format_id_in_file(fallback_path, series_name)
+                day_decimals = decimal_places_from_format_id(fmt) if is_numeric_format_id(fmt) else None
+                return list(ds_points), [os.path.basename(fallback_path)], day_decimals, all_numeric, bool(all_numeric)
 
         points = [{"timestamp": e.timestamp_ms, "value": e.value} for e in events]
         return points, files_used, max_decimal_places, all_numeric, False
@@ -3385,6 +3417,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                 all_numeric = False
             if requested_granularity_ms > 0 and day_points and not day_downsampled:
                 downsampled = False
+            if requested_granularity_ms == 0 and day_points and day_downsampled:
+                downsampled = True
             for name in day_files:
                 if name not in seen_files:
                     seen_files.add(name)
@@ -3407,7 +3441,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if max_decimal_places is not None:
             response["decimalPlaces"] = max_decimal_places
         if downsampled:
-            response["granularityMs"] = requested_granularity_ms
+            response["granularityMs"] = requested_granularity_ms if requested_granularity_ms > 0 else 1_000
         if not all_numeric and requested_granularity_ms > 0:
             response["note"] = "Series is non-numeric; returned raw values without min/avg/max aggregation."
         _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
