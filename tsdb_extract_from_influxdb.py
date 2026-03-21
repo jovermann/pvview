@@ -691,10 +691,12 @@ def main() -> int:
         print("No days to process.")
         return 0
 
-    planned_outputs: list[str] = []
+    day_outputs: dict[datetime.date, list[str]] = {}
     for day in requested_days:
+        outputs: list[str] = []
         for _bucket_ms, label, _elem_size in _DOWNSAMPLE_LEVELS:
-            planned_outputs.append(os.path.join(data_dir, _dsda_filename_for_utc_day(day, label)))
+            outputs.append(os.path.join(data_dir, _dsda_filename_for_utc_day(day, label)))
+        day_outputs[day] = outputs
 
     if args.dry_run:
         print("Dry run: no files will be written.")
@@ -733,8 +735,8 @@ def main() -> int:
             print(f"day {day.isoformat()}: events={len(day_events)} series={len(per_series_day)}")
             for series in sorted(per_series_day.keys()):
                 print(f"  {series}: {per_series_day[series]}")
-            for _bucket_ms, label, _elem_size in _DOWNSAMPLE_LEVELS:
-                print(f"  output: {os.path.join(data_dir, _dsda_filename_for_utc_day(day, label))}")
+            for out_path in day_outputs.get(day, []):
+                print(f"  output: {out_path}")
             _print_unrepresented_mappings(
                 day=day,
                 active_mapping=active_mapping,
@@ -748,16 +750,20 @@ def main() -> int:
         return 0
 
     os.makedirs(data_dir, exist_ok=True)
-    existing_files: list[str] = []
-    for out_path in planned_outputs:
-        if os.path.exists(out_path):
-            existing_files.append(out_path)
-
-    if existing_files and not args.force:
-        print("Refusing to overwrite existing TSDB files (use --force to overwrite):")
-        for path in existing_files:
-            print(path)
-        return 2
+    if not args.force:
+        requested_days_filtered: list[datetime.date] = []
+        for day in requested_days:
+            existing_for_day = [path for path in day_outputs.get(day, []) if os.path.exists(path)]
+            if existing_for_day:
+                print(f"Warning: skipping day {day.isoformat()} because output files already exist:")
+                for path in existing_for_day:
+                    print(f"  {path}")
+                continue
+            requested_days_filtered.append(day)
+        requested_days = requested_days_filtered
+        if not requested_days:
+            print("No days left to process (all requested days already have output files).")
+            return 0
 
     any_events = False
     for day in requested_days:
