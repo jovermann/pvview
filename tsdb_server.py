@@ -276,6 +276,43 @@ def find_candidate_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]
     return files
 
 
+def _find_catalog_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]:
+    """Find files for fast series-catalog discovery, preferring 1h downsampled files."""
+    files: List[str] = []
+    for day in day_range_utc(start_ms, end_ms):
+        ds_1h = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1h.tsdb")
+        if ds_1h is not None:
+            files.append(ds_1h)
+            continue
+        raw_day = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+        if raw_day is not None:
+            files.append(raw_day)
+
+    if files:
+        return files
+
+    # Keep series discovery usable when selected range does not overlap data:
+    # prefer all 1h dsda files, then fall back to all raw day files.
+    ds_candidates: List[str] = []
+    raw_candidates: List[str] = []
+    for base in _candidate_data_dirs(data_dir):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(base, name)
+            if not os.path.isfile(path):
+                continue
+            if name.startswith("dsda_") and name.endswith(".1h.tsdb"):
+                ds_candidates.append(path)
+            elif name == "data.tsdb" or (name.startswith("data_") and name.endswith(".tsdb")):
+                raw_candidates.append(path)
+    ds_candidates.sort()
+    raw_candidates.sort()
+    return ds_candidates if ds_candidates else raw_candidates
+
+
 def _original_file_for_day(data_dir: str, day: datetime.date) -> str:
     """Execute original file for day as part of TSDB server processing.
 
@@ -3303,11 +3340,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
 
-        files = find_candidate_files(data_dir, start_ms, end_ms)
-        if not files:
-            # Keep series discovery usable even when the selected time range
-            # does not overlap available day files.
-            files = _all_tsdb_files(data_dir)
+        files = _find_catalog_files(data_dir, start_ms, end_ms)
         names = set()
         for path in files:
             for name in list_series_in_file(path):
