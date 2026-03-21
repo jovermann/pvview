@@ -1077,6 +1077,7 @@ def _combine_numeric_points(
     op: str,
     align_window_ms: int,
     decimal_places: int,
+    missing_right_mode: str = "zero",
 ) -> List[Dict[str, Any]]:
     """Execute combine numeric points as part of TSDB server processing.
 
@@ -1086,6 +1087,7 @@ def _combine_numeric_points(
         op: Operator token used for virtual-series arithmetic.
         align_window_ms: Maximum timestamp alignment distance for combining two series.
         decimal_places: Number of decimal places used for rounding output values.
+        missing_right_mode: Missing-right strategy (`zero` or `carry`).
 
     Returns:
         List[Dict[str, Any]]: Result produced by this function.
@@ -1119,15 +1121,21 @@ def _combine_numeric_points(
                 best_idx = cand
                 best_dist = dist
         if best_idx is None:
-            right = {
-                "timestamp": lt,
-                "start": int(left["start"]),
-                "end": int(left["end"]),
-                "count": int(left["count"]),
-                "min": 0.0,
-                "avg": 0.0,
-                "max": 0.0,
-            }
+            if missing_right_mode == "carry":
+                if not right_stats:
+                    continue
+                carry_idx = pos - 1 if (pos - 1) >= 0 else 0
+                right = right_stats[carry_idx]
+            else:
+                right = {
+                    "timestamp": lt,
+                    "start": int(left["start"]),
+                    "end": int(left["end"]),
+                    "count": int(left["count"]),
+                    "min": 0.0,
+                    "avg": 0.0,
+                    "max": 0.0,
+                }
         else:
             right = right_stats[best_idx]
         avg_out = _apply_numeric_op(op, float(left["avg"]), float(right["avg"]))
@@ -1137,7 +1145,10 @@ def _combine_numeric_points(
         if min_out is None or max_out is None:
             min_out = avg_out
             max_out = avg_out
-        out_count = int(left["count"]) if best_idx is None else min(int(left["count"]), int(right["count"]))
+        if best_idx is None and missing_right_mode != "carry":
+            out_count = int(left["count"])
+        else:
+            out_count = min(int(left["count"]), int(right["count"]))
         result.append(
             {
                 "timestamp": lt,
@@ -1686,6 +1697,20 @@ def load_virtual_series_defs(data_dir: str) -> List[VirtualSeriesDef]:
     return defs
 
 
+def _series_max_mode(data_dir: str, series_name: str) -> str:
+    """Resolve max-mode rule for a series from unit overrides."""
+    _defs, overrides, _align = load_virtual_series_config(data_dir)
+    raw = str(series_name or "").strip().strip("/")
+    for item in overrides:
+        suffix = str(item.get("suffix", "")).strip().strip("/")
+        if not suffix:
+            continue
+        if raw == suffix or raw.endswith(f"/{suffix}"):
+            mode = str(item.get("maxMode", "max")).strip().lower()
+            return mode if mode in {"max", "nomax"} else "max"
+    return "max"
+
+
 def _virtual_series_name_set(data_dir: str) -> set[str]:
     """Execute virtual series name set as part of TSDB server processing.
 
@@ -1887,7 +1912,13 @@ def _read_series_all_files(data_dir: str, series_name: str) -> Tuple[List[Event]
     return events, max_decimal_places, files_used, new_sig
 
 
-def _compute_virtual_events(left_events: List[Event], right_events: List[Event], op: str, align_window_ms: int = 0) -> List[Event]:
+def _compute_virtual_events(
+    left_events: List[Event],
+    right_events: List[Event],
+    op: str,
+    align_window_ms: int = 0,
+    missing_right_mode: str = "zero",
+) -> List[Event]:
     """Compute virtual events from input events/points and settings.
 
     Args:
@@ -1900,6 +1931,8 @@ def _compute_virtual_events(left_events: List[Event], right_events: List[Event],
         List[Event]: Result produced by this function.
     """
     result: List[Event] = []
+    if missing_right_mode not in {"zero", "carry"}:
+        missing_right_mode = "zero"
     window = max(0, int(align_window_ms))
     right_numeric: List[Tuple[int, float]] = []
     for ev in right_events:
@@ -1926,7 +1959,16 @@ def _compute_virtual_events(left_events: List[Event], right_events: List[Event],
                 best_idx = cand
                 best_dist = dist
         a = float(lv)
-        b = 0.0 if best_idx is None else right_numeric[best_idx][1]
+        if best_idx is None:
+            if missing_right_mode == "carry":
+                if not right_numeric:
+                    continue
+                carry_idx = pos - 1 if (pos - 1) >= 0 else 0
+                b = right_numeric[carry_idx][1]
+            else:
+                b = 0.0
+        else:
+            b = right_numeric[best_idx][1]
         out: Optional[float]
         if op == "+":
             out = a + b
@@ -2519,6 +2561,7 @@ def _compute_one_virtual_series_points(
     right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
         data_dir, d.right, prior_virtuals, start_ms, end_ms, granularity_ms
     )
+    missing_right_mode = "carry" if _series_max_mode(data_dir, d.right) == "nomax" else "zero"
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     if left_is_const and right_is_const:
         entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, [], 3, [])
@@ -2533,7 +2576,7 @@ def _compute_one_virtual_series_points(
         points = _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places)
         entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files)))
         return points, decimal_places, sorted(set(left_files)), _virtual_points_result_signature(entry)
-    points = _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places)
+    points = _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places, missing_right_mode)
     entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, list(points), decimal_places, sorted(set(left_files + right_files)))
     return points, decimal_places, sorted(set(left_files + right_files)), _virtual_points_result_signature(entry)
 
@@ -2550,6 +2593,7 @@ def _compute_virtual_points_full(
     start_ms: int,
     end_ms: int,
     align_window_ms: int,
+    missing_right_mode: str,
 ) -> List[Dict[str, Any]]:
     """Compute virtual points full from input events/points and settings.
 
@@ -2580,7 +2624,7 @@ def _compute_virtual_points_full(
         return _combine_numeric_points_with_constant(right_points, float(left_const), d.op, True, decimal_places)
     if right_is_const:
         return _combine_numeric_points_with_constant(left_points, float(right_const), d.op, False, decimal_places)
-    return _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places)
+    return _combine_numeric_points(left_points, right_points, d.op, align_window_ms, decimal_places, missing_right_mode)
 
 
 def _compute_virtual_points_incremental(
@@ -2597,6 +2641,7 @@ def _compute_virtual_points_incremental(
     end_ms: int,
     granularity_ms: int,
     align_window_ms: int,
+    missing_right_mode: str,
     left_sig: Tuple[Any, ...],
     right_sig: Tuple[Any, ...],
 ) -> Optional[List[Dict[str, Any]]]:
@@ -2670,6 +2715,7 @@ def _compute_virtual_points_incremental(
         start_ms,
         end_ms,
         align_window_ms,
+        missing_right_mode,
     )
     return prefix + suffix
 
@@ -2722,6 +2768,7 @@ def _compute_one_virtual_series_points_cached(
         right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
             data_dir, d.right, prior_virtuals, start_ms, end_ms, granularity_ms
         )
+    missing_right_mode = "carry" if _series_max_mode(data_dir, d.right) == "nomax" else "zero"
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     with _VIRTUAL_SERIES_CACHE_LOCK:
         existing = _VIRTUAL_POINTS_CACHE.get(cache_key)
@@ -2744,6 +2791,7 @@ def _compute_one_virtual_series_points_cached(
             end_ms,
             granularity_ms,
             align_window_ms,
+            missing_right_mode,
             left_sig,
             right_sig,
         )
@@ -2752,12 +2800,12 @@ def _compute_one_virtual_series_points_cached(
         else:
             points = _compute_virtual_points_full(
                 d, left_points, right_points, left_is_const, left_const, right_is_const, right_const,
-                decimal_places, start_ms, end_ms, align_window_ms
+                decimal_places, start_ms, end_ms, align_window_ms, missing_right_mode
             )
     else:
         points = _compute_virtual_points_full(
             d, left_points, right_points, left_is_const, left_const, right_is_const, right_const,
-            decimal_places, start_ms, end_ms, align_window_ms
+            decimal_places, start_ms, end_ms, align_window_ms, missing_right_mode
         )
 
     files = sorted(set(left_files + right_files))
@@ -2831,6 +2879,7 @@ def _compute_one_virtual_series_cached(
         return list(events), decimal_places, list(files), _virtual_result_signature(cache_entry)
 
     right_is_const, right_const, right_events, right_dp, right_files, right_sig = _resolve_virtual_operand(data_dir, d.right, prior_virtuals)
+    missing_right_mode = "carry" if _series_max_mode(data_dir, d.right) == "nomax" else "zero"
     if left_is_const and right_is_const:
         with _VIRTUAL_SERIES_CACHE_LOCK:
             entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
@@ -2871,7 +2920,7 @@ def _compute_one_virtual_series_cached(
     elif right_is_const:
         events = _compute_virtual_events_with_constant(left_events, float(right_const), d.op, False)
     else:
-        events = _compute_virtual_events(left_events, right_events, d.op, align_window_ms)
+        events = _compute_virtual_events(left_events, right_events, d.op, align_window_ms, missing_right_mode)
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     files = sorted(set(left_files + right_files))
     cache_entry = VirtualSeriesCacheEntry(
