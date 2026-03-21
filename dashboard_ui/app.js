@@ -828,6 +828,16 @@
     return String(suffix || '');
   }
 
+  function series_has_max(unit) {
+    const text = String(unit || '').trim();
+    if (!text) return true;
+    return !(text === 'Wh' || text === 'kWh' || text === 'MWh');
+  }
+
+  function series_is_cumulative(unit) {
+    return series_has_max(unit);
+  }
+
   function isYieldSuffix(suffix) {
     return String(suffix || '').toLowerCase().startsWith('yield');
   }
@@ -890,7 +900,6 @@
       scale: (r && Number.isFinite(Number(r.scale)) && Number(r.scale) > 0) ? Number(r.scale) : 1,
       scaleOp: (r && String(r.scaleOp || '*') === '/') ? '/' : '*',
       decimals: r ? normalizeDecimalPlaces(r.decimals) : normalizeDecimalPlaces(defaultDecimals),
-      maxMode: (r && (r.maxMode === 'max' || r.maxMode === 'nomax')) ? r.maxMode : 'max',
       axisKey: (r && typeof r.axisKey === 'string' && r.axisKey.trim()) ? r.axisKey.trim() : '',
     };
   }
@@ -1184,9 +1193,6 @@
         scale: Number.isFinite(Number(d.scale)) ? Number(d.scale) : 1,
         scaleOp: (String(d.scaleOp || '*') === '/') ? '/' : '*',
         decimals: normalizeDecimalPlaces(d.decimals),
-        maxMode: (String(d.maxMode || 'max') === 'max' || String(d.maxMode || 'max') === 'nomax')
-          ? String(d.maxMode || 'max')
-          : 'max',
         axisKey: String(d.axisKey || '').trim(),
       }))
       .filter((d) => d.suffix.length > 0 && d.decimals >= 0 && d.decimals <= 6 && d.scale > 0);
@@ -1254,9 +1260,6 @@
         <select data-field="decimals">
           ${[0,1,2,3,4,5,6].map((n) => `<option value="${n}" ${Number(d.decimals) === n ? 'selected' : ''}>${n}</option>`).join('')}
         </select>
-        <select data-field="maxMode">
-          ${['max', 'nomax'].map((m) => `<option value="${m}" ${String(d.maxMode || 'max') === m ? 'selected' : ''}>${m}</option>`).join('')}
-        </select>
         <input type="text" data-field="axisKey" placeholder="axis key" value="${htmlEscape(d.axisKey || '')}" />
         <button type="button" class="icon-btn danger" data-action="delete-unit-override-row" data-index="${i}">🗑️</button>
       </div>
@@ -1264,7 +1267,7 @@
   }
 
   function addUnitOverrideDraftRow() {
-    unitOverrideDialogDraft.push({ suffix: '', unit: '', scale: 1, scaleOp: '*', decimals: 3, maxMode: 'max', axisKey: '' });
+    unitOverrideDialogDraft.push({ suffix: '', unit: '', scale: 1, scaleOp: '*', decimals: 3, axisKey: '' });
     renderUnitOverrideRows();
   }
 
@@ -1994,6 +1997,7 @@
       for (const seriesName of cfg.series) {
         const data = eventsBySeries.get(seriesName) || { points: [], decimalPlaces: undefined };
         const displayRule = effectiveDisplayRuleForSeries(seriesName, unitForSeriesName(seriesName), data.decimalPlaces);
+        const isCumulative = !series_is_cumulative(displayRule.unit);
         const slotMins = new Array(slotCount + 1).fill(null);
         const slotMaxs = new Array(slotCount + 1).fill(null);
         const points = Array.isArray(data.points) ? data.points : [];
@@ -2026,10 +2030,11 @@
             : ((typeof prevMax === 'number' && Number.isFinite(prevMax)) ? prevMax : null);
           const right = (typeof next === 'number' && Number.isFinite(next)) ? next
             : ((typeof curMax === 'number' && Number.isFinite(curMax)) ? curMax : null);
+          const isZeroToNonZero = isCumulative && left === 0 && right !== 0;
           if (
             typeof left !== 'number' || !Number.isFinite(left)
             || typeof right !== 'number' || !Number.isFinite(right)
-            || left === 0 || right === 0
+            || isZeroToNonZero
           ) {
             barValues.push(0);
           } else {
@@ -2530,7 +2535,7 @@
       if (!unitByLegendName.has(s.displayName)) {
         unitByLegendName.set(s.displayName, s.displayRule.unit || unitForSuffix(s.axisKey));
       }
-      const candidateHideMax = !!(s.displayRule && s.displayRule.maxMode === 'nomax');
+      const candidateHideMax = !series_has_max(s.displayRule.unit || unitForSuffix(s.axisKey));
       if (!hideMaxByLegendName.has(s.displayName)) {
         hideMaxByLegendName.set(s.displayName, candidateHideMax);
       } else {
@@ -2781,7 +2786,7 @@
           maxText: (typeof maxValue === 'number')
             ? formatValueWithUnit(roundNumeric(applyDisplayScale(maxValue, displayRule)), unit, decimals)
             : '-',
-          hideMax: missing || displayRule.maxMode === 'nomax',
+          hideMax: missing || !series_has_max(unit),
         };
       }));
       const displayParent = splitSeriesParentSuffix(displaySeriesName(seriesName)).parent.replace(/\/$/, '');
@@ -4644,9 +4649,6 @@
         scale: Number(d.scale),
         scaleOp: String(d.scaleOp || '*') === '/' ? '/' : '*',
         decimals: normalizeDecimalPlaces(d.decimals),
-        maxMode: (String(d.maxMode || 'max') === 'max' || String(d.maxMode || 'max') === 'nomax')
-          ? String(d.maxMode || 'max')
-          : 'max',
         axisKey: String(d.axisKey || '').trim(),
       }))
       .filter((d) => d.suffix);
@@ -4663,10 +4665,6 @@
       }
       if (d.decimals < 0 || d.decimals > 6) {
         alert(`Invalid decimals for ${d.suffix}: ${d.decimals}`);
-        return;
-      }
-      if (!['max', 'nomax'].includes(d.maxMode)) {
-        alert(`Invalid max mode for ${d.suffix}: ${d.maxMode}`);
         return;
       }
       seenSuffixes.add(key);

@@ -1608,7 +1608,6 @@ def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
     unit = str(obj.get("unit", "")).strip()
     axis_key = str(obj.get("axisKey", "")).strip()
     scale_op = str(obj.get("scaleOp", obj.get("op", "*"))).strip()
-    max_mode = str(obj.get("maxMode", "")).strip().lower()
     try:
         scale = float(obj.get("scale", 1))
         decimals = int(obj.get("decimals"))
@@ -1616,15 +1615,12 @@ def _normalize_unit_override_def(obj: Any) -> Optional[Dict[str, Any]]:
         return None
     if not suffix or decimals < 0 or decimals > 6 or scale <= 0 or scale_op not in {"*", "/"}:
         return None
-    if max_mode not in {"", "auto", "max", "nomax"}:
-        return None
     return {
         "suffix": suffix,
         "unit": unit,
         "scale": scale,
         "scaleOp": scale_op,
         "decimals": decimals,
-        "maxMode": "max" if max_mode in {"", "auto"} else max_mode,
         "axisKey": axis_key,
     }
 
@@ -1697,20 +1693,6 @@ def load_virtual_series_defs(data_dir: str) -> List[VirtualSeriesDef]:
     return defs
 
 
-def _series_max_mode(data_dir: str, series_name: str) -> str:
-    """Resolve max-mode rule for a series from unit overrides."""
-    _defs, overrides, _align = load_virtual_series_config(data_dir)
-    raw = str(series_name or "").strip().strip("/")
-    for item in overrides:
-        suffix = str(item.get("suffix", "")).strip().strip("/")
-        if not suffix:
-            continue
-        if raw == suffix or raw.endswith(f"/{suffix}"):
-            mode = str(item.get("maxMode", "max")).strip().lower()
-            return mode if mode in {"max", "nomax"} else "max"
-    return "max"
-
-
 def _virtual_series_name_set(data_dir: str) -> set[str]:
     """Execute virtual series name set as part of TSDB server processing.
 
@@ -1764,7 +1746,6 @@ def save_virtual_series_config(data_dir: str, defs: List[VirtualSeriesDef], unit
                 "scale": float(d.get("scale", 1)),
                 "scaleOp": str(d.get("scaleOp", "*")),
                 "decimals": int(d["decimals"]),
-                "maxMode": str(d.get("maxMode", "max")),
                 "axisKey": str(d.get("axisKey", "")),
             }
             for d in unit_overrides
@@ -2561,7 +2542,7 @@ def _compute_one_virtual_series_points(
     right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
         data_dir, d.right, prior_virtuals, start_ms, end_ms, granularity_ms
     )
-    missing_right_mode = "carry" if _series_max_mode(data_dir, d.right) == "nomax" else "zero"
+    missing_right_mode = "zero"
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     if left_is_const and right_is_const:
         entry = VirtualPointsCacheEntry((d.name, d.left, d.left_scaling, d.op, d.right, int(align_window_ms), start_ms, end_ms, granularity_ms), left_sig, right_sig, [], 3, [])
@@ -2768,7 +2749,7 @@ def _compute_one_virtual_series_points_cached(
         right_is_const, right_const, right_points, right_dp, right_files, right_sig = _resolve_virtual_operand_points(
             data_dir, d.right, prior_virtuals, start_ms, end_ms, granularity_ms
         )
-    missing_right_mode = "carry" if _series_max_mode(data_dir, d.right) == "nomax" else "zero"
+    missing_right_mode = "zero"
     decimal_places = _virtual_decimal_places(d.op, left_dp, right_dp)
     with _VIRTUAL_SERIES_CACHE_LOCK:
         existing = _VIRTUAL_POINTS_CACHE.get(cache_key)
@@ -2879,7 +2860,7 @@ def _compute_one_virtual_series_cached(
         return list(events), decimal_places, list(files), _virtual_result_signature(cache_entry)
 
     right_is_const, right_const, right_events, right_dp, right_files, right_sig = _resolve_virtual_operand(data_dir, d.right, prior_virtuals)
-    missing_right_mode = "carry" if _series_max_mode(data_dir, d.right) == "nomax" else "zero"
+    missing_right_mode = "zero"
     if left_is_const and right_is_const:
         with _VIRTUAL_SERIES_CACHE_LOCK:
             entry = _VIRTUAL_SERIES_RESULT_CACHE.get(cache_key)
@@ -3729,7 +3710,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         for item in overrides_raw:
             d = _normalize_unit_override_def(item)
             if d is None:
-                raise ValueError("Each unit override must include suffix, unit, scale, scaleOp, decimals, maxMode, and optional axisKey")
+                raise ValueError("Each unit override must include suffix, unit, scale, scaleOp, decimals, and optional axisKey")
             key = str(d["suffix"]).lower()
             if key in seen_suffixes:
                 raise ValueError(f"Duplicate unit override suffix: {d['suffix']}")
