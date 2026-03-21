@@ -10,6 +10,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 from tsdb import NumericWithDecimals, downsample_series_points, write_series_array_timeseries_db
@@ -24,6 +25,22 @@ _DOWNSAMPLE_LEVELS: list[tuple[int, str, int]] = [
     (900000, "15m", 3),
     (3600000, "1h", 3),
 ]
+
+
+@dataclass(frozen=True)
+class MappingTarget:
+    """One configured mapping target with optional scale."""
+
+    series: str
+    scale_op: str = "*"
+    scale_factor: float = 1.0
+
+
+def _format_mapping_target(target: MappingTarget) -> str:
+    """Render one mapping target including optional scale for diagnostics."""
+    if target.scale_op == "*" and abs(float(target.scale_factor) - 1.0) < 1e-12:
+        return target.series
+    return f"{target.series},{target.scale_op}{target.scale_factor:g}"
 
 
 def _load_toml_dict(path: str) -> dict[str, Any]:
@@ -45,21 +62,41 @@ def _require_str(table: dict[str, Any], key: str, where: str) -> str:
     return value
 
 
-def _parse_mapping_value(value: Any) -> list[str]:
+def _parse_mapping_value(value: Any) -> list[MappingTarget]:
+    tokens: list[str] = []
     if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
-    if isinstance(value, list):
-        out: list[str] = []
+        tokens.extend(part.strip() for part in value.split(",") if part.strip())
+    elif isinstance(value, list):
         for item in value:
             if isinstance(item, str):
-                stripped = item.strip()
-                if stripped:
-                    out.append(stripped)
-        return out
-    return []
+                tokens.extend(part.strip() for part in item.split(",") if part.strip())
+    else:
+        return []
+
+    out: list[MappingTarget] = []
+    for token in tokens:
+        if token.startswith("*") or token.startswith("/"):
+            if not out:
+                raise ValueError(f"Scale {token!r} has no preceding target")
+            factor_text = token[1:].strip()
+            if not factor_text:
+                raise ValueError(f"Missing scale factor in {token!r}")
+            try:
+                factor = float(factor_text)
+            except Exception:
+                raise ValueError(f"Invalid scale factor in {token!r}")
+            if not math.isfinite(factor) or factor == 0:
+                raise ValueError(f"Scale factor must be finite and non-zero in {token!r}")
+            prev = out[-1]
+            if prev.scale_factor != 1.0 or prev.scale_op != "*":
+                raise ValueError(f"Duplicate scale for target {prev.series!r}")
+            out[-1] = MappingTarget(series=prev.series, scale_op=token[0], scale_factor=factor)
+            continue
+        out.append(MappingTarget(series=token))
+    return out
 
 
-def _parse_config(path: str) -> tuple[dict[str, Any], dict[tuple[str, str], list[str]]]:
+def _parse_config(path: str) -> tuple[dict[str, Any], dict[tuple[str, str], list[MappingTarget]]]:
     config = _load_toml_dict(path)
 
     influx = config.get("influxdb")
@@ -74,7 +111,7 @@ def _parse_config(path: str) -> tuple[dict[str, Any], dict[tuple[str, str], list
     if not isinstance(mapping_raw, dict):
         raise ValueError("Invalid [mapping] table in config")
 
-    parsed_mapping: dict[tuple[str, str], list[str]] = {}
+    parsed_mapping: dict[tuple[str, str], list[MappingTarget]] = {}
     for source_key, raw_targets in mapping_raw.items():
         if not isinstance(source_key, str):
             raise ValueError("Invalid mapping key (expected string)")
@@ -85,18 +122,21 @@ def _parse_config(path: str) -> tuple[dict[str, Any], dict[tuple[str, str], list
         field = field.strip()
         if not measurement or not field:
             raise ValueError(f"Invalid mapping key {source_key!r}; empty measurement or field")
-        targets = _parse_mapping_value(raw_targets)
+        try:
+            targets = _parse_mapping_value(raw_targets)
+        except ValueError as exc:
+            raise ValueError(f"Invalid mapping value for {source_key!r}: {exc}")
         parsed_mapping[(measurement, field)] = targets
 
     return config, parsed_mapping
 
 
-def _validate_no_target_conflicts(mapping: dict[tuple[str, str], list[str]]) -> list[tuple[str, list[str]]]:
+def _validate_no_target_conflicts(mapping: dict[tuple[str, str], list[MappingTarget]]) -> list[tuple[str, list[str]]]:
     target_to_sources: dict[str, set[str]] = {}
     for (measurement, field), targets in mapping.items():
         source_key = f"{measurement}/{field}"
         for target in targets:
-            target_to_sources.setdefault(target, set()).add(source_key)
+            target_to_sources.setdefault(target.series, set()).add(source_key)
     conflicts: list[tuple[str, list[str]]] = []
     for target, sources in sorted(target_to_sources.items()):
         if len(sources) > 1:
@@ -231,7 +271,7 @@ def _extract_day_events_for_measurement(
     influx_cfg: dict[str, Any],
     measurement: str,
     fields: list[str],
-    target_by_source: dict[tuple[str, str], list[str]],
+    target_by_source: dict[tuple[str, str], list[MappingTarget]],
     day_start_ms: int,
     day_end_ms: int,
     timeout_s: float,
@@ -299,9 +339,14 @@ def _extract_day_events_for_measurement(
                     field_stats[field]["non_numeric"] += 1
                     continue
                 field_stats[field]["numeric"] += 1
-                numeric = _round_to_max_3_decimals(float(raw_value))
-                for target_series in target_by_source.get((measurement, field), []):
-                    out.append((ts_ms, target_series, numeric))
+                for target in target_by_source.get((measurement, field), []):
+                    scaled_value = float(raw_value)
+                    if target.scale_op == "/":
+                        scaled_value = scaled_value / target.scale_factor
+                    else:
+                        scaled_value = scaled_value * target.scale_factor
+                    numeric = _round_to_max_3_decimals(scaled_value)
+                    out.append((ts_ms, target.series, numeric))
     return out, field_stats
 
 
@@ -365,7 +410,7 @@ def _day_bounds_ms(day: datetime.date) -> tuple[int, int]:
 
 def _extract_events(
     influx_cfg: dict[str, Any],
-    mapping: dict[tuple[str, str], list[str]],
+    mapping: dict[tuple[str, str], list[MappingTarget]],
     day_filter: datetime.date | None,
     num_days: int,
     verbose: int = 0,
@@ -375,7 +420,7 @@ def _extract_events(
     dict[datetime.date, dict[str, dict[str, int]]],
 ]:
     source_by_measurement: dict[str, list[str]] = {}
-    target_by_source: dict[tuple[str, str], list[str]] = {}
+    target_by_source: dict[tuple[str, str], list[MappingTarget]] = {}
     for (measurement, field), targets in mapping.items():
         if not targets:
             continue
@@ -453,7 +498,7 @@ def _extract_events(
 
 def _resolve_requested_days(
     influx_cfg: dict[str, Any],
-    mapping: dict[tuple[str, str], list[str]],
+    mapping: dict[tuple[str, str], list[MappingTarget]],
     day_filter: datetime.date | None,
     num_days: int,
     timeout_s: float,
@@ -505,7 +550,7 @@ def _source_missing_reason(stats: dict[str, int]) -> str:
 
 def _print_unrepresented_mappings(
     day: datetime.date,
-    active_mapping: dict[tuple[str, str], list[str]],
+    active_mapping: dict[tuple[str, str], list[MappingTarget]],
     day_source_stats: dict[str, dict[str, int]],
     represented_series: set[str],
 ) -> None:
@@ -519,10 +564,11 @@ def _print_unrepresented_mappings(
         stats = day_source_stats.get(source_key, {"column_present": 0, "rows": 0, "numeric": 0, "null": 0, "non_numeric": 0})
         reason = _source_missing_reason(stats)
         source_reason_by_key[source_key] = reason
+        target_series = [target.series for target in targets]
         if reason:
-            missing_sources.append((source_key, list(targets), stats, reason))
+            missing_sources.append((source_key, target_series, stats, reason))
         for target in targets:
-            target_sources.setdefault(target, []).append(source_key)
+            target_sources.setdefault(target.series, []).append(source_key)
 
     if not missing_sources:
         print("  sources: all represented")
@@ -652,6 +698,10 @@ def main() -> int:
 
     if args.dry_run:
         print("Dry run: no files will be written.")
+        print("Effective mapping:")
+        for (measurement, field), targets in sorted(active_mapping.items(), key=lambda item: (item[0][0], item[0][1])):
+            target_text = ", ".join(_format_mapping_target(target) for target in targets)
+            print(f"  {measurement}/{field} -> {target_text}")
         total_events = 0
         per_series_total: dict[str, int] = {}
         any_events = False

@@ -1,5 +1,10 @@
 # InfluxDB -> TSDB extraction config
 # Empty mapping target ("") means this Influx field is discarded.
+# Optional per-target scaling can be appended after a comma:
+#   "measurement/field" = "target_series,*1000"
+#   "measurement/field" = "target_series,/1000"
+# Multiple targets remain supported:
+#   "measurement/field" = "target_a,*1000,target_b,target_c,/1000"
 
 [influxdb]
 url = "http://192.168.1.14:8086"
@@ -166,16 +171,16 @@ password = ""
 "pvdatacum/energy_ac_consumed1" = ""
 "pvdatacum/energy_ac_consumed2" = ""
 "pvdatacum/energy_ac_consumed3" = ""
-"pvdatacum/energy_ac_produced" = ""
+"pvdatacum/energy_ac_produced" = "main/inv/yieldtotal,*3600000"
 "pvdatacum/energy_ac_produced1" = ""
 "pvdatacum/energy_ac_produced2" = ""
 "pvdatacum/energy_ac_produced3" = ""
-"pvdatacum/energy_bat_charged" = "main/bat/e_consumed"
-"pvdatacum/energy_bat_discharged" = "main/bat/yieldtotal"
+"pvdatacum/energy_bat_charged" = "main/bat/e_consumed,*3600000"
+"pvdatacum/energy_bat_discharged" = "main/bat/yieldtotal,*3600000"
 "pvdatacum/energy_hm_day" = "solar/116183929528/0/yieldday,solar/ac/yieldday"
 "pvdatacum/energy_hm_total" = "solar/116183929528/0/yieldtotal,solar/ac/yieldtotal"
-"pvdatacum/energy_meter_consumed" = "main/meter/e_consumed"
-"pvdatacum/energy_meter_produced" = "main/meter/yieldtotal"
-"pvdatacum/energy_pv" = "main/inv/yieldtotal"
-"pvdatacum/energy_pv1" = "main/dc1/yieldtotal"
-"pvdatacum/energy_pv2" = "main/dc2/yieldtotal"
+"pvdatacum/energy_meter_consumed" = "main/meter/e_consumed,*1000"
+"pvdatacum/energy_meter_produced" = "main/meter/yieldtotal,*1000"
+"pvdatacum/energy_pv" = ""
+"pvdatacum/energy_pv1" = "main/dc1/yieldtotal,*3600000"
+"pvdatacum/energy_pv2" = "main/dc2/yieldtotal,*3600000"
