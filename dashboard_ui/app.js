@@ -331,8 +331,10 @@
   function normalizeSolarNoonSmoothing(value) {
     const mode = String(value || '').trim().toLowerCase();
     if (
-      mode === 'ma3' || mode === 'ma7' || mode === 'ma14' || mode === 'ma28'
-      || mode === 'ema3' || mode === 'ema7' || mode === 'ema14' || mode === 'ema28'
+      mode === 'ma3' || mode === 'ma7' || mode === 'ma14' || mode === 'ma28' || mode === 'ma60' || mode === 'ma90'
+      || mode === 'ma120' || mode === 'ma150' || mode === 'ma180'
+      || mode === 'ema3' || mode === 'ema7' || mode === 'ema14' || mode === 'ema28' || mode === 'ema60' || mode === 'ema90'
+      || mode === 'ema120' || mode === 'ema150' || mode === 'ema180'
     ) return mode;
     return 'plain';
   }
@@ -465,10 +467,26 @@
       for (let i = 0; i < values.length; i += 1) out[i] = values[i];
       return out;
     }
-    if (smoothing === 'ema3' || smoothing === 'ema7' || smoothing === 'ema14' || smoothing === 'ema28') {
+    if (
+      smoothing === 'ema3' || smoothing === 'ema7' || smoothing === 'ema14'
+      || smoothing === 'ema28' || smoothing === 'ema60' || smoothing === 'ema90'
+      || smoothing === 'ema120' || smoothing === 'ema150' || smoothing === 'ema180'
+    ) {
       const alpha = (
         smoothing === 'ema3' ? 0.5
-          : (smoothing === 'ema7' ? 0.25 : (smoothing === 'ema14' ? 0.15 : 0.08))
+          : (
+            smoothing === 'ema7' ? 0.25
+              : (
+                smoothing === 'ema14' ? 0.15
+                  : (
+                    smoothing === 'ema28' ? 0.08
+                      : (
+                        smoothing === 'ema60' ? 0.04
+                          : (smoothing === 'ema90' ? 0.03 : (smoothing === 'ema120' ? 0.025 : (smoothing === 'ema150' ? 0.02 : 0.018)))
+                      )
+                  )
+              )
+          )
       );
       let last = null;
       for (let i = 0; i < values.length; i += 1) {
@@ -483,8 +501,14 @@
       return out;
     }
     const halfWindow = (
-      smoothing === 'ma28' ? 14
-        : (smoothing === 'ma14' ? 7 : (smoothing === 'ma7' ? 3 : 1))
+      smoothing === 'ma180' ? 90
+        : (
+          smoothing === 'ma150' ? 75
+            : (
+              smoothing === 'ma120' ? 60
+                : (smoothing === 'ma90' ? 45 : (smoothing === 'ma60' ? 30 : (smoothing === 'ma28' ? 14 : (smoothing === 'ma14' ? 7 : (smoothing === 'ma7' ? 3 : 1)))))
+            )
+        )
     );
     for (let i = 0; i < values.length; i += 1) {
       let sum = 0;
@@ -1854,10 +1878,20 @@
             <option value="ma7">Moving Avg (7d)</option>
             <option value="ma14">Moving Avg (14d)</option>
             <option value="ma28">Moving Avg (28d)</option>
+            <option value="ma60">Moving Avg (60d)</option>
+            <option value="ma90">Moving Avg (90d)</option>
+            <option value="ma120">Moving Avg (120d)</option>
+            <option value="ma150">Moving Avg (150d)</option>
+            <option value="ma180">Moving Avg (180d)</option>
             <option value="ema3">EMA (3d)</option>
             <option value="ema7">EMA (7d)</option>
             <option value="ema14">EMA (14d)</option>
             <option value="ema28">EMA (28d)</option>
+            <option value="ema60">EMA (60d)</option>
+            <option value="ema90">EMA (90d)</option>
+            <option value="ema120">EMA (120d)</option>
+            <option value="ema150">EMA (150d)</option>
+            <option value="ema180">EMA (180d)</option>
           </select>
           <select class="heatmap-series-select" id="solarnoon-years-${id}" data-action="solarnoon-years" data-id="${id}" title="X axis width">
             <option value="1">1y</option>
