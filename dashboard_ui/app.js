@@ -52,6 +52,7 @@
   const visibilityRefreshEnabledInput = document.getElementById('visibilityRefreshEnabled');
   const showMinPointsDebugInput = document.getElementById('showMinPointsDebug');
   const showRefreshDurationDebugInput = document.getElementById('showRefreshDurationDebug');
+  const logBarValuesDebugInput = document.getElementById('logBarValuesDebug');
   const unitOverrideRows = document.getElementById('unitOverrideRows');
   const dialog = document.getElementById('seriesDialog');
   const seriesList = document.getElementById('seriesList');
@@ -148,6 +149,7 @@
   let quickRangeButtonsEnabled = ['12h', '1d', '2d'];
   let showMinPointsDebug = false;
   let showRefreshDurationDebug = false;
+  let logBarValuesDebug = false;
   let heatmapResizeTimer = null;
   let barResizeTimer = null;
   let saveDashboardDialogMode = 'save';
@@ -329,6 +331,12 @@
       return `${md} ${pad2(d.getHours())}:00`;
     }
     return md;
+  }
+
+  function formatBarDebugSlot(ts) {
+    const d = new Date(Number(ts));
+    const pad2 = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   }
 
   function summarizeGranularityMode(items, countKey, startMs, endMs, ignorePredicate = null) {
@@ -670,6 +678,7 @@
       lttbMinAvgMaxEnabled: !!lttbMinAvgMaxEnabled,
       showMinPointsDebug: !!showMinPointsDebug,
       showRefreshDurationDebug: !!showRefreshDurationDebug,
+      logBarValuesDebug: !!logBarValuesDebug,
       range: {
         preset: activePreset || 'custom',
         start: startInput.value,
@@ -2100,20 +2109,46 @@
             if (i === slotCount - 1) {
               endVal = (typeof lastVal === 'number' && Number.isFinite(lastVal)) ? lastVal : startVal;
             }
+            let barValue = 0;
             if (
               typeof startVal !== 'number' || !Number.isFinite(startVal)
               || typeof endVal !== 'number' || !Number.isFinite(endVal)
               || startVal === 0
             ) {
-              barValues.push(0);
+              barValue = 0;
             } else {
-              barValues.push(roundNumeric(endVal - startVal));
+              barValue = roundNumeric(endVal - startVal);
+            }
+            barValues.push(barValue);
+            if (logBarValuesDebug) {
+              appendConsoleLine(
+                `bar ${id} slot series=${seriesName} ts=${formatBarDebugSlot(visibleStart + i * intervalMs)} `
+                + `cumulative=true T_start=${formatTooltipValue(startVal, displayRule.decimals)} `
+                + `T_value=${formatTooltipValue(barValue, displayRule.decimals)}`
+              );
             }
           }
         } else if (isPowerUnit(displayRule.unit)) {
-          for (let i = 0; i < slotCount; i += 1) barValues.push(roundNumeric(slotEnergyKwh[i]));
+          for (let i = 0; i < slotCount; i += 1) {
+            const barValue = roundNumeric(slotEnergyKwh[i]);
+            barValues.push(barValue);
+            if (logBarValuesDebug) {
+              appendConsoleLine(
+                `bar ${id} slot series=${seriesName} ts=${formatBarDebugSlot(visibleStart + i * intervalMs)} `
+                + `cumulative=false T_start=- T_value=${formatTooltipValue(barValue, displayRule.decimals)}`
+              );
+            }
+          }
         } else {
-          for (let i = 0; i < slotCount; i += 1) barValues.push(0);
+          for (let i = 0; i < slotCount; i += 1) {
+            barValues.push(0);
+            if (logBarValuesDebug) {
+              appendConsoleLine(
+                `bar ${id} slot series=${seriesName} ts=${formatBarDebugSlot(visibleStart + i * intervalMs)} `
+                + 'cumulative=false T_start=- T_value=0'
+              );
+            }
+          }
         }
         seriesDefs.push({
           rawName: seriesName,
@@ -4683,6 +4718,12 @@
       refreshAllCharts('debug-visibility-change').catch((err) => console.error(err));
     });
   }
+  if (logBarValuesDebugInput) {
+    logBarValuesDebugInput.addEventListener('change', () => {
+      logBarValuesDebug = !!logBarValuesDebugInput.checked;
+      queueSaveSettings();
+    });
+  }
   document.getElementById('cancelVirtualSeries').addEventListener('click', () => {
     virtualSeriesDialog.close();
   });
@@ -4926,6 +4967,9 @@
     showRefreshDurationDebug = settings && Object.prototype.hasOwnProperty.call(settings, 'showRefreshDurationDebug')
       ? !!settings.showRefreshDurationDebug
       : false;
+    logBarValuesDebug = settings && Object.prototype.hasOwnProperty.call(settings, 'logBarValuesDebug')
+      ? !!settings.logBarValuesDebug
+      : false;
     if (visibilityRefreshEnabledInput) {
       visibilityRefreshEnabledInput.checked = visibilityRefreshEnabled;
     }
@@ -4940,6 +4984,9 @@
     }
     if (showRefreshDurationDebugInput) {
       showRefreshDurationDebugInput.checked = showRefreshDurationDebug;
+    }
+    if (logBarValuesDebugInput) {
+      logBarValuesDebugInput.checked = logBarValuesDebug;
     }
     renderQuickRangeButtons();
     if (desiredDashboard !== 'Default' && savedDashboardNames.has(desiredDashboard)) {
