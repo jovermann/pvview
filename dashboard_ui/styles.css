@@ -364,7 +364,7 @@ select[id^="solarnoon-method-"] {
 .stat-wrap {
   flex: 1;
   overflow: auto;
-  padding: 8px;
+  padding: 4px 6px;
 }
 
 .stat-table {
@@ -379,16 +379,16 @@ select[id^="solarnoon-method-"] {
 }
 
 .stat-table td {
-  padding: 6px 4px;
+  padding: 3px 4px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
 
 .stat-name {
   color: var(--muted);
-  font-size: 20px;
+  font-size: var(--stat-name-font, 19px);
   font-weight: 600;
-  line-height: 1.1;
+  line-height: 1.0;
   white-space: nowrap;
 }
 
@@ -412,15 +412,16 @@ select[id^="solarnoon-method-"] {
 
 .stat-current {
   color: #e5effc;
-  font-size: 26px;
+  font-size: var(--stat-big-font, 26px);
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1.0;
 }
 
 .stat-max {
   color: var(--muted);
-  font-size: 12px;
-  margin-top: 2px;
+  font-size: 11px;
+  margin-top: 1px;
+  line-height: 1.0;
 }
 
 .stat-value-cell {

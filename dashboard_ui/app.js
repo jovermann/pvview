@@ -66,6 +66,7 @@
   const chartSettingsSeriesList = document.getElementById('chartSettingsSeriesList');
   const statSettingsDialog = document.getElementById('statSettingsDialog');
   const statSettingsName = document.getElementById('statSettingsName');
+  const statSettingsBigFont = document.getElementById('statSettingsBigFont');
   const statSettingsSeriesList = document.getElementById('statSettingsSeriesList');
   const heatmapSettingsDialog = document.getElementById('heatmapSettingsDialog');
   const heatmapSettingsName = document.getElementById('heatmapSettingsName');
@@ -313,6 +314,12 @@
     const n = Number(value);
     if (!Number.isFinite(n)) return 8;
     return Math.max(0, Math.min(120, Math.floor(n)));
+  }
+
+  function normalizeStatBigFontPx(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 26;
+    return Math.max(12, Math.min(72, Math.floor(n)));
   }
 
   function normalizeSolarNoonMethod(value) {
@@ -3524,6 +3531,9 @@
         <td class="stat-spacer"></td>
       </tr>
     `).join('');
+    const bigFontPx = normalizeStatBigFontPx(cfg.bigFontPx);
+    cfg.tableEl.style.setProperty('--stat-big-font', `${bigFontPx}px`);
+    cfg.tableEl.style.setProperty('--stat-name-font', `${Math.max(11, Math.round(bigFontPx * 0.8))}px`);
     cfg.tableEl.innerHTML = head + `<tbody>${body}</tbody>`;
     appendConsoleLine(`stat ${id} refresh done name="${panelName}" series=${rows.length}`);
     } finally {
@@ -3687,6 +3697,7 @@
       tableEl,
       series: [...initialSeries],
       columns: Array.isArray(options.columns) ? options.columns.map((s) => String(s)) : [],
+      bigFontPx: normalizeStatBigFontPx(options.bigFontPx),
       label: options.label || null,
       busyCount: 0,
       titleMeta: '',
@@ -4008,6 +4019,7 @@
           h: Number(nodeInfo.h || 3),
           series: Array.isArray(c.series) ? [...c.series] : [],
           columns: Array.isArray(c.columns) ? [...c.columns] : [],
+          bigFontPx: normalizeStatBigFontPx(c.bigFontPx),
           label: c.label || null,
         });
         continue;
@@ -4146,6 +4158,7 @@
           w: Number(ch.w) || 6,
           h: Number(ch.h) || 3,
           columns,
+          bigFontPx: normalizeStatBigFontPx(ch.bigFontPx),
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -4475,6 +4488,9 @@
     if (!c || c.kind !== 'stat') return;
     activeSettingsStatId = id;
     statSettingsName.value = c.label || '';
+    if (statSettingsBigFont instanceof HTMLInputElement) {
+      statSettingsBigFont.value = String(normalizeStatBigFontPx(c.bigFontPx));
+    }
     statSettingsSeriesDraft = Array.isArray(c.series) ? [...c.series] : [];
     renderStatSettingsSeriesList();
     statSettingsDialog.showModal();
@@ -5083,8 +5099,9 @@
       return;
     }
     c.label = String(statSettingsName.value || '').trim() || null;
+    c.bigFontPx = normalizeStatBigFontPx(statSettingsBigFont ? statSettingsBigFont.value : c.bigFontPx);
     c.series = Array.isArray(statSettingsSeriesDraft) ? [...statSettingsSeriesDraft] : [];
-    appendConsoleLine(`stat ${activeSettingsStatId} settings updated rows=${c.series.length}`);
+    appendConsoleLine(`stat ${activeSettingsStatId} settings updated rows=${c.series.length} bigFontPx=${c.bigFontPx}`);
     updateTitle(activeSettingsStatId);
     refreshStat(activeSettingsStatId).catch((err) => console.error(err));
     activeSettingsStatId = null;
