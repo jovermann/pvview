@@ -1799,7 +1799,7 @@
     wrapper.innerHTML = `
       <div class="panel-header">
         <div class="panel-title-wrap">
-          <div class="panel-title" id="title-${id}">24h Heatmap ${id}</div>
+          <div class="panel-title" id="title-${id}">Heatmap ${id}</div>
           <div class="panel-title-meta" id="titlemeta-${id}"></div>
         </div>
         <div class="panel-actions">
@@ -1938,7 +1938,7 @@
       return;
     }
     if (c.kind === 'heatmap') {
-      titleEl.textContent = c.label || `24h Heatmap ${id}`;
+      titleEl.textContent = c.label || `Heatmap ${id}`;
       if (metaEl) metaEl.textContent = c.titleMeta || '';
       return;
     }
@@ -2060,7 +2060,7 @@
     if (!cfg || cfg.kind !== 'heatmap' || !cfg.instance || !(cfg.hostEl instanceof HTMLElement)) return;
     setPanelBusy(id, true);
     try {
-      const panelName = cfg.label || `24h Heatmap ${id}`;
+      const panelName = cfg.label || `Heatmap ${id}`;
       appendConsoleLine(`heatmap ${id} refresh start name="${panelName}" series=${cfg.series.length}`);
       updateHeatmapSeriesSelect(id);
       const { end } = getRange();
