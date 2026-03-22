@@ -1821,6 +1821,23 @@
             <option value="144">144 (10m)</option>
             <option value="288">288 (5m)</option>
           </select>
+          <select class="heatmap-series-select" id="heatmap-xrange-${id}" data-action="heatmap-xrange" data-id="${id}" title="X range">
+            <option value="auto">Auto</option>
+            <option value="1y">1y</option>
+            <option value="1.5y">1.5y</option>
+            <option value="2y">2y</option>
+            <option value="2.5y">2.5y</option>
+            <option value="3y">3y</option>
+            <option value="3.5y">3.5y</option>
+            <option value="4y">4y</option>
+            <option value="4.5y">4.5y</option>
+            <option value="5y">5y</option>
+            <option value="6y">6y</option>
+            <option value="7y">7y</option>
+            <option value="8y">8y</option>
+            <option value="9y">9y</option>
+            <option value="10y">10y</option>
+          </select>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="settings-gadget" data-action="heatmap-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -2010,6 +2027,20 @@
     return 24;
   }
 
+  function normalizeHeatmapXRange(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    const allowed = new Set(['auto', '1y', '1.5y', '2y', '2.5y', '3y', '3.5y', '4y', '4.5y', '5y', '6y', '7y', '8y', '9y', '10y']);
+    if (allowed.has(mode)) return mode;
+    return 'auto';
+  }
+
+  function heatmapXRangeYears(mode) {
+    const normalized = normalizeHeatmapXRange(mode);
+    if (normalized === 'auto') return null;
+    const value = Number(normalized.slice(0, -1));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
   function transformHeatmapValue(value, scaleMode) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
     switch (normalizeHeatmapScale(scaleMode)) {
@@ -2053,7 +2084,7 @@
       const plotHeight = Math.max(cellsPerDay, cfg.hostEl.clientHeight - gridTop - gridBottom);
       const plotWidth = Math.max(24, cfg.hostEl.clientWidth - gridLeft - gridRight);
       const targetCellSize = plotHeight / cellsPerDay;
-      const dayColumns = Math.max(1, Math.round(plotWidth / targetCellSize));
+      const autoDayColumns = Math.max(1, Math.round(plotWidth / targetCellSize));
       const cellMs = dayMs / cellsPerDay;
       const fetchGranularityMs = (() => {
         if (cellsPerDay <= 24) return 3600000;
@@ -2063,6 +2094,8 @@
       const fetchGranularity = granularityLabelShort(fetchGranularityMs);
       const rightDay = new Date(end);
       rightDay.setHours(0, 0, 0, 0);
+      const fixedYears = heatmapXRangeYears(cfg.xRangeMode);
+      const dayColumns = fixedYears === null ? autoDayColumns : Math.max(1, Math.round(fixedYears * 365));
       const visibleStart = rightDay.getTime() - (dayColumns - 1) * dayMs;
       const visibleEnd = rightDay.getTime() + dayMs;
       const q = new URLSearchParams({
@@ -3588,6 +3621,7 @@
         options.heatmapScale || (options.logScale ? 'log' : 'normal')
       ),
       cellsPerDay: normalizeHeatmapCells(options.cellsPerDay),
+      xRangeMode: normalizeHeatmapXRange(options.xRangeMode),
       cellGap: (() => {
         const raw = Number(options.cellGap);
         if (!Number.isFinite(raw)) return 1;
@@ -3611,6 +3645,10 @@
     const cellsSelect = document.getElementById(`heatmap-cells-${id}`);
     if (cellsSelect instanceof HTMLSelectElement) {
       cellsSelect.value = String(normalizeHeatmapCells(options.cellsPerDay));
+    }
+    const xrangeSelect = document.getElementById(`heatmap-xrange-${id}`);
+    if (xrangeSelect instanceof HTMLSelectElement) {
+      xrangeSelect.value = normalizeHeatmapXRange(options.xRangeMode);
     }
     appendConsoleLine(`heatmap ${id} created series=${initialSeries.length}`);
     updateTitle(id);
@@ -3863,7 +3901,12 @@
           heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
           cellsPerDay: normalizeHeatmapCells(c.cellsPerDay),
-          cellGap: Math.max(0, Math.min(12, Math.floor(Number(c.cellGap || 1)))),
+          xRangeMode: normalizeHeatmapXRange(c.xRangeMode),
+          cellGap: (() => {
+            const raw = Number(c.cellGap);
+            if (!Number.isFinite(raw)) return 1;
+            return Math.max(0, Math.min(12, Math.floor(raw)));
+          })(),
           label: c.label || null,
         });
         continue;
@@ -3993,7 +4036,12 @@
           heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
           cellsPerDay: normalizeHeatmapCells(ch.cellsPerDay),
-          cellGap: Math.max(0, Math.min(12, Math.floor(Number(ch.cellGap || 1)))),
+          xRangeMode: normalizeHeatmapXRange(ch.xRangeMode),
+          cellGap: (() => {
+            const raw = Number(ch.cellGap);
+            if (!Number.isFinite(raw)) return 1;
+            return Math.max(0, Math.min(12, Math.floor(raw)));
+          })(),
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -4735,6 +4783,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'heatmap') return;
       panel.cellsPerDay = normalizeHeatmapCells(target.value || '24');
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'heatmap-xrange') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.xRangeMode = normalizeHeatmapXRange(target.value || 'auto');
       refreshHeatmap(id).catch((err) => console.error(err));
       return;
     }
