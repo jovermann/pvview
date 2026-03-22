@@ -1814,12 +1814,22 @@
             <option value="cbrt">Cube</option>
             <option value="log">Log</option>
           </select>
+          <select class="heatmap-series-select" id="heatmap-clamp-${id}" data-action="heatmap-clamp" data-id="${id}" title="Input clamp">
+            <option value="normal">Normal</option>
+            <option value="50hz_200">50 Hz (+/-200 mHz)</option>
+            <option value="50hz_100">50 Hz (+/-100 mHz)</option>
+            <option value="50hz_50">50 Hz (+/-50 mHz)</option>
+          </select>
           <select class="heatmap-series-select" id="heatmap-cells-${id}" data-action="heatmap-cells" data-id="${id}" title="Rows per day">
             <option value="24">24 (1h)</option>
             <option value="48">48 (30m)</option>
             <option value="96">96 (15m)</option>
             <option value="144">144 (10m)</option>
             <option value="288">288 (5m)</option>
+            <option value="360">360 (4m)</option>
+            <option value="480">480 (3m)</option>
+            <option value="720">720 (2m)</option>
+            <option value="1440">1440 (1m)</option>
           </select>
           <select class="heatmap-series-select" id="heatmap-xrange-${id}" data-action="heatmap-xrange" data-id="${id}" title="X range">
             <option value="auto">Auto</option>
@@ -2027,8 +2037,27 @@
 
   function normalizeHeatmapCells(value) {
     const n = Number(value);
-    if (n === 48 || n === 96 || n === 144 || n === 288) return n;
+    if (n === 48 || n === 96 || n === 144 || n === 288 || n === 360 || n === 480 || n === 720 || n === 1440) return n;
     return 24;
+  }
+
+  function normalizeHeatmapClamp(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    if (mode === '50hz_200' || mode === '50hz_100' || mode === '50hz_50') return mode;
+    return 'normal';
+  }
+
+  function clampHeatmapInputValue(value, mode) {
+    const v = Number(value);
+    if (!Number.isFinite(v)) return null;
+    const normalized = normalizeHeatmapClamp(mode);
+    if (normalized === 'normal') return v;
+    const threshold = normalized === '50hz_50' ? 0.05 : (normalized === '50hz_100' ? 0.1 : 0.2);
+    const low = 50.0 - threshold;
+    const high = 50.0 + threshold;
+    if (v < low) return low;
+    if (v > high) return high;
+    return v;
   }
 
   function normalizeHeatmapXRange(value) {
@@ -2106,6 +2135,8 @@
       const fetchGranularityMs = (() => {
         if (cellsPerDay <= 24) return 3600000;
         if (cellsPerDay <= 96) return 900000;
+        if (cellsPerDay <= 288) return 300000;
+        if (cellsPerDay <= 1440) return 60000;
         return 300000;
       })();
       const fetchGranularity = granularityLabelShort(fetchGranularityMs);
@@ -2173,7 +2204,8 @@
       for (const p of points) {
         if (!p || typeof p !== 'object') continue;
         const bucketStart = Number(Object.prototype.hasOwnProperty.call(p, 'start') ? p.start : p.timestamp);
-        const value = Number(Object.prototype.hasOwnProperty.call(p, 'avg') ? p.avg : p.value);
+        const valueRaw = Number(Object.prototype.hasOwnProperty.call(p, 'avg') ? p.avg : p.value);
+        const value = clampHeatmapInputValue(valueRaw, cfg.heatmapClamp);
         if (!Number.isFinite(bucketStart) || !Number.isFinite(value)) continue;
         if (bucketStart < visibleStart || bucketStart >= visibleEnd) continue;
         const dayStartMs = useDst
@@ -3677,6 +3709,7 @@
       heatmapScale: normalizeHeatmapScale(
         options.heatmapScale || (options.logScale ? 'log' : 'normal')
       ),
+      heatmapClamp: normalizeHeatmapClamp(options.heatmapClamp),
       cellsPerDay: normalizeHeatmapCells(options.cellsPerDay),
       xRangeMode: normalizeHeatmapXRange(options.xRangeMode),
       useDst: options.useDst !== false,
@@ -3699,6 +3732,10 @@
       scaleSelect.value = normalizeHeatmapScale(
         options.heatmapScale || (options.logScale ? 'log' : 'normal')
       );
+    }
+    const clampSelect = document.getElementById(`heatmap-clamp-${id}`);
+    if (clampSelect instanceof HTMLSelectElement) {
+      clampSelect.value = normalizeHeatmapClamp(options.heatmapClamp);
     }
     const cellsSelect = document.getElementById(`heatmap-cells-${id}`);
     if (cellsSelect instanceof HTMLSelectElement) {
@@ -3962,6 +3999,7 @@
           activeSeries: typeof c.activeSeries === 'string' ? c.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
+          heatmapClamp: normalizeHeatmapClamp(c.heatmapClamp),
           cellsPerDay: normalizeHeatmapCells(c.cellsPerDay),
           xRangeMode: normalizeHeatmapXRange(c.xRangeMode),
           useDst: c.useDst !== false,
@@ -4098,6 +4136,7 @@
           activeSeries: typeof ch.activeSeries === 'string' ? ch.activeSeries : '',
           heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'hotmetal'),
           heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
+          heatmapClamp: normalizeHeatmapClamp(ch.heatmapClamp),
           cellsPerDay: normalizeHeatmapCells(ch.cellsPerDay),
           xRangeMode: normalizeHeatmapXRange(ch.xRangeMode),
           useDst: ch.useDst !== false,
@@ -4838,6 +4877,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'heatmap') return;
       panel.heatmapScale = normalizeHeatmapScale(target.value || 'normal');
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'heatmap-clamp') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.heatmapClamp = normalizeHeatmapClamp(target.value || 'normal');
       refreshHeatmap(id).catch((err) => console.error(err));
       return;
     }
