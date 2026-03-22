@@ -1852,6 +1852,10 @@
             <input type="checkbox" id="heatmap-dst-${id}" data-action="heatmap-dst" data-id="${id}" checked />
             <span>DST</span>
           </label>
+          <label class="panel-check" title="Fill missing cells from same time on previous day">
+            <input type="checkbox" id="heatmap-mask-gaps-${id}" data-action="heatmap-mask-gaps" data-id="${id}" />
+            <span>Mask Gaps</span>
+          </label>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="settings-gadget" data-action="heatmap-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -2229,10 +2233,25 @@
         slotSums.set(key, Number(slotSums.get(key) || 0) + value);
         slotCounts.set(key, Number(slotCounts.get(key) || 0) + 1);
       }
+      const cellValues = new Map();
       slotSums.forEach((sum, key) => {
         const count = Number(slotCounts.get(key) || 0);
         if (count <= 0) return;
-        const value = sum / count;
+        cellValues.set(key, sum / count);
+      });
+      if (cfg.maskGaps) {
+        for (let x = 7; x < dayColumns; x += 1) {
+          for (let y = 0; y < cellsPerDay; y += 1) {
+            const key = `${x}:${y}`;
+            if (cellValues.has(key)) continue;
+            const prevKey = `${x - 7}:${y}`;
+            if (cellValues.has(prevKey)) {
+              cellValues.set(key, cellValues.get(prevKey));
+            }
+          }
+        }
+      }
+      cellValues.forEach((value, key) => {
         const colorValue = transformHeatmapValue(value, cfg.heatmapScale);
         values.set(key, {
           realValue: roundNumeric(value),
@@ -3713,6 +3732,7 @@
       cellsPerDay: normalizeHeatmapCells(options.cellsPerDay),
       xRangeMode: normalizeHeatmapXRange(options.xRangeMode),
       useDst: options.useDst !== false,
+      maskGaps: options.maskGaps === true,
       cellGap: (() => {
         const raw = Number(options.cellGap);
         if (!Number.isFinite(raw)) return 1;
@@ -3748,6 +3768,10 @@
     const dstInput = document.getElementById(`heatmap-dst-${id}`);
     if (dstInput instanceof HTMLInputElement) {
       dstInput.checked = options.useDst !== false;
+    }
+    const maskInput = document.getElementById(`heatmap-mask-gaps-${id}`);
+    if (maskInput instanceof HTMLInputElement) {
+      maskInput.checked = options.maskGaps === true;
     }
     appendConsoleLine(`heatmap ${id} created series=${initialSeries.length}`);
     updateTitle(id);
@@ -4003,6 +4027,7 @@
           cellsPerDay: normalizeHeatmapCells(c.cellsPerDay),
           xRangeMode: normalizeHeatmapXRange(c.xRangeMode),
           useDst: c.useDst !== false,
+          maskGaps: c.maskGaps === true,
           cellGap: (() => {
             const raw = Number(c.cellGap);
             if (!Number.isFinite(raw)) return 1;
@@ -4140,6 +4165,7 @@
           cellsPerDay: normalizeHeatmapCells(ch.cellsPerDay),
           xRangeMode: normalizeHeatmapXRange(ch.xRangeMode),
           useDst: ch.useDst !== false,
+          maskGaps: ch.maskGaps === true,
           cellGap: (() => {
             const raw = Number(ch.cellGap);
             if (!Number.isFinite(raw)) return 1;
@@ -4913,6 +4939,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'heatmap') return;
       panel.useDst = !!target.checked;
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'heatmap-mask-gaps') {
+      if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.maskGaps = !!target.checked;
       refreshHeatmap(id).catch((err) => console.error(err));
       return;
     }
