@@ -2109,17 +2109,46 @@
         return 300000;
       })();
       const fetchGranularity = granularityLabelShort(fetchGranularityMs);
-      const rightDayStartMs = useDst
-        ? (() => {
-          const rightDay = new Date(end);
-          rightDay.setHours(0, 0, 0, 0);
-          return rightDay.getTime();
-        })()
-        : fixedOffsetDayStartUtcMs(Number(end), fixedOffsetMinutes);
       const fixedYears = heatmapXRangeYears(cfg.xRangeMode);
       const dayColumns = fixedYears === null ? autoDayColumns : Math.max(1, Math.round(fixedYears * 365));
-      const visibleStart = rightDayStartMs - (dayColumns - 1) * dayMs;
-      const visibleEnd = rightDayStartMs + dayMs;
+      const dayStarts = [];
+      const dayIndexByKey = new Map();
+      const xLabels = [];
+      const localDayKey = (tsMs) => {
+        const d = new Date(tsMs);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      };
+      let visibleStart;
+      let visibleEnd;
+      if (useDst) {
+        const rightDay = new Date(end);
+        rightDay.setHours(0, 0, 0, 0);
+        for (let back = dayColumns - 1; back >= 0; back -= 1) {
+          const d = new Date(rightDay);
+          d.setDate(d.getDate() - back);
+          d.setHours(0, 0, 0, 0);
+          const dayStartMs = d.getTime();
+          dayStarts.push(dayStartMs);
+          dayIndexByKey.set(localDayKey(dayStartMs), dayStarts.length - 1);
+          xLabels.push(`${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+        }
+        visibleStart = dayStarts[0];
+        const nextDay = new Date(rightDay);
+        nextDay.setDate(nextDay.getDate() + 1);
+        nextDay.setHours(0, 0, 0, 0);
+        visibleEnd = nextDay.getTime();
+      } else {
+        const rightDayStartMs = fixedOffsetDayStartUtcMs(Number(end), fixedOffsetMinutes);
+        visibleStart = rightDayStartMs - (dayColumns - 1) * dayMs;
+        visibleEnd = rightDayStartMs + dayMs;
+        for (let i = 0; i < dayColumns; i += 1) {
+          const dayStartMs = visibleStart + i * dayMs;
+          dayStarts.push(dayStartMs);
+          const d = new Date(fixedOffsetLocalMs(dayStartMs, fixedOffsetMinutes));
+          dayIndexByKey.set(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`, i);
+          xLabels.push(`${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
+        }
+      }
       const q = new URLSearchParams({
         start: String(visibleStart),
         end: String(visibleEnd),
@@ -2154,11 +2183,16 @@
             return d.getTime();
           })()
           : fixedOffsetDayStartUtcMs(bucketStart, fixedOffsetMinutes);
-        const x = Math.floor((dayStartMs - visibleStart) / dayMs);
+        const x = useDst
+          ? dayIndexByKey.get(localDayKey(dayStartMs))
+          : dayIndexByKey.get((() => {
+            const d = new Date(fixedOffsetLocalMs(dayStartMs, fixedOffsetMinutes));
+            return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+          })());
         const y = useDst
-          ? Math.floor((bucketStart - dayStartMs) / cellMs)
+          ? Math.floor(((new Date(bucketStart).getHours() * 60) + new Date(bucketStart).getMinutes()) / (1440 / cellsPerDay))
           : Math.floor((fixedOffsetLocalMs(bucketStart, fixedOffsetMinutes) - fixedOffsetLocalMs(dayStartMs, fixedOffsetMinutes)) / cellMs);
-        if (x < 0 || x >= dayColumns || y < 0 || y >= cellsPerDay) continue;
+        if (!Number.isFinite(x) || x < 0 || x >= dayColumns || y < 0 || y >= cellsPerDay) continue;
         const key = `${x}:${y}`;
         slotSums.set(key, Number(slotSums.get(key) || 0) + value);
         slotCounts.set(key, Number(slotCounts.get(key) || 0) + 1);
@@ -2180,17 +2214,6 @@
         }
       });
 
-      const xLabels = [];
-      for (let i = 0; i < dayColumns; i += 1) {
-        const dayStartMs = visibleStart + i * dayMs;
-        if (useDst) {
-          const d = new Date(dayStartMs);
-          xLabels.push(`${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
-        } else {
-          const d = new Date(fixedOffsetLocalMs(dayStartMs, fixedOffsetMinutes));
-          xLabels.push(`${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
-        }
-      }
       const yLabels = Array.from({ length: cellsPerDay }, (_, i) => {
         const hour = Math.floor(i * cellMs / 3600000);
         const minute = Math.floor((i * cellMs % 3600000) / 60000);
