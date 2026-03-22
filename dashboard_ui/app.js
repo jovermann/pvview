@@ -1838,6 +1838,10 @@
             <option value="9y">9y</option>
             <option value="10y">10y</option>
           </select>
+          <label class="panel-check" title="Apply daylight saving time transitions">
+            <input type="checkbox" id="heatmap-dst-${id}" data-action="heatmap-dst" data-id="${id}" checked />
+            <span>DST</span>
+          </label>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="settings-gadget" data-action="heatmap-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -2041,6 +2045,17 @@
     return Number.isFinite(value) && value > 0 ? value : null;
   }
 
+  function fixedOffsetLocalMs(tsMs, offsetMinutes) {
+    return Number(tsMs) - Number(offsetMinutes) * 60000;
+  }
+
+  function fixedOffsetDayStartUtcMs(tsMs, offsetMinutes) {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const localMs = fixedOffsetLocalMs(tsMs, offsetMinutes);
+    const localDayStartMs = Math.floor(localMs / dayMs) * dayMs;
+    return localDayStartMs + Number(offsetMinutes) * 60000;
+  }
+
   function transformHeatmapValue(value, scaleMode) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
     switch (normalizeHeatmapScale(scaleMode)) {
@@ -2077,6 +2092,8 @@
       }
       const dayMs = 24 * 60 * 60 * 1000;
       const cellsPerDay = normalizeHeatmapCells(cfg.cellsPerDay);
+      const useDst = cfg.useDst !== false;
+      const fixedOffsetMinutes = new Date(Number(end)).getTimezoneOffset();
       const gridLeft = 50;
       const gridRight = 50;
       const gridTop = 8;
@@ -2092,12 +2109,17 @@
         return 300000;
       })();
       const fetchGranularity = granularityLabelShort(fetchGranularityMs);
-      const rightDay = new Date(end);
-      rightDay.setHours(0, 0, 0, 0);
+      const rightDayStartMs = useDst
+        ? (() => {
+          const rightDay = new Date(end);
+          rightDay.setHours(0, 0, 0, 0);
+          return rightDay.getTime();
+        })()
+        : fixedOffsetDayStartUtcMs(Number(end), fixedOffsetMinutes);
       const fixedYears = heatmapXRangeYears(cfg.xRangeMode);
       const dayColumns = fixedYears === null ? autoDayColumns : Math.max(1, Math.round(fixedYears * 365));
-      const visibleStart = rightDay.getTime() - (dayColumns - 1) * dayMs;
-      const visibleEnd = rightDay.getTime() + dayMs;
+      const visibleStart = rightDayStartMs - (dayColumns - 1) * dayMs;
+      const visibleEnd = rightDayStartMs + dayMs;
       const q = new URLSearchParams({
         start: String(visibleStart),
         end: String(visibleEnd),
@@ -2125,11 +2147,17 @@
         const value = Number(Object.prototype.hasOwnProperty.call(p, 'avg') ? p.avg : p.value);
         if (!Number.isFinite(bucketStart) || !Number.isFinite(value)) continue;
         if (bucketStart < visibleStart || bucketStart >= visibleEnd) continue;
-        const d = new Date(bucketStart);
-        const dayStart = new Date(d);
-        dayStart.setHours(0, 0, 0, 0);
-        const x = Math.floor((dayStart.getTime() - visibleStart) / dayMs);
-        const y = Math.floor((bucketStart - dayStart.getTime()) / cellMs);
+        const dayStartMs = useDst
+          ? (() => {
+            const d = new Date(bucketStart);
+            d.setHours(0, 0, 0, 0);
+            return d.getTime();
+          })()
+          : fixedOffsetDayStartUtcMs(bucketStart, fixedOffsetMinutes);
+        const x = Math.floor((dayStartMs - visibleStart) / dayMs);
+        const y = useDst
+          ? Math.floor((bucketStart - dayStartMs) / cellMs)
+          : Math.floor((fixedOffsetLocalMs(bucketStart, fixedOffsetMinutes) - fixedOffsetLocalMs(dayStartMs, fixedOffsetMinutes)) / cellMs);
         if (x < 0 || x >= dayColumns || y < 0 || y >= cellsPerDay) continue;
         const key = `${x}:${y}`;
         slotSums.set(key, Number(slotSums.get(key) || 0) + value);
@@ -2154,8 +2182,14 @@
 
       const xLabels = [];
       for (let i = 0; i < dayColumns; i += 1) {
-        const d = new Date(visibleStart + i * dayMs);
-        xLabels.push(`${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+        const dayStartMs = visibleStart + i * dayMs;
+        if (useDst) {
+          const d = new Date(dayStartMs);
+          xLabels.push(`${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+        } else {
+          const d = new Date(fixedOffsetLocalMs(dayStartMs, fixedOffsetMinutes));
+          xLabels.push(`${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
+        }
       }
       const yLabels = Array.from({ length: cellsPerDay }, (_, i) => {
         const hour = Math.floor(i * cellMs / 3600000);
@@ -3622,6 +3656,7 @@
       ),
       cellsPerDay: normalizeHeatmapCells(options.cellsPerDay),
       xRangeMode: normalizeHeatmapXRange(options.xRangeMode),
+      useDst: options.useDst !== false,
       cellGap: (() => {
         const raw = Number(options.cellGap);
         if (!Number.isFinite(raw)) return 1;
@@ -3649,6 +3684,10 @@
     const xrangeSelect = document.getElementById(`heatmap-xrange-${id}`);
     if (xrangeSelect instanceof HTMLSelectElement) {
       xrangeSelect.value = normalizeHeatmapXRange(options.xRangeMode);
+    }
+    const dstInput = document.getElementById(`heatmap-dst-${id}`);
+    if (dstInput instanceof HTMLInputElement) {
+      dstInput.checked = options.useDst !== false;
     }
     appendConsoleLine(`heatmap ${id} created series=${initialSeries.length}`);
     updateTitle(id);
@@ -3902,6 +3941,7 @@
           heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
           cellsPerDay: normalizeHeatmapCells(c.cellsPerDay),
           xRangeMode: normalizeHeatmapXRange(c.xRangeMode),
+          useDst: c.useDst !== false,
           cellGap: (() => {
             const raw = Number(c.cellGap);
             if (!Number.isFinite(raw)) return 1;
@@ -4037,6 +4077,7 @@
           heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
           cellsPerDay: normalizeHeatmapCells(ch.cellsPerDay),
           xRangeMode: normalizeHeatmapXRange(ch.xRangeMode),
+          useDst: ch.useDst !== false,
           cellGap: (() => {
             const raw = Number(ch.cellGap);
             if (!Number.isFinite(raw)) return 1;
@@ -4792,6 +4833,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'heatmap') return;
       panel.xRangeMode = normalizeHeatmapXRange(target.value || 'auto');
+      refreshHeatmap(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'heatmap-dst') {
+      if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'heatmap') return;
+      panel.useDst = !!target.checked;
       refreshHeatmap(id).catch((err) => console.error(err));
       return;
     }
