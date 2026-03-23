@@ -2032,7 +2032,7 @@
   function normalizeHeatmapPalette(value) {
     const id = String(value || '').trim().toLowerCase();
     if (heatmapPalettes.some((p) => p.id === id)) return id;
-    return 'hotmetal';
+    return 'plasma';
   }
 
   function heatmapPaletteColors(id) {
@@ -2247,13 +2247,23 @@
         cellValues.set(key, sum / count);
       });
       if (cfg.maskGaps) {
-        for (let x = 7; x < dayColumns; x += 1) {
+        const baseValues = new Map(cellValues);
+        for (let x = 14; x < (dayColumns - 1); x += 1) {
           for (let y = 0; y < cellsPerDay; y += 1) {
             const key = `${x}:${y}`;
             if (cellValues.has(key)) continue;
-            const prevKey = `${x - 7}:${y}`;
-            if (cellValues.has(prevKey)) {
-              cellValues.set(key, cellValues.get(prevKey));
+            const key17 = `${x - 17}:${y}`;
+            const key14 = `${x - 14}:${y}`;
+            const v17 = Number(baseValues.get(key17));
+            const v14 = Number(baseValues.get(key14));
+            const has17 = Number.isFinite(v17);
+            const has14 = Number.isFinite(v14);
+            if (has17 && has14) {
+              cellValues.set(key, (v17 + v14) / 2);
+            } else if (has17) {
+              cellValues.set(key, v17);
+            } else if (has14) {
+              cellValues.set(key, v14);
             }
           }
         }
@@ -3735,7 +3745,7 @@
       activeSeries: (typeof options.activeSeries === 'string' && initialSeries.includes(options.activeSeries))
         ? options.activeSeries
         : (initialSeries[0] || ''),
-      heatmapPalette: normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'hotmetal'),
+      heatmapPalette: normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'plasma'),
       heatmapScale: normalizeHeatmapScale(
         options.heatmapScale || (options.logScale ? 'log' : 'normal')
       ),
@@ -3756,7 +3766,7 @@
     updateHeatmapSeriesSelect(id);
     const paletteSelect = document.getElementById(`heatmap-palette-${id}`);
     if (paletteSelect instanceof HTMLSelectElement) {
-      paletteSelect.value = normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'hotmetal');
+      paletteSelect.value = normalizeHeatmapPalette(options.heatmapPalette || options.heatmapMode || 'plasma');
     }
     const scaleSelect = document.getElementById(`heatmap-scale-${id}`);
     if (scaleSelect instanceof HTMLSelectElement) {
@@ -4033,7 +4043,7 @@
           h: Number(nodeInfo.h || 4),
           series: Array.isArray(c.series) ? [...c.series] : [],
           activeSeries: typeof c.activeSeries === 'string' ? c.activeSeries : '',
-          heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'hotmetal'),
+          heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'plasma'),
           heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
           heatmapClamp: normalizeHeatmapClamp(c.heatmapClamp),
           cellsPerDay: normalizeHeatmapCells(c.cellsPerDay),
@@ -4172,7 +4182,7 @@
           w: Number(ch.w) || 6,
           h: Number(ch.h) || 4,
           activeSeries: typeof ch.activeSeries === 'string' ? ch.activeSeries : '',
-          heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'hotmetal'),
+          heatmapPalette: normalizeHeatmapPalette(ch.heatmapPalette || ch.heatmapMode || 'plasma'),
           heatmapScale: normalizeHeatmapScale(ch.heatmapScale || (ch.logScale ? 'log' : 'normal')),
           heatmapClamp: normalizeHeatmapClamp(ch.heatmapClamp),
           cellsPerDay: normalizeHeatmapCells(ch.cellsPerDay),
@@ -4909,7 +4919,7 @@
       const id = String(target.dataset.id || '');
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'heatmap') return;
-      panel.heatmapPalette = normalizeHeatmapPalette(target.value || 'hotmetal');
+      panel.heatmapPalette = normalizeHeatmapPalette(target.value || 'plasma');
       refreshHeatmap(id).catch((err) => console.error(err));
       return;
     }
