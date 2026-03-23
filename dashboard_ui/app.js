@@ -1816,16 +1816,16 @@
             ${heatmapPalettes.map((p) => `<option value="${p.id}">${htmlEscape(p.label)}</option>`).join('')}
           </select>
           <select class="heatmap-series-select" id="heatmap-scale-${id}" data-action="heatmap-scale" data-id="${id}" title="Value scale">
-            <option value="normal">Normal</option>
+            <option value="normal">Plain</option>
             <option value="sqrt">Sqr</option>
             <option value="cbrt">Cube</option>
             <option value="log">Log</option>
           </select>
           <select class="heatmap-series-select" id="heatmap-clamp-${id}" data-action="heatmap-clamp" data-id="${id}" title="Input clamp">
-            <option value="normal">Normal</option>
-            <option value="50hz_200">50 Hz (+/-200 mHz)</option>
-            <option value="50hz_100">50 Hz (+/-100 mHz)</option>
-            <option value="50hz_50">50 Hz (+/-50 mHz)</option>
+            <option value="normal">Auto</option>
+            <option value="50hz_50">50.05 Hz</option>
+            <option value="50hz_100">50.1 Hz</option>
+            <option value="50hz_200">50.2 Hz</option>
           </select>
           <select class="heatmap-series-select" id="heatmap-cells-${id}" data-action="heatmap-cells" data-id="${id}" title="Rows per day">
             <option value="24">24 (1h)</option>
@@ -1840,6 +1840,10 @@
           </select>
           <select class="heatmap-series-select" id="heatmap-xrange-${id}" data-action="heatmap-xrange" data-id="${id}" title="X range">
             <option value="auto">Auto</option>
+            <option value="30d">30d</option>
+            <option value="60d">60d</option>
+            <option value="90d">90d</option>
+            <option value="180d">180d</option>
             <option value="1y">1y</option>
             <option value="1.5y">1.5y</option>
             <option value="2y">2y</option>
@@ -2073,16 +2077,20 @@
 
   function normalizeHeatmapXRange(value) {
     const mode = String(value || '').trim().toLowerCase();
-    const allowed = new Set(['auto', '1y', '1.5y', '2y', '2.5y', '3y', '3.5y', '4y', '4.5y', '5y', '6y', '7y', '8y', '9y', '10y']);
+    const allowed = new Set(['auto', '30d', '60d', '90d', '180d', '1y', '1.5y', '2y', '2.5y', '3y', '3.5y', '4y', '4.5y', '5y', '6y', '7y', '8y', '9y', '10y']);
     if (allowed.has(mode)) return mode;
     return 'auto';
   }
 
-  function heatmapXRangeYears(mode) {
+  function heatmapXRangeDays(mode) {
     const normalized = normalizeHeatmapXRange(mode);
     if (normalized === 'auto') return null;
+    const suffix = normalized.slice(-1);
     const value = Number(normalized.slice(0, -1));
-    return Number.isFinite(value) && value > 0 ? value : null;
+    if (!Number.isFinite(value) || value <= 0) return null;
+    if (suffix === 'd') return Math.round(value);
+    if (suffix === 'y') return Math.round(value * 365);
+    return null;
   }
 
   function fixedOffsetLocalMs(tsMs, offsetMinutes) {
@@ -2151,8 +2159,8 @@
         return 300000;
       })();
       const fetchGranularity = granularityLabelShort(fetchGranularityMs);
-      const fixedYears = heatmapXRangeYears(cfg.xRangeMode);
-      const dayColumns = fixedYears === null ? autoDayColumns : Math.max(1, Math.round(fixedYears * 365));
+      const fixedDays = heatmapXRangeDays(cfg.xRangeMode);
+      const dayColumns = fixedDays === null ? autoDayColumns : Math.max(1, fixedDays);
       const dayStarts = [];
       const dayIndexByKey = new Map();
       const xLabels = [];
