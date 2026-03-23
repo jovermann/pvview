@@ -206,7 +206,9 @@ main { padding: 2px; }
 .panel-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  row-gap: 4px;
   padding: 5px 7px;
   border-bottom: 1px solid var(--border);
   background: #1a202b;
@@ -224,6 +226,7 @@ main { padding: 2px; }
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .panel-title-meta {
@@ -255,7 +258,15 @@ main { padding: 2px; }
   to { transform: rotate(360deg); }
 }
 
-.panel-actions { display: flex; gap: 6px; }
+.panel-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+  flex: 0 1 auto;
+  margin-left: auto;
+}
 
 .panel-check {
   display: inline-flex;
