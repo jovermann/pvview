@@ -3245,6 +3245,7 @@
     const hideMaxByLegendName = new Map();
     const pointsByLegendName = new Map();
     const granularityModeByLegendName = new Map();
+    const curFreshWindowMsByLegendName = new Map();
     for (const s of seriesResponses) {
       let maxValue = s.legendMax;
       let curValue;
@@ -3296,6 +3297,13 @@
       const nextGranularityMode = Number.isFinite(s.granularityMs) ? granularityLabelShort(s.granularityMs) : 'raw';
       if (!existingGranularityMode || existingGranularityMode === 'raw') {
         granularityModeByLegendName.set(s.displayName, nextGranularityMode);
+      }
+      const curFreshWindowMs = Number.isFinite(s.granularityMs) && s.granularityMs > 0
+        ? Math.max(60_000, Math.round(s.granularityMs * 2))
+        : 60_000;
+      const prevCurFreshWindowMs = Number(curFreshWindowMsByLegendName.get(s.displayName) || 0);
+      if (curFreshWindowMs > prevCurFreshWindowMs) {
+        curFreshWindowMsByLegendName.set(s.displayName, curFreshWindowMs);
       }
     }
     const displayNameToSeries = new Map();
@@ -3375,7 +3383,8 @@
           const pointsCount = Number(pointsByLegendName.get(name) || 0);
           const granularityMode = granularityModeByLegendName.get(name) || 'raw';
           const pointsText = `${pointsCount} pts, ${granularityMode}`;
-          const curFresh = curTs !== undefined && (nowMs() - curTs) <= 60_000;
+          const curFreshWindowMs = Number(curFreshWindowMsByLegendName.get(name) || 60_000);
+          const curFresh = curTs !== undefined && (nowMs() - curTs) <= curFreshWindowMs;
           const addDebug = (base) => showMinPointsDebug ? `${base}, ${pointsText}` : base;
           if (hideMax) {
             if (curValue === undefined || !curFresh) return showMinPointsDebug ? `${name} (${pointsText})` : name;
