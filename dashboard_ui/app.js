@@ -85,6 +85,7 @@
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
   let activeColumnsSelection = null;
+  let activeColumnsDraft = null;
   let activeSettingsChartId = null;
   let chartSettingsSeriesDraft = [];
   let chartSettingsSeriesColorDraft = {};
@@ -4710,17 +4711,28 @@
     const defaults = (Array.isArray(c.columns) && c.columns.length)
       ? c.columns
       : [first.suffix];
+    const defaultsSet = new Set(defaults.map((s) => String(s)));
+    const orderedDefaults = defaults
+      .map((s) => String(s))
+      .filter((s) => siblingSuffixes.includes(s));
+    const remaining = siblingSuffixes.filter((s) => !defaultsSet.has(s));
+    activeColumnsDraft = [...orderedDefaults, ...remaining];
     activeColumnsSelection = new Set(defaults.map((s) => String(s)));
 
     function renderColumns(filter = '') {
       const f = String(filter || '').toLowerCase();
-      const filtered = siblingSuffixes.filter((s) => s.toLowerCase().includes(f));
-      columnsList.innerHTML = filtered.map((suffix) => `
-        <label class="series-item">
+      const filtered = (Array.isArray(activeColumnsDraft) ? activeColumnsDraft : siblingSuffixes)
+        .filter((s) => s.toLowerCase().includes(f));
+      columnsList.innerHTML = filtered.map((suffix) => {
+        const idx = Array.isArray(activeColumnsDraft) ? activeColumnsDraft.indexOf(suffix) : -1;
+        return `
+        <div class="series-item" data-reorder-index="${idx}" draggable="true">
+          <span style="width:2ch;text-align:right;color:#90a0b3">${idx >= 0 ? idx + 1 : ''}</span>
           <input type="checkbox" value="${suffix}" ${activeColumnsSelection.has(suffix) ? 'checked' : ''} />
-          <span>${suffix}</span>
-        </label>
-      `).join('');
+          <span style="flex:1;min-width:0">${suffix}</span>
+        </div>
+      `;
+      }).join('');
     }
 
     renderColumns();
@@ -5325,22 +5337,26 @@
       statColumnsDialog.close();
       return;
     }
-    c.columns = Array.from(activeColumnsSelection || []);
+    const ordered = Array.isArray(activeColumnsDraft) ? activeColumnsDraft : [];
+    c.columns = ordered.filter((name) => activeColumnsSelection && activeColumnsSelection.has(name));
     appendConsoleLine(`stat ${activeColumnsStatId} columns updated count=${c.columns.length}`);
     refreshStat(activeColumnsStatId).catch((err) => console.error(err));
     activeColumnsSelection = null;
+    activeColumnsDraft = null;
     activeColumnsStatId = null;
     statColumnsDialog.close();
   });
 
   document.getElementById('cancelStatColumns').addEventListener('click', () => {
     activeColumnsSelection = null;
+    activeColumnsDraft = null;
     activeColumnsStatId = null;
     statColumnsDialog.close();
   });
 
   statColumnsDialog.addEventListener('close', () => {
     activeColumnsSelection = null;
+    activeColumnsDraft = null;
     activeColumnsStatId = null;
   });
 
@@ -5362,6 +5378,14 @@
   attachRowReorderDnD(barSettingsSeriesList, (fromIndex, toIndex) => {
     if (!moveArrayItem(barSettingsSeriesDraft, fromIndex, toIndex)) return;
     renderBarSettingsSeriesList();
+  });
+
+  attachRowReorderDnD(columnsList, (fromIndex, toIndex) => {
+    if (!Array.isArray(activeColumnsDraft)) return;
+    if (!moveArrayItem(activeColumnsDraft, fromIndex, toIndex)) return;
+    if (columnsSearch && typeof columnsSearch.oninput === 'function') {
+      columnsSearch.oninput();
+    }
   });
 
   attachRowReorderDnD(dashboardManageList, (fromIndex, toIndex) => {
