@@ -36,6 +36,10 @@ def _tsdb_filename_for_utc_day(day: datetime.date) -> str:
     return f"data_{day.isoformat()}.tsdb"
 
 
+def _mqttlog_tsdb_filename_for_utc_day(day: datetime.date) -> str:
+    return f"mqttlog_{day.isoformat()}.tsdb"
+
+
 def _value_from_mqtt_payload(payload: bytes) -> Any:
     try:
         text = payload.decode("utf-8-sig").strip()
@@ -69,6 +73,7 @@ def _quantize_timestamp_ms(timestamp_ms: int, quantize_timestamps_ms: int) -> in
 def collect_to_tsdb(
     server: Optional[str],
     subscriptions: list[str],
+    mqttlog_subscriptions: list[str],
     verbose: int,
     quantize_timestamps_ms: int = 0,
     data_dir: str = ".",
@@ -83,15 +88,15 @@ def collect_to_tsdb(
     except Exception:
         http_poll_interval_ms = 5000
 
-    if not subscriptions and not http_urls:
-        print("--collect requires at least one topic via --topics or config")
+    if not subscriptions and not mqttlog_subscriptions and not http_urls:
+        print("--collect requires at least one topic via --topics/--mqttlog-topics or config")
         return 2
 
     mqtt = None
     client = None
     host = ""
     port = 0
-    if subscriptions:
+    if subscriptions or mqttlog_subscriptions:
         if not server:
             print("MQTT server not specified. Use --mqtt-server or set mqtt_server in config.")
             return 2
@@ -106,8 +111,10 @@ def collect_to_tsdb(
             return 2
 
     pending_events: list[tuple[int, str, Any]] = []
+    pending_mqttlog_events: list[tuple[int, str, Any]] = []
     lock = threading.Lock()
     appenders: dict[datetime.date, TimeSeriesDbAppender] = {}
+    mqttlog_appenders: dict[datetime.date, TimeSeriesDbAppender] = {}
     os.makedirs(data_dir, exist_ok=True)
     downsample_queue: "queue_mod.Queue[Optional[tuple[datetime.date, str]]]" = queue_mod.Queue()
     downsample_pending: set[datetime.date] = set()
@@ -147,6 +154,35 @@ def collect_to_tsdb(
     worker = threading.Thread(target=downsample_worker, name="tsdb-downsample", daemon=True)
     worker.start()
 
+    subscribe_topics: list[str] = []
+    for topic in list(subscriptions) + list(mqttlog_subscriptions):
+        topic = str(topic).strip()
+        if topic and topic not in subscribe_topics:
+            subscribe_topics.append(topic)
+
+    def topic_matches_filter(topic_filter: str, topic_name: str) -> bool:
+        f_parts = str(topic_filter).split("/")
+        t_parts = str(topic_name).split("/")
+        fi = 0
+        ti = 0
+        while fi < len(f_parts):
+            part = f_parts[fi]
+            if part == "#":
+                return fi == len(f_parts) - 1
+            if ti >= len(t_parts):
+                return False
+            if part != "+" and part != t_parts[ti]:
+                return False
+            fi += 1
+            ti += 1
+        return ti == len(t_parts)
+
+    def matches_any(filters: list[str], topic_name: str) -> bool:
+        for filt in filters:
+            if topic_matches_filter(str(filt), topic_name):
+                return True
+        return False
+
     if mqtt is not None:
         client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 
@@ -160,7 +196,7 @@ def collect_to_tsdb(
                 return
             if verbose:
                 print(f"connected to MQTT server {host}:{port}")
-            for topic in subscriptions:
+            for topic in subscribe_topics:
                 client.subscribe(topic)
                 if verbose:
                     print(f"subscribed: {topic}")
@@ -172,7 +208,10 @@ def collect_to_tsdb(
             if verbose >= 2:
                 print(f"received: {msg.topic}={value_for_log}")
             with lock:
-                pending_events.append((ts_ms, msg.topic, value))
+                if matches_any(subscriptions, msg.topic):
+                    pending_events.append((ts_ms, msg.topic, value))
+                if matches_any(mqttlog_subscriptions, msg.topic):
+                    pending_mqttlog_events.append((ts_ms, msg.topic, value))
 
         client.on_connect = on_connect
         client.on_message = on_message
@@ -182,10 +221,12 @@ def collect_to_tsdb(
             print(f"Unable to connect to MQTT server {host}:{port}: {exc}")
             return 2
 
-    def flush_batch(batch: list[tuple[int, str, Any]]) -> None:
+    def flush_batch(batch: list[tuple[int, str, Any]], mqttlog_batch: list[tuple[int, str, Any]]) -> None:
         if batch:
             # MQTT callbacks and HTTP poll completion can race when enqueuing; sort to preserve timestamp order.
             batch.sort(key=lambda item: int(item[0]))
+        if mqttlog_batch:
+            mqttlog_batch.sort(key=lambda item: int(item[0]))
         by_day: dict[datetime.date, list[tuple[int, str, Any]]] = {}
         for ts_ms, topic, value in batch:
             day = datetime.datetime.fromtimestamp(ts_ms / 1000.0, tz=datetime.timezone.utc).date()
@@ -205,6 +246,21 @@ def collect_to_tsdb(
                     schedule_downsample(day)
         if verbose and batch:
             print(f"flushed {len(batch)} events")
+
+        by_day_mqttlog: dict[datetime.date, list[tuple[int, str, Any]]] = {}
+        for ts_ms, topic, value in mqttlog_batch:
+            day = datetime.datetime.fromtimestamp(ts_ms / 1000.0, tz=datetime.timezone.utc).date()
+            by_day_mqttlog.setdefault(day, []).append((ts_ms, topic, value))
+        for day, day_events in by_day_mqttlog.items():
+            if day not in mqttlog_appenders:
+                path = os.path.join(data_dir, _mqttlog_tsdb_filename_for_utc_day(day))
+                if verbose:
+                    action = "opening existing" if os.path.exists(path) else "creating new"
+                    print(f"{action} TSDB file: {path}")
+                mqttlog_appenders[day] = TimeSeriesDbAppender(path)
+            mqttlog_appenders[day].append_events(day_events)
+        if verbose and mqttlog_batch:
+            print(f"flushed {len(mqttlog_batch)} mqttlog events")
 
     if client is not None:
         client.loop_start()
@@ -267,8 +323,10 @@ def collect_to_tsdb(
             if now - last_flush >= flush_interval_s:
                 with lock:
                     batch = list(pending_events)
+                    mqttlog_batch = list(pending_mqttlog_events)
                     pending_events.clear()
-                flush_batch(batch)
+                    pending_mqttlog_events.clear()
+                flush_batch(batch, mqttlog_batch)
                 last_flush = now
 
             now = time.monotonic()
@@ -282,8 +340,10 @@ def collect_to_tsdb(
     finally:
         with lock:
             batch = list(pending_events)
+            mqttlog_batch = list(pending_mqttlog_events)
             pending_events.clear()
-        flush_batch(batch)
+            pending_mqttlog_events.clear()
+        flush_batch(batch, mqttlog_batch)
         if appenders:
             newest_day = max(appenders.keys())
             for day in list(appenders.keys()):
@@ -731,6 +791,12 @@ def read_default_topics(rc_path: str) -> list[str]:
     config = load_collector_config(rc_path)
     mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
     return _normalize_topics(mqtt.get("topics", []))
+
+
+def read_default_mqttlog_topics(rc_path: str) -> list[str]:
+    config = load_collector_config(rc_path)
+    mqtt = config.get("mqtt", {}) if isinstance(config.get("mqtt"), dict) else {}
+    return _normalize_topics(mqtt.get("mqttlog_topics", []))
 
 
 def read_default_quantize_timestamps(rc_path: str) -> int:
@@ -1195,6 +1261,19 @@ def load_collector_config(rc_path: str) -> dict[str, Any]:
                 if topics:
                     break
 
+    mqttlog_topics: list[str] = []
+    for key in ("mqttlog_topics", "mqttlog-topics"):
+        if key in data:
+            mqttlog_topics = _normalize_topics(data[key])
+            if mqttlog_topics:
+                break
+    if not mqttlog_topics:
+        for key in ("mqttlog_topics", "mqttlog-topics"):
+            if key in mqtt_block:
+                mqttlog_topics = _normalize_topics(mqtt_block[key])
+                if mqttlog_topics:
+                    break
+
     quantize_timestamps = 0
     for key in ("quantize_timestamps", "quantize-timestamps"):
         if key in data:
@@ -1298,6 +1377,7 @@ def load_collector_config(rc_path: str) -> dict[str, Any]:
             "data_dir": data_dir,
             "quantize_timestamps": quantize_timestamps,
             "topics": topics,
+            "mqttlog_topics": mqttlog_topics,
         },
         "http": {
             "poll_interval_ms": poll_interval_ms,
@@ -1396,6 +1476,7 @@ def _dumps_collector_config_toml(
     except Exception:
         quantize = 0
     topics = _normalize_topics(mqtt.get("topics", []))
+    mqttlog_topics = _normalize_topics(mqtt.get("mqttlog_topics", []))
 
     lines: list[str] = []
     blocks = dict(comment_blocks_by_item or {})
@@ -1436,6 +1517,10 @@ def _dumps_collector_config_toml(
     topic_lines = _format_toml_list(topics, indent="    ")
     emit_item("topics", f"topics = {topic_lines[0]}")
     for continuation in topic_lines[1:]:
+        lines.append(continuation)
+    mqttlog_topic_lines = _format_toml_list(mqttlog_topics, indent="    ")
+    emit_item("mqttlog_topics", f"mqttlog_topics = {mqttlog_topic_lines[0]}")
+    for continuation in mqttlog_topic_lines[1:]:
         lines.append(continuation)
 
     try:
@@ -1723,6 +1808,7 @@ def main() -> int:
     parser.add_argument("--open-dtu-summary", action="store_true", help="Print OpenDTU inverter summary and totals (expects 'solar' root topic)")
     parser.add_argument("-c", "--collect", action="store_true", help="Collect subscribed MQTT topics into current TSDB files")
     parser.add_argument("--topics", action="append", default=[], help="MQTT subscription topic filter (repeatable)")
+    parser.add_argument("--mqttlog-topics", action="append", default=[], help="MQTT topic filters for exploratory mqttlog_*.tsdb files (repeatable)")
     parser.add_argument("--dump", help="Dump a TimeSeriesDB file in human-readable format")
     parser.add_argument("--dump-bytes", metavar="TSDB_FILE", help="Dump a TSDB file byte-by-byte with decoded semantics")
     parser.add_argument("--stat-tsdb", metavar="TSDB_FILE", help="Print byte statistics for a TimeSeriesDB file")
@@ -1851,6 +1937,7 @@ def main() -> int:
     loaded_config = load_collector_config(rc_path)
     default_server = read_default_server(rc_path)
     default_topics = read_default_topics(rc_path)
+    default_mqttlog_topics = read_default_mqttlog_topics(rc_path)
     default_quantize_timestamps = read_default_quantize_timestamps(rc_path)
     default_http = loaded_config.get("http", {}) if isinstance(loaded_config.get("http"), dict) else {}
     default_http_urls = default_http.get("urls", []) if isinstance(default_http.get("urls"), list) else []
@@ -1883,9 +1970,11 @@ def main() -> int:
     if args.collect or default_to_collect:
         os.makedirs(data_dir, exist_ok=True)
         topics = args.topics if args.topics else default_topics
+        mqttlog_topics = args.mqttlog_topics if args.mqttlog_topics else default_mqttlog_topics
         return collect_to_tsdb(
             server,
             topics,
+            mqttlog_topics,
             args.verbose,
             quantize_timestamps_ms=quantize_timestamps_ms,
             data_dir=data_dir,

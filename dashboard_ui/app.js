@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 21;
+  const FRONTEND_API_VERSION = 22;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const NEW_EMPTY_DASHBOARD_VALUE = '__new_empty_dashboard__';
   const AUTO_DETECT_LABEL = 'Auto Detect';
@@ -745,6 +745,16 @@
     return ids;
   }
 
+  function mqttTableIds() {
+    const ids = [];
+    for (const [id, cfg] of charts.entries()) {
+      if (cfg && cfg.kind === 'mqtttable') {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
   function toDatetimeLocalValue(ms) {
     const d = new Date(ms);
     const pad = (n) => String(n).padStart(2, '0');
@@ -893,25 +903,27 @@
     const heatmapPanelIds = heatmapIds();
     const solarNoonPanelIds = solarNoonIds();
     const statPanelIds = statIds();
+    const mqttTablePanelIds = mqttTableIds();
     const t0 = performance.now();
     refreshGetCallCount = 0;
-    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} solarnoon=${solarNoonPanelIds.length} stats=${statPanelIds.length}`);
+    appendConsoleLine(`refresh start reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} solarnoon=${solarNoonPanelIds.length} stats=${statPanelIds.length} mqtttables=${mqttTablePanelIds.length}`);
     const chartResults = await Promise.allSettled(ids.map((id) => refreshChart(id)));
     const durationResults = await Promise.allSettled(durationPanelIds.map((id) => refreshDuration(id)));
     const barResults = await Promise.allSettled(barPanelIds.map((id) => refreshBar(id)));
     const heatmapResults = await Promise.allSettled(heatmapPanelIds.map((id) => refreshHeatmap(id)));
     const solarNoonResults = await Promise.allSettled(solarNoonPanelIds.map((id) => refreshSolarNoon(id)));
     const statResults = await Promise.allSettled(statPanelIds.map((id) => refreshStat(id)));
-    const results = [...chartResults, ...durationResults, ...barResults, ...heatmapResults, ...solarNoonResults, ...statResults];
+    const mqttTableResults = await Promise.allSettled(mqttTablePanelIds.map((id) => refreshMqttExplorerTable(id)));
+    const results = [...chartResults, ...durationResults, ...barResults, ...heatmapResults, ...solarNoonResults, ...statResults, ...mqttTableResults];
     const failed = results.filter((r) => r.status === 'rejected').length;
-    const allIds = [...ids, ...durationPanelIds, ...barPanelIds, ...heatmapPanelIds, ...solarNoonPanelIds, ...statPanelIds];
+    const allIds = [...ids, ...durationPanelIds, ...barPanelIds, ...heatmapPanelIds, ...solarNoonPanelIds, ...statPanelIds, ...mqttTablePanelIds];
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         appendConsoleLine(`panel ${allIds[i]} refresh error ${r.reason}`);
       }
     });
     const elapsed = Math.round(performance.now() - t0);
-    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} solarnoon=${solarNoonPanelIds.length} stats=${statPanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
+    appendConsoleLine(`refresh done reason=${reason} charts=${ids.length} durations=${durationPanelIds.length} bars=${barPanelIds.length} heatmaps=${heatmapPanelIds.length} solarnoon=${solarNoonPanelIds.length} stats=${statPanelIds.length} mqtttables=${mqttTablePanelIds.length} failed=${failed} get=${refreshGetCallCount} elapsed=${elapsed}ms`);
   }
 
   function currentSettingsPayload() {
@@ -1947,6 +1959,28 @@
     return wrapper;
   }
 
+  function createMqttTablePanel(id) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'panel';
+    wrapper.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">MQTT Explorer Table ${id}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
+        <div class="panel-actions">
+          <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
+          <input type="search" class="mqtttable-filter" id="mqtttable-filter-${id}" data-action="mqtttable-filter" data-id="${id}" placeholder="Filter JSON..." />
+          <button class="icon-btn danger" data-action="remove-panel" data-id="${id}" title="Remove window">🗑️</button>
+        </div>
+      </div>
+      <div class="stat-wrap">
+        <table class="stat-table mqtttable-table" id="mqtttable-${id}"></table>
+      </div>
+    `;
+    return wrapper;
+  }
+
   function createSolarNoonPanel(id) {
     const wrapper = document.createElement('div');
     wrapper.className = 'panel';
@@ -2023,6 +2057,11 @@
     }
     if (c.kind === 'solarnoon') {
       titleEl.textContent = c.label || `Solar Noon Shift ${id}`;
+      if (metaEl) metaEl.textContent = c.titleMeta || '';
+      return;
+    }
+    if (c.kind === 'mqtttable') {
+      titleEl.textContent = c.label || `MQTT Explorer Table ${id}`;
       if (metaEl) metaEl.textContent = c.titleMeta || '';
       return;
     }
@@ -3620,6 +3659,154 @@
     }
   }
 
+  function commonTopicPrefixForDisplay(topics) {
+    const list = Array.isArray(topics) ? topics.map((t) => String(t || '')).filter((t) => t.length > 0) : [];
+    if (list.length === 0) return '';
+    const split = list.map((t) => t.split('/'));
+    const minLen = split.reduce((acc, parts) => Math.min(acc, parts.length), split[0].length);
+    let commonLen = 0;
+    for (let i = 0; i < minLen; i += 1) {
+      const token = split[0][i];
+      if (split.some((parts) => parts[i] !== token)) break;
+      commonLen += 1;
+    }
+    const capped = Math.max(0, Math.min(commonLen, minLen - 1));
+    return capped > 0 ? `${split[0].slice(0, capped).join('/')}/` : '';
+  }
+
+  function parseJsonObject(value) {
+    const text = String(value === undefined || value === null ? '' : value).trim();
+    if (!text) return { obj: null, jsonText: '' };
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { obj: parsed, jsonText: JSON.stringify(parsed) };
+      }
+      return { obj: null, jsonText: JSON.stringify(parsed) };
+    } catch (_err) {
+      return { obj: null, jsonText: text };
+    }
+  }
+
+  function mqttValueText(obj, key) {
+    if (!obj || typeof obj !== 'object' || !Object.prototype.hasOwnProperty.call(obj, key)) return '';
+    const value = obj[key];
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    try {
+      return JSON.stringify(value);
+    } catch (_err) {
+      return String(value);
+    }
+  }
+
+  function renderMqttExplorerTableFromCache(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
+    const allRows = Array.isArray(cfg.rows) ? cfg.rows : [];
+    const totalTopics = Number.isFinite(cfg.totalTopics) ? Number(cfg.totalTopics) : allRows.length;
+    const filterText = String(cfg.filter || '').trim().toLowerCase();
+    const rows = allRows.filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText));
+    const head = `
+      <thead>
+        <tr>
+          <th class="mqtttable-topic">Topic</th>
+          <th>temperature_C</th>
+          <th>rssi</th>
+          <th>duration</th>
+          <th>protocol</th>
+        </tr>
+      </thead>
+    `;
+    const body = rows.map((row) => `
+      <tr>
+        <td class="mqtttable-topic">${htmlEscape(row.topic)}</td>
+        <td>${htmlEscape(row.temperature_C)}</td>
+        <td>${htmlEscape(row.rssi)}</td>
+        <td>${htmlEscape(row.duration)}</td>
+        <td>${htmlEscape(row.protocol)}</td>
+      </tr>
+    `).join('');
+    cfg.tableEl.innerHTML = head + `<tbody>${body}</tbody>`;
+    setPanelTitleMeta(id, `${rows.length}/${totalTopics} topics`);
+  }
+
+  async function refreshMqttExplorerTable(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
+    setPanelBusy(id, true);
+    try {
+      const panelName = cfg.label || `MQTT Explorer Table ${id}`;
+      appendConsoleLine(`mqtttable ${id} refresh start name="${panelName}"`);
+      const catalogQ = new URLSearchParams({ start: '0', end: '9999999999999', prefix: 'mqttlog' });
+      const catalogResp = await apiJson(`/series?${catalogQ}`);
+      const catalog = Array.isArray(catalogResp && catalogResp.series) ? catalogResp.series : [];
+      const mqttSeries = catalog
+        .filter((name) => typeof name === 'string' && name.startsWith('mqttlog/'))
+        .sort((a, b) => a.localeCompare(b));
+      if (mqttSeries.length === 0) {
+        cfg.rows = [];
+        cfg.totalTopics = 0;
+        cfg.tableEl.innerHTML = '<tbody><tr><td class="stat-name" colspan="6">No mqttlog series</td></tr></tbody>';
+        setPanelTitleMeta(id, '0 topics');
+        appendConsoleLine(`mqtttable ${id} refresh done (no mqttlog series)`);
+        return;
+      }
+      const end = nowMs();
+      const start = end - 24 * 3600 * 1000;
+      const chunkSize = 25;
+      const eventRows = [];
+      const reqT0 = performance.now();
+      for (let offset = 0; offset < mqttSeries.length; offset += chunkSize) {
+        const chunk = mqttSeries.slice(offset, offset + chunkSize);
+        const q = new URLSearchParams({
+          start: String(start),
+          end: String(end),
+          minPoints: '1',
+          granularity: '1h',
+        });
+        for (const seriesName of chunk) q.append('series', seriesName);
+        const resp = await apiJson(`/events?${q}`);
+        const items = Array.isArray(resp && resp.events) ? resp.events : ((resp && typeof resp.series === 'string') ? [resp] : []);
+        for (const item of items) {
+          if (!item || typeof item !== 'object' || typeof item.series !== 'string') continue;
+          const points = Array.isArray(item.points) ? item.points : [];
+          const last = points.length ? points[points.length - 1] : null;
+          const rawValue = last && Object.prototype.hasOwnProperty.call(last, 'value') ? last.value : '';
+          const parsed = parseJsonObject(rawValue);
+          eventRows.push({
+            series: item.series,
+            payload: parsed.obj,
+            jsonText: parsed.jsonText,
+          });
+        }
+      }
+      appendConsoleLine(`mqtttable ${id} request done series=${mqttSeries.length} rows=${eventRows.length} elapsed=${Math.round(performance.now() - reqT0)}ms`);
+      const bySeries = new Map(eventRows.map((row) => [row.series, row]));
+      const prefix = commonTopicPrefixForDisplay(mqttSeries);
+      cfg.rows = mqttSeries.map((seriesName) => {
+        const row = bySeries.get(seriesName) || { payload: null, jsonText: '' };
+        const topic = (seriesName.startsWith(prefix) && prefix.length < seriesName.length)
+          ? seriesName.slice(prefix.length)
+          : seriesName;
+        return {
+          topic,
+          temperature_C: mqttValueText(row.payload, 'temperature_C'),
+          rssi: mqttValueText(row.payload, 'rssi'),
+          duration: mqttValueText(row.payload, 'duration'),
+          protocol: mqttValueText(row.payload, 'protocol'),
+          jsonText: row.jsonText || '',
+        };
+      });
+      cfg.totalTopics = mqttSeries.length;
+      renderMqttExplorerTableFromCache(id);
+      appendConsoleLine(`mqtttable ${id} refresh done rows=${cfg.rows.length} topics=${mqttSeries.length}`);
+    } finally {
+      setPanelBusy(id, false);
+    }
+  }
+
   function addChart(initialSeries = [], options = {}) {
     chartCounter += 1;
     const id = String(chartCounter);
@@ -3785,6 +3972,45 @@
     updateTitle(id);
     if (!options.deferRefresh) {
       refreshStat(id).catch((err) => console.error(err));
+    }
+    return id;
+  }
+
+  function addMqttExplorerTable(options = {}) {
+    chartCounter += 1;
+    const id = String(chartCounter);
+    const widgetEl = document.createElement('div');
+    widgetEl.innerHTML = '<div class="grid-stack-item-content"></div>';
+    const node = grid.addWidget(widgetEl, {
+      x: Number.isFinite(options.x) ? options.x : undefined,
+      y: Number.isFinite(options.y) ? options.y : undefined,
+      w: options.w || 8,
+      h: options.h || 4,
+    });
+    const panel = createMqttTablePanel(id);
+    node.querySelector('.grid-stack-item-content').appendChild(panel);
+    const tableEl = document.getElementById(`mqtttable-${id}`);
+    const filterEl = document.getElementById(`mqtttable-filter-${id}`);
+    charts.set(id, {
+      id,
+      kind: 'mqtttable',
+      node,
+      tableEl,
+      filterEl,
+      filter: String(options.filter || ''),
+      rows: [],
+      totalTopics: 0,
+      label: options.label || null,
+      busyCount: 0,
+      titleMeta: '',
+    });
+    if (filterEl instanceof HTMLInputElement) {
+      filterEl.value = String(options.filter || '');
+    }
+    appendConsoleLine(`mqtttable ${id} created`);
+    updateTitle(id);
+    if (!options.deferRefresh) {
+      refreshMqttExplorerTable(id).catch((err) => console.error(err));
     }
     return id;
   }
@@ -4103,6 +4329,18 @@
         });
         continue;
       }
+      if (c.kind === 'mqtttable') {
+        chartList.push({
+          type: 'mqtttable',
+          x: Number(nodeInfo.x || 0),
+          y: Number(nodeInfo.y || 0),
+          w: Number(nodeInfo.w || 8),
+          h: Number(nodeInfo.h || 4),
+          filter: String(c.filter || ''),
+          label: c.label || null,
+        });
+        continue;
+      }
       if (c.kind === 'heatmap') {
         chartList.push({
           type: 'heatmap',
@@ -4238,6 +4476,18 @@
           h: Number(ch.h) || 3,
           columns,
           bigFontPx: normalizeStatBigFontPx(ch.bigFontPx),
+          label: typeof ch.label === 'string' ? ch.label : null,
+          deferRefresh: true,
+        });
+        continue;
+      }
+      if (ch.type === 'mqtttable') {
+        addMqttExplorerTable({
+          x: Number(ch.x),
+          y: Number(ch.y),
+          w: Number(ch.w) || 8,
+          h: Number(ch.h) || 4,
+          filter: String(ch.filter || ''),
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -4837,8 +5087,14 @@
       else if (kind === 'stat') addStat();
       else if (kind === 'bar') addBar();
       else if (kind === 'heatmap') addHeatmap();
+      else if (kind === 'mqtttable') addMqttExplorerTable();
       else if (kind === 'solarnoon') addSolarNoon();
       else if (kind === 'console') createConsolePanel();
+      return;
+    }
+
+    if (target.dataset.action === 'remove-panel') {
+      removePanel(target.dataset.id);
       return;
     }
 
@@ -5102,6 +5358,19 @@
       apiTraceEnabled = !!target.checked;
       appendConsoleLine(`console api logging ${apiTraceEnabled ? 'enabled' : 'disabled'}`);
       return;
+    }
+  });
+
+  document.addEventListener('input', (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.dataset.action === 'mqtttable-filter') {
+      if (!(target instanceof HTMLInputElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'mqtttable') return;
+      panel.filter = target.value || '';
+      renderMqttExplorerTableFromCache(id);
     }
   });
 

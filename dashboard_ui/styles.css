@@ -418,6 +418,26 @@ select[id^="solarnoon-method-"] {
   text-align: left;
 }
 
+.mqtttable-filter {
+  width: 170px;
+  max-width: 36vw;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.mqtttable-table th,
+.mqtttable-table td {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.mqtttable-table .mqtttable-topic {
+  white-space: normal;
+  word-break: break-word;
+  min-width: 220px;
+  text-align: left;
+}
+
 .stat-current {
   color: #e5effc;
   font-size: var(--stat-big-font, 26px);

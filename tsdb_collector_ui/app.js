@@ -11,7 +11,7 @@
   ];
   const state = {
     config: {
-      mqtt: { mqtt_server: "", data_dir: ".", quantize_timestamps: 0, topics: [] },
+      mqtt: { mqtt_server: "", data_dir: ".", quantize_timestamps: 0, topics: [], mqttlog_topics: [] },
       http: { poll_interval_ms: 5000, urls: [] },
     },
     selectedHttpUrlIndex: -1,
@@ -112,6 +112,7 @@
     const mqtt = config && typeof config.mqtt === "object" ? config.mqtt : {};
     const http = config && typeof config.http === "object" ? config.http : {};
     const topics = Array.isArray(mqtt.topics) ? mqtt.topics.map((v) => String(v)) : [];
+    const mqttlogTopics = Array.isArray(mqtt.mqttlog_topics) ? mqtt.mqttlog_topics.map((v) => String(v)) : [];
     const urlsRaw = Array.isArray(http.urls) ? http.urls : [];
     const urls = urlsRaw.map((u) => {
       const valuesRaw = Array.isArray(u && u.values) ? u.values : [];
@@ -136,6 +137,7 @@
           ? Math.max(0, Number(mqtt.quantize_timestamps))
           : 0,
         topics,
+        mqttlog_topics: mqttlogTopics,
       },
       http: {
         poll_interval_ms: Number.isFinite(Number(http.poll_interval_ms))

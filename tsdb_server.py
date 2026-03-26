@@ -3,7 +3,7 @@
 
 API:
 - GET /health
-- GET /series?start=<ts>&end=<ts>
+- GET /series?start=<ts>&end=<ts>&prefix=<optional-prefix>
 - GET /events?series=<name>&start=<ts>&end=<ts>&minPoints=<n>&granularity=<auto|raw|1s|5s|15s|1m|5m|15m|1h>
   (or repeated series params for batched response)
 - GET /stats?series=<name>&start=<ts>&end=<ts>
@@ -56,7 +56,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 21  # Increment when API endpoints or payload schemas change.
+API_VERSION = 22  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 DEFAULT_MIN_POINTS = 10
 
@@ -252,7 +252,31 @@ def _first_existing_path(data_dir: str, relative_name: str) -> Optional[str]:
     return None
 
 
-def find_candidate_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]:
+def _series_storage(series_name: str) -> Tuple[str, str]:
+    """Resolve storage namespace and in-file series name.
+
+    Args:
+        series_name: Requested series name.
+
+    Returns:
+        Tuple[str, str]: (file_prefix, in_file_series_name)
+            file_prefix is "data_" or "mqttlog_".
+    """
+    name = str(series_name or "")
+    if name.startswith("mqttlog/"):
+        return "mqttlog_", name[len("mqttlog/"):]
+    return "data_", name
+
+
+def _prefixed_series_name_for_path(path: str, series_name: str) -> str:
+    """Map in-file series name to API name based on file namespace."""
+    base = os.path.basename(path)
+    if base.startswith("mqttlog_") or base == "mqttlog.tsdb":
+        return f"mqttlog/{series_name}"
+    return series_name
+
+
+def find_candidate_files(data_dir: str, start_ms: int, end_ms: int, file_prefix: str = "data_") -> List[str]:
     """Find candidate files that match the given constraints.
 
     Args:
@@ -265,36 +289,33 @@ def find_candidate_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]
     """
     files: List[str] = []
     for day in day_range_utc(start_ms, end_ms):
-        p = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+        p = _first_existing_path(data_dir, f"{file_prefix}{day.isoformat()}.tsdb")
         if p is not None:
             files.append(p)
 
-    fallback = _first_existing_path(data_dir, "data.tsdb")
+    fallback_name = "data.tsdb" if file_prefix == "data_" else "mqttlog.tsdb"
+    fallback = _first_existing_path(data_dir, fallback_name)
     if not files and fallback is not None:
         files.append(fallback)
 
     return files
 
 
-def _find_catalog_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]:
-    """Find files for fast series-catalog discovery, preferring 1h downsampled files."""
+def _find_catalog_files_for_prefix(data_dir: str, start_ms: int, end_ms: int, file_prefix: str) -> List[str]:
+    """Find files for fast series-catalog discovery by prefix."""
     files: List[str] = []
     for day in day_range_utc(start_ms, end_ms):
-        ds_1h = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1h.tsdb")
-        if ds_1h is not None:
-            files.append(ds_1h)
-            continue
-        raw_day = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+        if file_prefix == "data_":
+            ds_1h = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1h.tsdb")
+            if ds_1h is not None:
+                files.append(ds_1h)
+                continue
+        raw_day = _first_existing_path(data_dir, f"{file_prefix}{day.isoformat()}.tsdb")
         if raw_day is not None:
             files.append(raw_day)
-
     if files:
         return files
-
-    # Keep series discovery usable when selected range does not overlap data:
-    # prefer all 1h dsda files, then fall back to all raw day files.
-    ds_candidates: List[str] = []
-    raw_candidates: List[str] = []
+    pref_candidates: List[str] = []
     for base in _candidate_data_dirs(data_dir):
         try:
             names = os.listdir(base)
@@ -304,13 +325,26 @@ def _find_catalog_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]:
             path = os.path.join(base, name)
             if not os.path.isfile(path):
                 continue
-            if name.startswith("dsda_") and name.endswith(".1h.tsdb"):
-                ds_candidates.append(path)
-            elif name == "data.tsdb" or (name.startswith("data_") and name.endswith(".tsdb")):
-                raw_candidates.append(path)
-    ds_candidates.sort()
-    raw_candidates.sort()
-    return ds_candidates if ds_candidates else raw_candidates
+            if file_prefix == "data_" and name.startswith("dsda_") and name.endswith(".1h.tsdb"):
+                pref_candidates.append(path)
+            elif name == ("data.tsdb" if file_prefix == "data_" else "mqttlog.tsdb") or (name.startswith(file_prefix) and name.endswith(".tsdb")):
+                pref_candidates.append(path)
+    pref_candidates.sort()
+    return pref_candidates
+
+
+def _find_catalog_files(data_dir: str, start_ms: int, end_ms: int) -> List[str]:
+    """Find files for fast series-catalog discovery, preferring 1h downsampled files."""
+    main_files = _find_catalog_files_for_prefix(data_dir, start_ms, end_ms, "data_")
+    mqttlog_files = _find_catalog_files_for_prefix(data_dir, start_ms, end_ms, "mqttlog_")
+    seen: set[str] = set()
+    out: List[str] = []
+    for path in main_files + mqttlog_files:
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
 
 
 def _original_file_for_day(data_dir: str, day: datetime.date) -> str:
@@ -878,6 +912,7 @@ def _get_or_build_downsampled_day_points(
     series_name: str,
     start_ms: int,
     end_ms: int,
+    file_prefix: str = "data_",
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """Get or build downsampled day points from caches/files for request processing.
 
@@ -892,7 +927,7 @@ def _get_or_build_downsampled_day_points(
     Returns:
         Tuple[List[str], List[Dict[str, Any]]]: Result produced by this function.
     """
-    original_path = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+    original_path = _first_existing_path(data_dir, f"{file_prefix}{day.isoformat()}.tsdb")
     if original_path is None:
         return [], []
 
@@ -906,16 +941,17 @@ def _get_or_build_downsampled_day_points(
         _downsampled, points = _downsampled_points_from_day_cache(entry, series_name, start_ms, end_ms)
         return entry.files, points
 
-    ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
-    if ds_label is None:
-        return [os.path.basename(original_path)], []
-    ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb")
-    original_stat = os.stat(original_path)
-    if ds_path is not None and os.path.isfile(ds_path):
-        ds_stat = os.stat(ds_path)
-        if ds_stat.st_mtime_ns >= original_stat.st_mtime_ns:
-            _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, granularity_ms, series_name, start_ms, end_ms)
-            return [os.path.basename(ds_path)], points
+    if file_prefix == "data_":
+        ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
+        if ds_label is None:
+            return [os.path.basename(original_path)], []
+        ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb")
+        original_stat = os.stat(original_path)
+        if ds_path is not None and os.path.isfile(ds_path):
+            ds_stat = os.stat(ds_path)
+            if ds_stat.st_mtime_ns >= original_stat.st_mtime_ns:
+                _downsampled, points = _downsampled_points_from_ds_file(ds_path, day, granularity_ms, series_name, start_ms, end_ms)
+                return [os.path.basename(ds_path)], points
     events = read_tsdb_events_for_series(original_path, series_name, start_ms, end_ms)
     if not events:
         return [os.path.basename(original_path)], []
@@ -1383,7 +1419,8 @@ def _real_series_points_for_virtual(
     Returns:
         Tuple[List[Dict[str, Any]], int, List[str], Tuple[Any, ...]]: Result produced by this function.
     """
-    files = find_candidate_files(data_dir, start_ms, end_ms)
+    file_prefix, storage_series_name = _series_storage(series_name)
+    files = find_candidate_files(data_dir, start_ms, end_ms, file_prefix=file_prefix)
     max_decimal_places: Optional[int] = None
     source_sig_parts: List[Tuple[Any, ...]] = []
 
@@ -1392,8 +1429,8 @@ def _real_series_points_for_virtual(
         for path in files:
             cache = get_cached_tsdb_file(path)
             source_sig_parts.append((os.path.basename(path), cache.parsed_offset, cache.mtime_ns, cache.size))
-            events.extend(read_tsdb_events_for_series(path, series_name, start_ms, end_ms))
-            fmt = cache.series_format_ids.get(series_name)
+            events.extend(read_tsdb_events_for_series(path, storage_series_name, start_ms, end_ms))
+            fmt = cache.series_format_ids.get(storage_series_name)
             if is_numeric_format_id(fmt):
                 d = decimal_places_from_format_id(fmt)
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
@@ -1407,50 +1444,52 @@ def _real_series_points_for_virtual(
                 _points_signature("real", series_name, granularity_ms, tuple(source_sig_parts), points),
             )
         # Raw fallback: use 1s dsda when raw day files are missing.
-        fallback_granularity_ms = 1_000
-        ds_points: List[Dict[str, Any]] = []
-        files_used: List[str] = []
-        for day in day_range_utc(start_ms, end_ms):
-            ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1s.tsdb")
-            if ds_path is None:
-                continue
-            _downsampled, day_points = _downsampled_points_from_ds_file(
-                ds_path,
-                day,
-                fallback_granularity_ms,
-                series_name,
-                start_ms,
-                end_ms,
+        if file_prefix == "data_":
+            fallback_granularity_ms = 1_000
+            ds_points: List[Dict[str, Any]] = []
+            files_used: List[str] = []
+            for day in day_range_utc(start_ms, end_ms):
+                ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1s.tsdb")
+                if ds_path is None:
+                    continue
+                _downsampled, day_points = _downsampled_points_from_ds_file(
+                    ds_path,
+                    day,
+                    fallback_granularity_ms,
+                    storage_series_name,
+                    start_ms,
+                    end_ms,
+                )
+                ds_points.extend(day_points)
+                name = os.path.basename(ds_path)
+                if name not in files_used:
+                    files_used.append(name)
+                fmt = get_series_format_id_in_file(ds_path, storage_series_name)
+                if is_numeric_format_id(fmt):
+                    d = decimal_places_from_format_id(fmt)
+                    max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
+                cache = get_cached_tsdb_file(ds_path)
+                source_sig_parts.append((name, cache.parsed_offset, cache.mtime_ns, cache.size))
+            ds_points.sort(key=lambda p: int(p.get("timestamp", 0)))
+            return (
+                ds_points,
+                max_decimal_places if max_decimal_places is not None else 3,
+                files_used,
+                _points_signature("real", series_name, fallback_granularity_ms, tuple(source_sig_parts), ds_points),
             )
-            ds_points.extend(day_points)
-            name = os.path.basename(ds_path)
-            if name not in files_used:
-                files_used.append(name)
-            fmt = get_series_format_id_in_file(ds_path, series_name)
-            if is_numeric_format_id(fmt):
-                d = decimal_places_from_format_id(fmt)
-                max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
-            cache = get_cached_tsdb_file(ds_path)
-            source_sig_parts.append((name, cache.parsed_offset, cache.mtime_ns, cache.size))
-        ds_points.sort(key=lambda p: int(p.get("timestamp", 0)))
-        return (
-            ds_points,
-            max_decimal_places if max_decimal_places is not None else 3,
-            files_used,
-            _points_signature("real", series_name, fallback_granularity_ms, tuple(source_sig_parts), ds_points),
-        )
+        return ([], max_decimal_places if max_decimal_places is not None else 3, [], _points_signature("real", series_name, 0, tuple(source_sig_parts), []))
 
     points: List[Dict[str, Any]] = []
     files_used: List[str] = []
     for day in day_range_utc(start_ms, end_ms):
         ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
-        ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb") if ds_label else None
+        ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb") if (ds_label and file_prefix == "data_") else None
         if ds_path is not None and os.path.isfile(ds_path):
             _downsampled, day_points = _downsampled_points_from_ds_file(
                 ds_path,
                 day,
                 granularity_ms,
-                series_name,
+                storage_series_name,
                 start_ms,
                 end_ms,
             )
@@ -1458,7 +1497,7 @@ def _real_series_points_for_virtual(
             name = os.path.basename(ds_path)
             if name not in files_used:
                 files_used.append(name)
-            fmt = get_series_format_id_in_file(ds_path, series_name)
+            fmt = get_series_format_id_in_file(ds_path, storage_series_name)
             if is_numeric_format_id(fmt):
                 d = decimal_places_from_format_id(fmt)
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
@@ -1467,13 +1506,13 @@ def _real_series_points_for_virtual(
             continue
 
         # Fallback to original file only if present.
-        original_path = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+        original_path = _first_existing_path(data_dir, f"{file_prefix}{day.isoformat()}.tsdb")
         if original_path is not None and os.path.isfile(original_path):
             day_files, day_points = _get_or_build_downsampled_day_points(
                 data_dir,
                 day,
                 granularity_ms,
-                series_name,
+                storage_series_name,
                 start_ms,
                 end_ms,
             )
@@ -1483,7 +1522,7 @@ def _real_series_points_for_virtual(
                     files_used.append(name)
             if day_files:
                 source_sig_parts.append((day.isoformat(), tuple(day_files), len(day_points), int(day_points[-1]["timestamp"]) if day_points else None))
-            fmt = get_series_format_id_in_file(original_path, series_name)
+            fmt = get_series_format_id_in_file(original_path, storage_series_name)
             if is_numeric_format_id(fmt):
                 d = decimal_places_from_format_id(fmt)
                 max_decimal_places = d if max_decimal_places is None else max(max_decimal_places, d)
@@ -1839,7 +1878,7 @@ def save_virtual_series_defs(data_dir: str, defs: List[VirtualSeriesDef]) -> Non
     save_virtual_series_config(data_dir, defs, overrides, align_window_ms)
 
 
-def _all_tsdb_files(data_dir: str) -> List[str]:
+def _all_tsdb_files(data_dir: str, file_prefix: str = "data_") -> List[str]:
     """Execute all tsdb files as part of TSDB server processing.
 
     Args:
@@ -1856,7 +1895,8 @@ def _all_tsdb_files(data_dir: str) -> List[str]:
         except OSError:
             continue
         for name in names:
-            if name == "data.tsdb" or (name.startswith("data_") and name.endswith(".tsdb")):
+            single_name = "data.tsdb" if file_prefix == "data_" else "mqttlog.tsdb"
+            if name == single_name or (name.startswith(file_prefix) and name.endswith(".tsdb")):
                 path = os.path.join(base, name)
                 if os.path.isfile(path) and path not in seen:
                     files.append(path)
@@ -1876,6 +1916,7 @@ def _read_series_all_files(data_dir: str, series_name: str) -> Tuple[List[Event]
         Tuple[List[Event], int, List[str], Tuple[Any, ...]]: Result produced by this function.
     """
     t0 = time.perf_counter()
+    file_prefix, storage_series_name = _series_storage(series_name)
     abs_data_dir = os.path.abspath(data_dir)
     cache_key = (abs_data_dir, series_name)
     file_signatures: List[Tuple[Any, ...]] = []
@@ -1883,15 +1924,15 @@ def _read_series_all_files(data_dir: str, series_name: str) -> Tuple[List[Event]
     max_decimal_places = 3
     files_used: List[str] = []
 
-    for path in _all_tsdb_files(data_dir):
+    for path in _all_tsdb_files(data_dir, file_prefix=file_prefix):
         cache = get_cached_tsdb_file(path)
-        part = cache.series_events.get(series_name, [])
+        part = cache.series_events.get(storage_series_name, [])
         if part:
             base = os.path.basename(path)
             files_used.append(base)
             file_parts.append((base, part))
             file_signatures.append((base, cache.parsed_offset, len(part), part[-1].timestamp_ms))
-        fmt = cache.series_format_ids.get(series_name)
+        fmt = cache.series_format_ids.get(storage_series_name)
         if is_numeric_format_id(fmt):
             max_decimal_places = max(max_decimal_places, decimal_places_from_format_id(fmt))
 
@@ -3340,13 +3381,24 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         if end_ms < start_ms:
             raise ValueError("end must be >= start")
 
-        files = _find_catalog_files(data_dir, start_ms, end_ms)
+        prefix = (self._query_param(params, "prefix") or "").strip()
+        prefix_norm = prefix.rstrip("/")
+        if prefix_norm == "mqttlog":
+            files = _find_catalog_files_for_prefix(data_dir, start_ms, end_ms, "mqttlog_")
+        else:
+            files = _find_catalog_files(data_dir, start_ms, end_ms)
         names = set()
         for path in files:
             for name in list_series_in_file(path):
-                names.add(name)
-        for d in load_virtual_series_defs(data_dir):
-            names.add(d.name)
+                series_name = _prefixed_series_name_for_path(path, name)
+                if prefix and not series_name.startswith(prefix):
+                    continue
+                names.add(series_name)
+        if prefix_norm != "mqttlog":
+            for d in load_virtual_series_defs(data_dir):
+                if prefix and not d.name.startswith(prefix):
+                    continue
+                names.add(d.name)
 
         self._send_json(
             200,
@@ -3408,6 +3460,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         data_dir: str,
         day: datetime.date,
         series_name: str,
+        file_prefix: str,
         granularity_ms: int,
         request_start_ms: int,
         request_end_ms: int,
@@ -3442,17 +3495,18 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                     return False
             return True
 
-        virtual = get_virtual_series_points(data_dir, series_name, day_start_ms, day_end_ms, granularity_ms)
-        if virtual is not None:
-            points, decimal_places, files_used = virtual
-            points = sorted(list(points), key=lambda p: int(p.get("timestamp", 0)))
-            all_numeric = all(_point_is_numeric(p) for p in points)
-            downsampled = granularity_ms > 0 and all_numeric
-            return points, list(files_used), int(decimal_places), all_numeric, downsampled
+        if file_prefix == "data_":
+            virtual = get_virtual_series_points(data_dir, series_name, day_start_ms, day_end_ms, granularity_ms)
+            if virtual is not None:
+                points, decimal_places, files_used = virtual
+                points = sorted(list(points), key=lambda p: int(p.get("timestamp", 0)))
+                all_numeric = all(_point_is_numeric(p) for p in points)
+                downsampled = granularity_ms > 0 and all_numeric
+                return points, list(files_used), int(decimal_places), all_numeric, downsampled
 
-        original_path = _first_existing_path(data_dir, f"data_{day.isoformat()}.tsdb")
+        original_path = _first_existing_path(data_dir, f"{file_prefix}{day.isoformat()}.tsdb")
 
-        if granularity_ms > 0:
+        if granularity_ms > 0 and file_prefix == "data_":
             ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
             ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb") if ds_label else None
             if ds_path is not None and os.path.isfile(ds_path):
@@ -3479,12 +3533,13 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
                     series_name,
                     day_start_ms,
                     day_end_ms,
+                    file_prefix=file_prefix,
                 )
                 all_numeric = all(_point_is_numeric(p) for p in day_points)
                 if all_numeric:
                     return list(day_points), list(day_files), max_decimal_places, True, True
 
-        files = find_candidate_files(data_dir, day_start_ms, day_end_ms)
+        files = find_candidate_files(data_dir, day_start_ms, day_end_ms, file_prefix=file_prefix)
         files_used = [os.path.basename(path) for path in files]
         max_decimal_places: Optional[int] = None
 
@@ -3508,7 +3563,7 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             )
             return points, files_used, max_decimal_places, True, True
 
-        if granularity_ms == 0 and not events:
+        if granularity_ms == 0 and not events and file_prefix == "data_":
             fallback_granularity_ms = 1_000
             fallback_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.1s.tsdb")
             if fallback_path is not None and os.path.isfile(fallback_path):
@@ -3543,6 +3598,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         Returns:
             Dict[str, Any]: Result produced by this function.
         """
+        file_prefix, storage_series_name = _series_storage(series)
+
         requested_granularity_ms = _choose_auto_granularity_ms(start_ms, end_ms, min_points) if granularity is None else int(granularity)
         requested_granularity_ms = max(0, requested_granularity_ms)
         requested_days = list(day_range_utc(start_ms, end_ms))
@@ -3558,7 +3615,8 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             day_points, day_files, day_decimals, day_all_numeric, day_downsampled = self._get_events_for_day(
                 data_dir=data_dir,
                 day=day,
-                series_name=series,
+                series_name=storage_series_name,
+                file_prefix=file_prefix,
                 granularity_ms=requested_granularity_ms,
                 request_start_ms=start_ms,
                 request_end_ms=end_ms,
