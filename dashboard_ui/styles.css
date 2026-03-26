@@ -447,6 +447,10 @@ select[id^="solarnoon-method-"] {
   word-break: break-word;
 }
 
+.mqtttable-table .mqtttable-right {
+  text-align: right;
+}
+
 .mqtttable-table th[data-action="mqtttable-sort"] {
   cursor: pointer;
   user-select: none;

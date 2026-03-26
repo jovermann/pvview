@@ -3707,6 +3707,32 @@
     }
   }
 
+  function formatAgeHuman(ms) {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n < 0) return '';
+    const s = n / 1000;
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = s / 60;
+    if (m < 60) return `${m.toFixed(1)}m`;
+    const h = m / 60;
+    if (h < 24) return `${h.toFixed(1)}h`;
+    const d = h / 24;
+    return `${d.toFixed(1)}d`;
+  }
+
+  function parseAgeHumanToMs(text) {
+    const s = String(text || '').trim();
+    const m = /^([0-9]+(?:\.[0-9]+)?)([smhd])$/.exec(s);
+    if (!m) return NaN;
+    const value = Number(m[1]);
+    if (!Number.isFinite(value)) return NaN;
+    const unit = m[2];
+    if (unit === 's') return value * 1000;
+    if (unit === 'm') return value * 60000;
+    if (unit === 'h') return value * 3600000;
+    return value * 86400000;
+  }
+
   function renderMqttExplorerTableFromCache(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
@@ -3715,7 +3741,7 @@
     const filterText = String(cfg.filter || '').trim().toLowerCase();
     const rows = allRowsRaw.filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText));
     const detectedColumns = Array.isArray(cfg.detectedColumns) ? cfg.detectedColumns : [];
-    const defaultColumns = ['temperature_C', 'rssi', 'duration', 'protocol'];
+    const defaultColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol'];
     const visibleColumns = Array.isArray(cfg.visibleColumns) && cfg.visibleColumns.length
       ? cfg.visibleColumns.filter((k) => detectedColumns.includes(k))
       : defaultColumns.filter((k) => detectedColumns.includes(k));
@@ -3725,6 +3751,16 @@
     const key = String(cfg.sortKey || 'topic');
     const dir = (String(cfg.sortDir || 'asc') === 'desc') ? -1 : 1;
     rows.sort((a, b) => {
+      if (key === 'age') {
+        const am = parseAgeHumanToMs((a.values && a.values.age) || '');
+        const bm = parseAgeHumanToMs((b.values && b.values.age) || '');
+        const aok = Number.isFinite(am);
+        const bok = Number.isFinite(bm);
+        if (aok && bok) return (am - bm) * dir;
+        if (aok && !bok) return -1;
+        if (!aok && bok) return 1;
+        return 0;
+      }
       const av = key === 'topic' ? String(a.topic || '') : String((a.values && a.values[key]) || '');
       const bv = key === 'topic' ? String(b.topic || '') : String((b.values && b.values[key]) || '');
       const an = Number(av);
@@ -3746,6 +3782,7 @@
           ${colDefs.map((col, idx) => {
             const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
             if (col.isTopic) classes.push('mqtttable-topic');
+            if (col.key === 'age') classes.push('mqtttable-right');
             return `<th class="${classes.join(' ')}" data-action="mqtttable-sort" data-id="${id}" data-key="${htmlEscape(col.key)}">${htmlEscape(col.label)}${sortMarker(col.key)}</th>`;
           }).join('')}
         </tr>
@@ -3756,6 +3793,7 @@
         ${colDefs.map((col, idx) => {
           const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
           if (col.isTopic) classes.push('mqtttable-topic');
+          if (col.key === 'age') classes.push('mqtttable-right');
           const value = col.isTopic ? String(row.topic || '') : String((row.values && row.values[col.key]) || '');
           return `<td class="${classes.join(' ')}">${htmlEscape(value)}</td>`;
         }).join('')}
@@ -3790,6 +3828,7 @@
       }
       const end = nowMs();
       const start = end - 24 * 3600 * 1000;
+      const hourStart = end - 3600 * 1000;
       const chunkSize = 25;
       const eventRows = [];
       const reqT0 = performance.now();
@@ -3799,7 +3838,7 @@
           start: String(start),
           end: String(end),
           minPoints: '1',
-          granularity: '1h',
+          granularity: 'raw',
         });
         for (const seriesName of chunk) q.append('series', seriesName);
         const resp = await apiJson(`/events?${q}`);
@@ -3812,6 +3851,7 @@
           const parsed = parseJsonObject(rawValue);
           eventRows.push({
             series: item.series,
+            points,
             payload: parsed.obj,
             jsonText: parsed.jsonText,
           });
@@ -3820,13 +3860,24 @@
       appendConsoleLine(`mqtttable ${id} request done series=${mqttSeries.length} rows=${eventRows.length} elapsed=${Math.round(performance.now() - reqT0)}ms`);
       const bySeries = new Map(eventRows.map((row) => [row.series, row]));
       const prefix = commonTopicPrefixForDisplay(mqttSeries);
-      const detected = new Set(['temperature_C', 'rssi', 'duration', 'protocol']);
+      const detected = new Set(['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol']);
       cfg.rows = mqttSeries.map((seriesName) => {
         const row = bySeries.get(seriesName) || { payload: null, jsonText: '' };
         const topic = (seriesName.startsWith(prefix) && prefix.length < seriesName.length)
           ? seriesName.slice(prefix.length)
           : seriesName;
         const values = {};
+        const points = row && Array.isArray(row.points) ? row.points : [];
+        const timestamps = points
+          .map((p) => Number(p && p.timestamp))
+          .filter((ts) => Number.isFinite(ts) && ts >= start && ts <= end);
+        timestamps.sort((a, b) => a - b);
+        const lastTs = timestamps.length ? timestamps[timestamps.length - 1] : NaN;
+        const msgDay = timestamps.length;
+        const msgHour = timestamps.filter((ts) => ts >= hourStart).length;
+        values.age = Number.isFinite(lastTs) ? formatAgeHuman(end - lastTs) : '';
+        values['msg/h'] = String(msgHour);
+        values['msg/d'] = String(msgDay);
         if (row.payload && typeof row.payload === 'object') {
           for (const [k, v] of Object.entries(row.payload)) {
             detected.add(String(k));
@@ -3849,7 +3900,7 @@
         cfg.columnOrder = [...existing, ...missing];
       }
       if (!Array.isArray(cfg.visibleColumns) || cfg.visibleColumns.length === 0) {
-        cfg.visibleColumns = ['temperature_C', 'rssi', 'duration', 'protocol'].filter((k) => cfg.detectedColumns.includes(k));
+        cfg.visibleColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol'].filter((k) => cfg.detectedColumns.includes(k));
       } else {
         cfg.visibleColumns = cfg.visibleColumns.filter((k) => cfg.detectedColumns.includes(k));
       }
