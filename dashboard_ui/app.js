@@ -358,10 +358,49 @@
     const d = new Date(Number(ts));
     const pad2 = (n) => String(n).padStart(2, '0');
     const md = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-    if (normalizeBarInterval(interval) === 'hour') {
+    const mode = normalizeBarInterval(interval);
+    if (mode === 'hour') {
       return `${md} ${pad2(d.getHours())}:00`;
     }
+    if (mode === 'month') {
+      return `${d.getFullYear()}-${md}`;
+    }
     return md;
+  }
+
+  function formatBarAxisTickLabel(ts, interval, index) {
+    const d = new Date(Number(ts));
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const mode = normalizeBarInterval(interval);
+    if (mode === 'hour') {
+      if (d.getHours() === 0 || index === 0) {
+        return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+      }
+      return `${pad2(d.getHours())}:00`;
+    }
+    if (mode === 'month') {
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    }
+    if (mode === 'week') {
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    }
+    const prevTs = Number(ts) - barIntervalMs(mode);
+    const prev = new Date(prevTs);
+    const yearChanged = index === 0 || d.getFullYear() !== prev.getFullYear();
+    if (yearChanged || d.getDate() === 1) {
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    }
+    return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
+  function formatBarTooltipLabel(ts, interval) {
+    const d = new Date(Number(ts));
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const mode = normalizeBarInterval(interval);
+    if (mode === 'hour') {
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:00`;
+    }
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   }
 
   function formatBarDebugSlot(ts) {
@@ -2438,7 +2477,7 @@
 
       const displaySeries = cfg.series.map((s) => displaySeriesName(s));
       const prefix = displayPrefixForSeries(displaySeries);
-      const xLabels = Array.from({ length: slotCount }, (_, i) => formatBarSlotLabel(visibleStart + i * intervalMs, interval));
+      const xTimestamps = Array.from({ length: slotCount }, (_, i) => visibleStart + i * intervalMs);
       const seriesDefs = [];
       for (const seriesName of cfg.series) {
         const data = eventsBySeries.get(seriesName) || { points: [], decimalPlaces: undefined };
@@ -2662,7 +2701,10 @@
           formatter: (params) => {
             const items = Array.isArray(params) ? params : [params];
             if (!items.length) return '';
-            const axisLabel = String(items[0].axisValueLabel || items[0].name || '');
+            const axisTs = Number(items[0].axisValue);
+            const axisLabel = Number.isFinite(axisTs)
+              ? formatBarTooltipLabel(axisTs, interval)
+              : String(items[0].axisValueLabel || items[0].name || '');
             const lines = [htmlEscape(axisLabel)];
             for (const item of items) {
               const name = String(item && item.seriesName ? item.seriesName : '');
@@ -2688,9 +2730,13 @@
         },
         xAxis: {
           type: 'category',
-          data: xLabels,
+          data: xTimestamps,
           axisLine: { lineStyle: { color: '#4d5b70' } },
-          axisLabel: { color: '#aebbc9', interval: 'auto' },
+          axisLabel: {
+            color: '#aebbc9',
+            interval: 'auto',
+            formatter: (value, idx) => formatBarAxisTickLabel(Number(value), interval, Number(idx || 0)),
+          },
         },
         yAxis: yAxes,
         series: seriesDefs.map((s) => ({
