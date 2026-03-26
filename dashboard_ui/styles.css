@@ -432,10 +432,24 @@ select[id^="solarnoon-method-"] {
 }
 
 .mqtttable-table .mqtttable-topic {
-  white-space: normal;
-  word-break: break-word;
-  min-width: 220px;
   text-align: left;
+}
+
+.mqtttable-table .mqtttable-compact {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.mqtttable-table .mqtttable-grow {
+  width: auto;
+  white-space: normal;
+  text-align: left;
+  word-break: break-word;
+}
+
+.mqtttable-table th[data-action="mqtttable-sort"] {
+  cursor: pointer;
+  user-select: none;
 }
 
 .stat-current {

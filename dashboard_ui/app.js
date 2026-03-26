@@ -81,6 +81,9 @@
   const statColumnsDialog = document.getElementById('statColumnsDialog');
   const columnsList = document.getElementById('columnsList');
   const columnsSearch = document.getElementById('columnsSearch');
+  const mqttSettingsDialog = document.getElementById('mqttSettingsDialog');
+  const mqttSettingsName = document.getElementById('mqttSettingsName');
+  const mqttSettingsColumnsList = document.getElementById('mqttSettingsColumnsList');
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
@@ -97,6 +100,9 @@
   let activeSettingsHeatmapId = null;
   let activeSettingsBarId = null;
   let activeColumnsStatId = null;
+  let activeSettingsMqttId = null;
+  let mqttSettingsColumnsDraft = [];
+  let mqttSettingsColumnsSelection = null;
   let consolePanelId = null;
   let apiTraceEnabled = false;
   let lastConsoleLogMs = null;
@@ -1971,7 +1977,7 @@
         <div class="panel-actions">
           <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
           <input type="search" class="mqtttable-filter" id="mqtttable-filter-${id}" data-action="mqtttable-filter" data-id="${id}" placeholder="Filter JSON..." />
-          <button class="icon-btn danger" data-action="remove-panel" data-id="${id}" title="Remove window">🗑️</button>
+          <button class="settings-gadget" data-action="mqtttable-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
       </div>
       <div class="stat-wrap">
@@ -3704,28 +3710,55 @@
   function renderMqttExplorerTableFromCache(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
-    const allRows = Array.isArray(cfg.rows) ? cfg.rows : [];
-    const totalTopics = Number.isFinite(cfg.totalTopics) ? Number(cfg.totalTopics) : allRows.length;
+    const allRowsRaw = Array.isArray(cfg.rows) ? cfg.rows : [];
+    const totalTopics = Number.isFinite(cfg.totalTopics) ? Number(cfg.totalTopics) : allRowsRaw.length;
     const filterText = String(cfg.filter || '').trim().toLowerCase();
-    const rows = allRows.filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText));
+    const rows = allRowsRaw.filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText));
+    const detectedColumns = Array.isArray(cfg.detectedColumns) ? cfg.detectedColumns : [];
+    const defaultColumns = ['temperature_C', 'rssi', 'duration', 'protocol'];
+    const visibleColumns = Array.isArray(cfg.visibleColumns) && cfg.visibleColumns.length
+      ? cfg.visibleColumns.filter((k) => detectedColumns.includes(k))
+      : defaultColumns.filter((k) => detectedColumns.includes(k));
+    const order = Array.isArray(cfg.columnOrder) ? cfg.columnOrder : detectedColumns;
+    visibleColumns.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    cfg.visibleColumns = visibleColumns;
+    const key = String(cfg.sortKey || 'topic');
+    const dir = (String(cfg.sortDir || 'asc') === 'desc') ? -1 : 1;
+    rows.sort((a, b) => {
+      const av = key === 'topic' ? String(a.topic || '') : String((a.values && a.values[key]) || '');
+      const bv = key === 'topic' ? String(b.topic || '') : String((b.values && b.values[key]) || '');
+      const an = Number(av);
+      const bn = Number(bv);
+      const bothNumeric = Number.isFinite(an) && Number.isFinite(bn) && av.trim() !== '' && bv.trim() !== '';
+      if (bothNumeric) return (an - bn) * dir;
+      return av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' }) * dir;
+    });
+    const sortMarker = (colKey) => (
+      String(cfg.sortKey || 'topic') === colKey ? (String(cfg.sortDir || 'asc') === 'desc' ? ' ▼' : ' ▲') : ''
+    );
+    const colDefs = [
+      { key: 'topic', label: 'Topic', isTopic: true },
+      ...visibleColumns.map((k) => ({ key: k, label: k, isTopic: false })),
+    ];
     const head = `
       <thead>
         <tr>
-          <th class="mqtttable-topic">Topic</th>
-          <th>temperature_C</th>
-          <th>rssi</th>
-          <th>duration</th>
-          <th>protocol</th>
+          ${colDefs.map((col, idx) => {
+            const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
+            if (col.isTopic) classes.push('mqtttable-topic');
+            return `<th class="${classes.join(' ')}" data-action="mqtttable-sort" data-id="${id}" data-key="${htmlEscape(col.key)}">${htmlEscape(col.label)}${sortMarker(col.key)}</th>`;
+          }).join('')}
         </tr>
       </thead>
     `;
     const body = rows.map((row) => `
       <tr>
-        <td class="mqtttable-topic">${htmlEscape(row.topic)}</td>
-        <td>${htmlEscape(row.temperature_C)}</td>
-        <td>${htmlEscape(row.rssi)}</td>
-        <td>${htmlEscape(row.duration)}</td>
-        <td>${htmlEscape(row.protocol)}</td>
+        ${colDefs.map((col, idx) => {
+          const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
+          if (col.isTopic) classes.push('mqtttable-topic');
+          const value = col.isTopic ? String(row.topic || '') : String((row.values && row.values[col.key]) || '');
+          return `<td class="${classes.join(' ')}">${htmlEscape(value)}</td>`;
+        }).join('')}
       </tr>
     `).join('');
     cfg.tableEl.innerHTML = head + `<tbody>${body}</tbody>`;
@@ -3748,6 +3781,8 @@
       if (mqttSeries.length === 0) {
         cfg.rows = [];
         cfg.totalTopics = 0;
+        cfg.detectedColumns = [];
+        cfg.visibleColumns = [];
         cfg.tableEl.innerHTML = '<tbody><tr><td class="stat-name" colspan="6">No mqttlog series</td></tr></tbody>';
         setPanelTitleMeta(id, '0 topics');
         appendConsoleLine(`mqtttable ${id} refresh done (no mqttlog series)`);
@@ -3785,21 +3820,40 @@
       appendConsoleLine(`mqtttable ${id} request done series=${mqttSeries.length} rows=${eventRows.length} elapsed=${Math.round(performance.now() - reqT0)}ms`);
       const bySeries = new Map(eventRows.map((row) => [row.series, row]));
       const prefix = commonTopicPrefixForDisplay(mqttSeries);
+      const detected = new Set(['temperature_C', 'rssi', 'duration', 'protocol']);
       cfg.rows = mqttSeries.map((seriesName) => {
         const row = bySeries.get(seriesName) || { payload: null, jsonText: '' };
         const topic = (seriesName.startsWith(prefix) && prefix.length < seriesName.length)
           ? seriesName.slice(prefix.length)
           : seriesName;
+        const values = {};
+        if (row.payload && typeof row.payload === 'object') {
+          for (const [k, v] of Object.entries(row.payload)) {
+            detected.add(String(k));
+            values[String(k)] = mqttValueText({ [k]: v }, k);
+          }
+        }
         return {
           topic,
-          temperature_C: mqttValueText(row.payload, 'temperature_C'),
-          rssi: mqttValueText(row.payload, 'rssi'),
-          duration: mqttValueText(row.payload, 'duration'),
-          protocol: mqttValueText(row.payload, 'protocol'),
+          values,
           jsonText: row.jsonText || '',
         };
       });
       cfg.totalTopics = mqttSeries.length;
+      cfg.detectedColumns = Array.from(detected).sort((a, b) => a.localeCompare(b));
+      if (!Array.isArray(cfg.columnOrder) || cfg.columnOrder.length === 0) {
+        cfg.columnOrder = [...cfg.detectedColumns];
+      } else {
+        const existing = cfg.columnOrder.filter((k) => cfg.detectedColumns.includes(k));
+        const missing = cfg.detectedColumns.filter((k) => !existing.includes(k));
+        cfg.columnOrder = [...existing, ...missing];
+      }
+      if (!Array.isArray(cfg.visibleColumns) || cfg.visibleColumns.length === 0) {
+        cfg.visibleColumns = ['temperature_C', 'rssi', 'duration', 'protocol'].filter((k) => cfg.detectedColumns.includes(k));
+      } else {
+        cfg.visibleColumns = cfg.visibleColumns.filter((k) => cfg.detectedColumns.includes(k));
+      }
+      cfg.visibleColumns.sort((a, b) => cfg.columnOrder.indexOf(a) - cfg.columnOrder.indexOf(b));
       renderMqttExplorerTableFromCache(id);
       appendConsoleLine(`mqtttable ${id} refresh done rows=${cfg.rows.length} topics=${mqttSeries.length}`);
     } finally {
@@ -4000,6 +4054,11 @@
       filter: String(options.filter || ''),
       rows: [],
       totalTopics: 0,
+      detectedColumns: [],
+      columnOrder: Array.isArray(options.columnOrder) ? options.columnOrder.map((k) => String(k)) : [],
+      visibleColumns: Array.isArray(options.visibleColumns) ? options.visibleColumns.map((k) => String(k)) : [],
+      sortKey: String(options.sortKey || 'topic'),
+      sortDir: String(options.sortDir || 'asc') === 'desc' ? 'desc' : 'asc',
       label: options.label || null,
       busyCount: 0,
       titleMeta: '',
@@ -4337,6 +4396,10 @@
           w: Number(nodeInfo.w || 8),
           h: Number(nodeInfo.h || 4),
           filter: String(c.filter || ''),
+          columnOrder: Array.isArray(c.columnOrder) ? [...c.columnOrder] : [],
+          visibleColumns: Array.isArray(c.visibleColumns) ? [...c.visibleColumns] : [],
+          sortKey: String(c.sortKey || 'topic'),
+          sortDir: String(c.sortDir || 'asc') === 'desc' ? 'desc' : 'asc',
           label: c.label || null,
         });
         continue;
@@ -4488,6 +4551,10 @@
           w: Number(ch.w) || 8,
           h: Number(ch.h) || 4,
           filter: String(ch.filter || ''),
+          columnOrder: Array.isArray(ch.columnOrder) ? ch.columnOrder.filter((k) => typeof k === 'string') : [],
+          visibleColumns: Array.isArray(ch.visibleColumns) ? ch.visibleColumns.filter((k) => typeof k === 'string') : [],
+          sortKey: String(ch.sortKey || 'topic'),
+          sortDir: String(ch.sortDir || 'asc') === 'desc' ? 'desc' : 'asc',
           label: typeof ch.label === 'string' ? ch.label : null,
           deferRefresh: true,
         });
@@ -4991,6 +5058,49 @@
     statColumnsDialog.showModal();
   }
 
+  function renderMqttSettingsColumnsList() {
+    if (!(mqttSettingsColumnsList instanceof HTMLElement)) return;
+    if (!activeSettingsMqttId) {
+      mqttSettingsColumnsList.innerHTML = '<div class="series-item"><span>No panel selected</span></div>';
+      return;
+    }
+    const c = charts.get(activeSettingsMqttId);
+    if (!c || c.kind !== 'mqtttable') {
+      mqttSettingsColumnsList.innerHTML = '<div class="series-item"><span>No panel selected</span></div>';
+      return;
+    }
+    if (!Array.isArray(mqttSettingsColumnsDraft) || mqttSettingsColumnsDraft.length === 0) {
+      mqttSettingsColumnsList.innerHTML = '<div class="series-item"><span>No columns detected yet. Refresh this panel first.</span></div>';
+      return;
+    }
+    mqttSettingsColumnsList.innerHTML = mqttSettingsColumnsDraft.map((key, idx) => `
+      <div class="series-item" data-reorder-index="${idx}" draggable="true">
+        <span style="width:2ch;text-align:right;color:#90a0b3">${idx + 1}</span>
+        <input type="checkbox" value="${htmlEscape(key)}" ${mqttSettingsColumnsSelection && mqttSettingsColumnsSelection.has(key) ? 'checked' : ''} />
+        <span>${htmlEscape(key)}</span>
+      </div>
+    `).join('');
+  }
+
+  function openMqttSettingsDialog(id) {
+    const c = charts.get(id);
+    if (!c || c.kind !== 'mqtttable') return;
+    activeSettingsMqttId = id;
+    if (mqttSettingsName instanceof HTMLInputElement) {
+      mqttSettingsName.value = c.label || '';
+    }
+    const cols = Array.isArray(c.detectedColumns) ? c.detectedColumns : [];
+    const visible = Array.isArray(c.visibleColumns) ? c.visibleColumns : [];
+    const order = Array.isArray(c.columnOrder) && c.columnOrder.length
+      ? c.columnOrder.filter((k) => cols.includes(k))
+      : cols;
+    const missing = cols.filter((k) => !order.includes(k));
+    mqttSettingsColumnsDraft = [...order, ...missing];
+    mqttSettingsColumnsSelection = new Set(visible.filter((k) => cols.includes(k)));
+    renderMqttSettingsColumnsList();
+    mqttSettingsDialog.showModal();
+  }
+
   document.getElementById('seriesForm').addEventListener('submit', (e) => {
     e.preventDefault();
     if (!activeChartId) {
@@ -5059,6 +5169,17 @@
     }
   });
 
+  if (mqttSettingsColumnsList instanceof HTMLElement) {
+    mqttSettingsColumnsList.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      if (target.type !== 'checkbox') return;
+      if (!mqttSettingsColumnsSelection) return;
+      if (target.checked) mqttSettingsColumnsSelection.add(target.value);
+      else mqttSettingsColumnsSelection.delete(target.value);
+    });
+  }
+
   document.addEventListener('click', (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
@@ -5095,6 +5216,27 @@
 
     if (target.dataset.action === 'remove-panel') {
       removePanel(target.dataset.id);
+      return;
+    }
+
+    if (target.dataset.action === 'mqtttable-settings') {
+      openMqttSettingsDialog(String(target.dataset.id || ''));
+      return;
+    }
+
+    const sortHeader = target.closest('[data-action="mqtttable-sort"]');
+    if (sortHeader instanceof HTMLElement) {
+      const id = String(sortHeader.dataset.id || '');
+      const key = String(sortHeader.dataset.key || 'topic');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'mqtttable') return;
+      if (String(panel.sortKey || 'topic') === key) {
+        panel.sortDir = String(panel.sortDir || 'asc') === 'asc' ? 'desc' : 'asc';
+      } else {
+        panel.sortKey = key;
+        panel.sortDir = 'asc';
+      }
+      renderMqttExplorerTableFromCache(id);
       return;
     }
 
@@ -5629,6 +5771,61 @@
     activeColumnsStatId = null;
   });
 
+  document.getElementById('mqttSettingsForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeSettingsMqttId) {
+      mqttSettingsDialog.close();
+      return;
+    }
+    const c = charts.get(activeSettingsMqttId);
+    if (!c || c.kind !== 'mqtttable') {
+      mqttSettingsDialog.close();
+      return;
+    }
+    c.label = (mqttSettingsName instanceof HTMLInputElement)
+      ? (String(mqttSettingsName.value || '').trim() || null)
+      : c.label;
+    const detected = Array.isArray(c.detectedColumns) ? c.detectedColumns : [];
+    const ordered = Array.isArray(mqttSettingsColumnsDraft)
+      ? mqttSettingsColumnsDraft.filter((k) => detected.includes(k))
+      : [];
+    c.columnOrder = ordered;
+    const selected = mqttSettingsColumnsSelection ? Array.from(mqttSettingsColumnsSelection) : [];
+    c.visibleColumns = ordered.filter((k) => selected.includes(k));
+    updateTitle(activeSettingsMqttId);
+    renderMqttExplorerTableFromCache(activeSettingsMqttId);
+    activeSettingsMqttId = null;
+    mqttSettingsColumnsDraft = [];
+    mqttSettingsColumnsSelection = null;
+    mqttSettingsDialog.close();
+  });
+
+  document.getElementById('cancelMqttSettings').addEventListener('click', () => {
+    activeSettingsMqttId = null;
+    mqttSettingsColumnsDraft = [];
+    mqttSettingsColumnsSelection = null;
+    mqttSettingsDialog.close();
+  });
+
+  document.getElementById('removeMqttSettings').addEventListener('click', () => {
+    if (!activeSettingsMqttId) {
+      mqttSettingsDialog.close();
+      return;
+    }
+    const removeId = activeSettingsMqttId;
+    activeSettingsMqttId = null;
+    mqttSettingsColumnsDraft = [];
+    mqttSettingsColumnsSelection = null;
+    mqttSettingsDialog.close();
+    removePanel(removeId);
+  });
+
+  mqttSettingsDialog.addEventListener('close', () => {
+    activeSettingsMqttId = null;
+    mqttSettingsColumnsDraft = [];
+    mqttSettingsColumnsSelection = null;
+  });
+
   attachRowReorderDnD(chartSettingsSeriesList, (fromIndex, toIndex) => {
     if (!moveArrayItem(chartSettingsSeriesDraft, fromIndex, toIndex)) return;
     renderChartSettingsSeriesList();
@@ -5655,6 +5852,12 @@
     if (columnsSearch && typeof columnsSearch.oninput === 'function') {
       columnsSearch.oninput();
     }
+  });
+
+  attachRowReorderDnD(mqttSettingsColumnsList, (fromIndex, toIndex) => {
+    if (!Array.isArray(mqttSettingsColumnsDraft)) return;
+    if (!moveArrayItem(mqttSettingsColumnsDraft, fromIndex, toIndex)) return;
+    renderMqttSettingsColumnsList();
   });
 
   attachRowReorderDnD(dashboardManageList, (fromIndex, toIndex) => {

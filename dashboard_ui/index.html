@@ -263,6 +263,23 @@
     </form>
   </dialog>
 
+  <dialog id="mqttSettingsDialog" class="modal">
+    <form method="dialog" class="modal-content" id="mqttSettingsForm">
+      <h2>MQTT Table Settings</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Name</div>
+        <div><input id="mqttSettingsName" type="text" placeholder="Window name" /></div>
+      </div>
+      <div class="settings-label">Columns</div>
+      <div id="mqttSettingsColumnsList" class="series-list"></div>
+      <menu>
+        <button id="removeMqttSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="cancelMqttSettings" type="button" class="btn">Cancel</button>
+        <button id="saveMqttSettings" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
   <dialog id="saveDashboardDialog" class="modal">
     <form method="dialog" class="modal-content" id="saveDashboardForm">
       <h2>Save New Dashboard</h2>
