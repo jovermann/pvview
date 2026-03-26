@@ -56,7 +56,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
-API_VERSION = 22  # Increment when API endpoints or payload schemas change.
+API_VERSION = 23  # Increment when API endpoints or payload schemas change.
 SERVER_VERSION = f"tsdb_server.py api-v{API_VERSION}"
 DEFAULT_MIN_POINTS = 10
 
@@ -161,6 +161,7 @@ _ALL_DOWNSAMPLE_BUCKETS: List[Tuple[int, str, int]] = [
     (900_000, "15m", 3),
     (3_600_000, "1h", 3),
 ]
+_MQTTLOG_SYNTHETIC_FIELDS: Tuple[str, ...] = ("temperature_C", "humidity", "rssi")
 
 _DOWNSAMPLE_LABEL_TO_MS: Dict[str, int] = {label: granularity_ms for granularity_ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS}
 
@@ -266,6 +267,66 @@ def _series_storage(series_name: str) -> Tuple[str, str]:
     if name.startswith("mqttlog/"):
         return "mqttlog_", name[len("mqttlog/"):]
     return "data_", name
+
+
+def _split_mqttlog_synthetic_series(series_name: str) -> Optional[Tuple[str, str]]:
+    """Return (base_series, json_field) for synthetic mqttlog JSON field series."""
+    name = str(series_name or "")
+    if not name.startswith("mqttlog/"):
+        return None
+    for field in _MQTTLOG_SYNTHETIC_FIELDS:
+        suffix = f"/{field}"
+        if name.endswith(suffix) and len(name) > len("mqttlog/") + len(suffix):
+            return name[: -len(suffix)], field
+    return None
+
+
+def _numeric_json_object_fields(value: Any) -> set[str]:
+    """Extract numeric synthetic-field keys from a JSON payload value."""
+    obj: Any = None
+    if isinstance(value, dict):
+        obj = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return set()
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return set()
+        if isinstance(parsed, dict):
+            obj = parsed
+    if not isinstance(obj, dict):
+        return set()
+    out: set[str] = set()
+    for key in _MQTTLOG_SYNTHETIC_FIELDS:
+        v = obj.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out.add(key)
+    return out
+
+
+def _numeric_json_field_value(value: Any, field: str) -> Optional[float]:
+    """Extract one numeric field value from JSON payload or dict value."""
+    obj: Any = None
+    if isinstance(value, dict):
+        obj = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            obj = parsed
+    if not isinstance(obj, dict):
+        return None
+    raw = obj.get(field)
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return None
+    return float(raw)
 
 
 def _prefixed_series_name_for_path(path: str, series_name: str) -> str:
@@ -3389,11 +3450,25 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             files = _find_catalog_files(data_dir, start_ms, end_ms)
         names = set()
         for path in files:
+            cache = None
             for name in list_series_in_file(path):
                 series_name = _prefixed_series_name_for_path(path, name)
                 if prefix and not series_name.startswith(prefix):
                     continue
                 names.add(series_name)
+                if series_name.startswith("mqttlog/"):
+                    if cache is None:
+                        cache = get_cached_tsdb_file(path)
+                    fields_seen: set[str] = set()
+                    for ev in reversed(cache.series_events.get(name, [])):
+                        fields_seen.update(_numeric_json_object_fields(ev.value))
+                        if len(fields_seen) >= len(_MQTTLOG_SYNTHETIC_FIELDS):
+                            break
+                    for field in fields_seen:
+                        synth_name = f"{series_name}/{field}"
+                        if prefix and not synth_name.startswith(prefix):
+                            continue
+                        names.add(synth_name)
         if prefix_norm != "mqttlog":
             for d in load_virtual_series_defs(data_dir):
                 if prefix and not d.name.startswith(prefix):
@@ -3598,6 +3673,20 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
         Returns:
             Dict[str, Any]: Result produced by this function.
         """
+        synthetic = _split_mqttlog_synthetic_series(series)
+        if synthetic is not None:
+            base_series, field = synthetic
+            return self._events_for_mqttlog_json_field(
+                data_dir=data_dir,
+                series=series,
+                base_series=base_series,
+                json_field=field,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                min_points=min_points,
+                granularity=granularity,
+            )
+
         file_prefix, storage_series_name = _series_storage(series)
 
         requested_granularity_ms = _choose_auto_granularity_ms(start_ms, end_ms, min_points) if granularity is None else int(granularity)
@@ -3654,6 +3743,81 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
             response["granularityMs"] = requested_granularity_ms if requested_granularity_ms > 0 else 1_000
         if not all_numeric and requested_granularity_ms > 0:
             response["note"] = "Series is non-numeric; returned raw values without min/avg/max aggregation."
+        _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
+        return response
+
+    def _events_for_mqttlog_json_field(
+        self,
+        data_dir: str,
+        series: str,
+        base_series: str,
+        json_field: str,
+        start_ms: int,
+        end_ms: int,
+        min_points: int,
+        granularity: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Build synthetic numeric events from JSON mqttlog series field values."""
+        requested_granularity_ms = _choose_auto_granularity_ms(start_ms, end_ms, min_points) if granularity is None else int(granularity)
+        requested_granularity_ms = max(0, requested_granularity_ms)
+        requested_days = list(day_range_utc(start_ms, end_ms))
+
+        files_used: List[str] = []
+        seen_files: set[str] = set()
+        numeric_events: List[Event] = []
+        for day in requested_days:
+            day_points, day_files, _day_decimals, _day_all_numeric, _day_downsampled = self._get_events_for_day(
+                data_dir=data_dir,
+                day=day,
+                series_name=base_series[len("mqttlog/"):],
+                file_prefix="mqttlog_",
+                granularity_ms=0,
+                request_start_ms=start_ms,
+                request_end_ms=end_ms,
+            )
+            for name in day_files:
+                if name not in seen_files:
+                    seen_files.add(name)
+                    files_used.append(name)
+            for point in day_points:
+                if "value" not in point:
+                    continue
+                ts = int(point.get("timestamp", 0))
+                value = _numeric_json_field_value(point.get("value"), json_field)
+                if value is None:
+                    continue
+                numeric_events.append(Event(ts, value))
+        numeric_events.sort(key=lambda e: e.timestamp_ms)
+
+        if requested_granularity_ms > 0:
+            points = _downsample_fixed_numeric_events(
+                numeric_events,
+                requested_granularity_ms,
+                start_ms,
+                end_ms,
+                decimal_places=3,
+            )
+            downsampled = True
+            response_granularity_ms = requested_granularity_ms
+        else:
+            points = [{"timestamp": e.timestamp_ms, "value": round(float(e.value), 3)} for e in numeric_events]
+            downsampled = False
+            response_granularity_ms = 1_000
+
+        response: Dict[str, Any] = {
+            "series": series,
+            "start": start_ms,
+            "end": end_ms,
+            "requestedMinPoints": min_points,
+            "requestedGranularity": "auto" if granularity is None else ("raw" if granularity == 0 else next((label for ms, label, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity), str(granularity))),
+            "returnedPoints": len(points),
+            "downsampled": downsampled,
+            "files": files_used,
+            "points": points,
+            "decimalPlaces": 3,
+        }
+        if downsampled:
+            response["granularityMs"] = response_granularity_ms
         _update_series_stat_cache_from_event_response(data_dir, series, start_ms, end_ms, response)
         return response
 

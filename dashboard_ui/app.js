@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_API_VERSION = 22;
+  const FRONTEND_API_VERSION = 23;
   const SAVE_NEW_DASHBOARD_VALUE = '__save_new_dashboard__';
   const NEW_EMPTY_DASHBOARD_VALUE = '__new_empty_dashboard__';
   const AUTO_DETECT_LABEL = 'Auto Detect';
@@ -3815,8 +3815,21 @@
       const catalogQ = new URLSearchParams({ start: '0', end: '9999999999999', prefix: 'mqttlog' });
       const catalogResp = await apiJson(`/series?${catalogQ}`);
       const catalog = Array.isArray(catalogResp && catalogResp.series) ? catalogResp.series : [];
+      const syntheticSuffixes = ['temperature_C', 'humidity', 'rssi'];
+      const catalogSet = new Set(catalog.map((s) => String(s)));
       const mqttSeries = catalog
         .filter((name) => typeof name === 'string' && name.startsWith('mqttlog/'))
+        .filter((name) => {
+          const s = String(name);
+          for (const suffix of syntheticSuffixes) {
+              const token = `/${suffix}`;
+              if (s.endsWith(token)) {
+                const base = s.slice(0, -token.length);
+                if (catalogSet.has(base)) return false;
+              }
+            }
+            return true;
+          })
         .sort((a, b) => a.localeCompare(b));
       if (mqttSeries.length === 0) {
         cfg.rows = [];

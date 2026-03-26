@@ -519,6 +519,10 @@ select[id^="solarnoon-method-"] {
   background: var(--panel);
 }
 
+#seriesDialog {
+  width: min(980px, 96vw);
+}
+
 #virtualSeriesDialog {
   width: min(842px, 77vw);
   margin: 56px auto auto auto;
