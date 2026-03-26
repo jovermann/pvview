@@ -103,6 +103,7 @@
   let activeSettingsMqttId = null;
   let mqttSettingsColumnsDraft = [];
   let mqttSettingsColumnsSelection = null;
+  let mqttHeaderDrag = null;
   let consolePanelId = null;
   let apiTraceEnabled = false;
   let lastConsoleLogMs = null;
@@ -3783,7 +3784,8 @@
             const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
             if (col.isTopic) classes.push('mqtttable-topic');
             if (col.key === 'age') classes.push('mqtttable-right');
-            return `<th class="${classes.join(' ')}" data-action="mqtttable-sort" data-id="${id}" data-key="${htmlEscape(col.key)}">${htmlEscape(col.label)}${sortMarker(col.key)}</th>`;
+            const draggable = col.isTopic ? '' : 'draggable="true"';
+            return `<th class="${classes.join(' ')}" data-action="mqtttable-sort" data-id="${id}" data-key="${htmlEscape(col.key)}" ${draggable}>${htmlEscape(col.label)}${sortMarker(col.key)}</th>`;
           }).join('')}
         </tr>
       </thead>
@@ -5277,6 +5279,10 @@
 
     const sortHeader = target.closest('[data-action="mqtttable-sort"]');
     if (sortHeader instanceof HTMLElement) {
+      if (mqttHeaderDrag && mqttHeaderDrag.justDropped) {
+        mqttHeaderDrag.justDropped = false;
+        return;
+      }
       const id = String(sortHeader.dataset.id || '');
       const key = String(sortHeader.dataset.key || 'topic');
       const panel = charts.get(id);
@@ -5564,6 +5570,97 @@
       if (!panel || panel.kind !== 'mqtttable') return;
       panel.filter = target.value || '';
       renderMqttExplorerTableFromCache(id);
+    }
+  });
+
+  document.addEventListener('dragstart', (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    const th = target.closest('th[data-action="mqtttable-sort"][data-id][data-key]');
+    if (!(th instanceof HTMLElement)) return;
+    const id = String(th.dataset.id || '');
+    const key = String(th.dataset.key || '');
+    if (!id || !key || key === 'topic') return;
+    const panel = charts.get(id);
+    if (!panel || panel.kind !== 'mqtttable') return;
+    mqttHeaderDrag = { id, key, justDropped: false };
+    th.classList.add('dragging');
+    if (ev.dataTransfer) {
+      ev.dataTransfer.effectAllowed = 'move';
+      ev.dataTransfer.setData('text/plain', `${id}:${key}`);
+    }
+  });
+
+  document.addEventListener('dragover', (ev) => {
+    if (!mqttHeaderDrag) return;
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    const th = target.closest('th[data-action="mqtttable-sort"][data-id][data-key]');
+    if (!(th instanceof HTMLElement)) return;
+    const id = String(th.dataset.id || '');
+    const key = String(th.dataset.key || '');
+    if (id !== mqttHeaderDrag.id || !key || key === 'topic') return;
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+  });
+
+  document.addEventListener('drop', (ev) => {
+    if (!mqttHeaderDrag) return;
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) {
+      mqttHeaderDrag = null;
+      return;
+    }
+    const th = target.closest('th[data-action="mqtttable-sort"][data-id][data-key]');
+    if (!(th instanceof HTMLElement)) {
+      mqttHeaderDrag = null;
+      return;
+    }
+    const id = String(th.dataset.id || '');
+    const targetKey = String(th.dataset.key || '');
+    if (id !== mqttHeaderDrag.id || !targetKey || targetKey === 'topic') {
+      mqttHeaderDrag = null;
+      return;
+    }
+    ev.preventDefault();
+    const panel = charts.get(id);
+    if (!panel || panel.kind !== 'mqtttable') {
+      mqttHeaderDrag = null;
+      return;
+    }
+    const visible = Array.isArray(panel.visibleColumns) ? [...panel.visibleColumns] : [];
+    const from = visible.indexOf(mqttHeaderDrag.key);
+    const toBase = visible.indexOf(targetKey);
+    if (from < 0 || toBase < 0 || from === toBase) {
+      mqttHeaderDrag = null;
+      return;
+    }
+    const rect = th.getBoundingClientRect();
+    const insertAfter = ev.clientX >= (rect.left + rect.width / 2);
+    const [moved] = visible.splice(from, 1);
+    let to = toBase;
+    if (from < to) to -= 1;
+    if (insertAfter) to += 1;
+    to = Math.max(0, Math.min(visible.length, to));
+    visible.splice(to, 0, moved);
+    panel.visibleColumns = visible;
+    if (!Array.isArray(panel.columnOrder)) panel.columnOrder = [];
+    const order = panel.columnOrder.filter((k) => k !== moved);
+    const targetPos = order.indexOf(targetKey);
+    if (targetPos >= 0) {
+      const pos = insertAfter ? (targetPos + 1) : targetPos;
+      order.splice(Math.max(0, Math.min(order.length, pos)), 0, moved);
+      panel.columnOrder = order;
+    }
+    mqttHeaderDrag.justDropped = true;
+    renderMqttExplorerTableFromCache(id);
+  });
+
+  document.addEventListener('dragend', () => {
+    document.querySelectorAll('th.dragging').forEach((el) => el.classList.remove('dragging'));
+    if (mqttHeaderDrag && !mqttHeaderDrag.justDropped) mqttHeaderDrag = null;
+    else if (mqttHeaderDrag && mqttHeaderDrag.justDropped) {
+      setTimeout(() => { mqttHeaderDrag = null; }, 0);
     }
   });
 

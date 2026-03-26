@@ -456,6 +456,14 @@ select[id^="solarnoon-method-"] {
   user-select: none;
 }
 
+.mqtttable-table th[data-action="mqtttable-sort"][draggable="true"] {
+  cursor: grab;
+}
+
+.mqtttable-table th.dragging {
+  opacity: 0.6;
+}
+
 .stat-current {
   color: #e5effc;
   font-size: var(--stat-big-font, 26px);
