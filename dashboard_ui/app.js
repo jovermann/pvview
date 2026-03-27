@@ -1977,6 +1977,20 @@
         </div>
         <div class="panel-actions">
           <span class="panel-spinner" id="spinner-${id}" aria-hidden="true"></span>
+          <select class="heatmap-series-select" id="mqtttable-age-${id}" data-action="mqtttable-age" data-id="${id}" title="Age filter">
+            <option value="0">all</option>
+            <option value="${5 * 60 * 1000}">5m</option>
+            <option value="${10 * 60 * 1000}">10m</option>
+            <option value="${15 * 60 * 1000}">15m</option>
+            <option value="${30 * 60 * 1000}">30m</option>
+            <option value="${60 * 60 * 1000}">1h</option>
+            <option value="${2 * 60 * 60 * 1000}">2h</option>
+            <option value="${3 * 60 * 60 * 1000}">3h</option>
+            <option value="${6 * 60 * 60 * 1000}">6h</option>
+            <option value="${12 * 60 * 60 * 1000}">12h</option>
+            <option value="${24 * 60 * 60 * 1000}">1d</option>
+            <option value="${2 * 24 * 60 * 60 * 1000}">2d</option>
+          </select>
           <input type="search" class="mqtttable-filter" id="mqtttable-filter-${id}" data-action="mqtttable-filter" data-id="${id}" placeholder="Filter JSON..." />
           <button class="settings-gadget" data-action="mqtttable-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -3734,13 +3748,57 @@
     return value * 86400000;
   }
 
+  function normalizeMqttAgeFilterMs(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    const v = Math.floor(n);
+    const allowed = new Set([
+      0,
+      5 * 60 * 1000,
+      10 * 60 * 1000,
+      15 * 60 * 1000,
+      30 * 60 * 1000,
+      60 * 60 * 1000,
+      2 * 60 * 60 * 1000,
+      3 * 60 * 60 * 1000,
+      6 * 60 * 60 * 1000,
+      12 * 60 * 60 * 1000,
+      24 * 60 * 60 * 1000,
+      2 * 24 * 60 * 60 * 1000,
+    ]);
+    return allowed.has(v) ? v : 0;
+  }
+
+  function normalizeMqttSensorTypeFilter(value) {
+    const s = String(value || '').trim().toLowerCase();
+    if (s === 'temperature' || s === 'temp+hum' || s === 'non-temp') return s;
+    return 'all';
+  }
+
   function renderMqttExplorerTableFromCache(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
     const allRowsRaw = Array.isArray(cfg.rows) ? cfg.rows : [];
     const totalTopics = Number.isFinite(cfg.totalTopics) ? Number(cfg.totalTopics) : allRowsRaw.length;
     const filterText = String(cfg.filter || '').trim().toLowerCase();
-    const rows = allRowsRaw.filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText));
+    const ageFilterMs = normalizeMqttAgeFilterMs(cfg.ageFilterMs);
+    const sensorTypeFilter = normalizeMqttSensorTypeFilter(cfg.sensorTypeFilter);
+    const rows = allRowsRaw
+      .filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText))
+      .filter((row) => {
+        if (ageFilterMs <= 0) return true;
+        const ageMs = Number(row.ageMs);
+        return Number.isFinite(ageMs) && ageMs <= ageFilterMs;
+      })
+      .filter((row) => {
+        if (sensorTypeFilter === 'all') return true;
+        const values = row && row.values && typeof row.values === 'object' ? row.values : {};
+        const hasTemp = String(values.temperature_C || '').trim() !== '';
+        const hasHum = String(values.humidity || '').trim() !== '';
+        if (sensorTypeFilter === 'temperature') return hasTemp;
+        if (sensorTypeFilter === 'temp+hum') return hasTemp && hasHum;
+        return !hasTemp;
+      });
     const detectedColumns = Array.isArray(cfg.detectedColumns) ? cfg.detectedColumns : [];
     const defaultColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol'];
     const visibleColumns = Array.isArray(cfg.visibleColumns) && cfg.visibleColumns.length
@@ -3901,6 +3959,7 @@
         }
         return {
           topic,
+          ageMs: Number.isFinite(lastTs) ? Math.max(0, end - lastTs) : NaN,
           values,
           jsonText: row.jsonText || '',
         };
@@ -4111,13 +4170,17 @@
     node.querySelector('.grid-stack-item-content').appendChild(panel);
     const tableEl = document.getElementById(`mqtttable-${id}`);
     const filterEl = document.getElementById(`mqtttable-filter-${id}`);
+    const ageEl = document.getElementById(`mqtttable-age-${id}`);
+    const ageFilterMs = normalizeMqttAgeFilterMs(options.ageFilterMs);
     charts.set(id, {
       id,
       kind: 'mqtttable',
       node,
       tableEl,
       filterEl,
+      ageEl,
       filter: String(options.filter || ''),
+      ageFilterMs,
       rows: [],
       totalTopics: 0,
       detectedColumns: [],
@@ -4131,6 +4194,9 @@
     });
     if (filterEl instanceof HTMLInputElement) {
       filterEl.value = String(options.filter || '');
+    }
+    if (ageEl instanceof HTMLSelectElement) {
+      ageEl.value = String(ageFilterMs);
     }
     appendConsoleLine(`mqtttable ${id} created`);
     updateTitle(id);
@@ -4462,6 +4528,7 @@
           w: Number(nodeInfo.w || 8),
           h: Number(nodeInfo.h || 4),
           filter: String(c.filter || ''),
+          ageFilterMs: normalizeMqttAgeFilterMs(c.ageFilterMs),
           columnOrder: Array.isArray(c.columnOrder) ? [...c.columnOrder] : [],
           visibleColumns: Array.isArray(c.visibleColumns) ? [...c.visibleColumns] : [],
           sortKey: String(c.sortKey || 'topic'),
@@ -4617,6 +4684,7 @@
           w: Number(ch.w) || 8,
           h: Number(ch.h) || 4,
           filter: String(ch.filter || ''),
+          ageFilterMs: normalizeMqttAgeFilterMs(ch.ageFilterMs),
           columnOrder: Array.isArray(ch.columnOrder) ? ch.columnOrder.filter((k) => typeof k === 'string') : [],
           visibleColumns: Array.isArray(ch.visibleColumns) ? ch.visibleColumns.filter((k) => typeof k === 'string') : [],
           sortKey: String(ch.sortKey || 'topic'),
@@ -5532,6 +5600,15 @@
       if (!panel || panel.kind !== 'bar') return;
       panel.barInterval = normalizeBarInterval(target.value || 'day');
       refreshBar(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'mqtttable-age') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'mqtttable') return;
+      panel.ageFilterMs = normalizeMqttAgeFilterMs(target.value || '0');
+      renderMqttExplorerTableFromCache(id);
       return;
     }
     if (target.dataset.action === 'solarnoon-method') {
