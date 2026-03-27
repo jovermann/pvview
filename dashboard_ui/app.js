@@ -2033,6 +2033,7 @@
           </select>
           <select class="heatmap-series-select" id="mqtttable-msgday-${id}" data-action="mqtttable-msgday" data-id="${id}" title="Minimum msg/d">
             <option value="0">all</option>
+            <option value="5">5</option>
             <option value="10">10</option>
             <option value="20">20</option>
             <option value="50">50</option>
@@ -3832,7 +3833,7 @@
     const n = Number(value);
     if (!Number.isFinite(n)) return 0;
     const v = Math.floor(n);
-    const allowed = new Set([0, 10, 20, 50, 100, 200, 500, 1000]);
+    const allowed = new Set([0, 5, 10, 20, 50, 100, 200, 500, 1000]);
     return allowed.has(v) ? v : 0;
   }
 
