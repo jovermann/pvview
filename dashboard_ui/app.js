@@ -339,6 +339,7 @@
     const mode = String(value || '').trim().toLowerCase();
     if (mode === 'half') return 'half';
     if (mode === 'symmetry') return 'symmetry';
+    if (mode === 'symmetry50') return 'symmetry50';
     return 'weighted';
   }
 
@@ -493,13 +494,32 @@
             cum += e.energy;
           }
         }
-      } else {
+      } else if (mode === 'symmetry') {
         let peak = 0;
         for (const e of arr) {
           if (e.value > peak) peak = e.value;
         }
         if (peak > 0) {
           const threshold = peak * 0.1;
+          let first = NaN;
+          let last = NaN;
+          for (const e of arr) {
+            if (e.value >= threshold) {
+              if (!Number.isFinite(first)) first = e.start;
+              last = e.end;
+            }
+          }
+          if (Number.isFinite(first) && Number.isFinite(last)) {
+            midpointMs = first + (last - first) / 2;
+          }
+        }
+      } else {
+        let peak = 0;
+        for (const e of arr) {
+          if (e.value > peak) peak = e.value;
+        }
+        if (peak > 0) {
+          const threshold = peak * 0.5;
           let first = NaN;
           let last = NaN;
           for (const e of arr) {
@@ -2069,6 +2089,7 @@
             <option value="weighted">Energy-Weighted midpoint</option>
             <option value="half">Half-Energy time</option>
             <option value="symmetry">Symmetry midpoint (10% threshold)</option>
+            <option value="symmetry50">Symmetry midpoint (50% threshold)</option>
           </select>
           <select class="heatmap-series-select" id="solarnoon-smoothing-${id}" data-action="solarnoon-smoothing" data-id="${id}" title="Smoothing">
             <option value="plain">Plain</option>
@@ -2909,13 +2930,21 @@
       const smoothing = normalizeSolarNoonSmoothing(cfg.noonSmoothing);
       const years = normalizeSolarNoonYears(cfg.noonYears);
       const { end } = getRange();
+      let visibleStart;
+      let visibleEnd;
+      const dayKeys = [];
       const endDate = new Date(Number(end));
       const endDayUtcMs = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate(), 0, 0, 0, 0);
-      const startDate = new Date(endDayUtcMs);
+      // Exclude the potentially incomplete current day (day containing range end).
+      const lastCompleteDayEndUtcMs = endDayUtcMs;
+      const startDate = new Date(lastCompleteDayEndUtcMs);
       startDate.setUTCFullYear(startDate.getUTCFullYear() - years);
-      const visibleStart = startDate.getTime();
-      const visibleEnd = endDayUtcMs + 86_400_000;
-      const days = Math.max(1, Math.floor((visibleEnd - visibleStart) / 86_400_000));
+      visibleStart = startDate.getTime();
+      visibleEnd = lastCompleteDayEndUtcMs;
+      for (let ts = visibleStart; ts < visibleEnd; ts += 86_400_000) {
+        dayKeys.push(dayKeyUtc(ts));
+      }
+      const days = Math.max(1, dayKeys.length);
       const q = new URLSearchParams({
         start: String(visibleStart),
         end: String(visibleEnd),
@@ -2935,10 +2964,6 @@
         .map((item) => [item.series, item]));
       appendConsoleLine(`solarnoon ${id} request done batch series=${selectedSeries.length} returned=${eventItems.length} elapsed=${reqMs}ms`);
 
-      const dayKeys = [];
-      for (let i = 0; i < days; i += 1) {
-        dayKeys.push(dayKeyUtc(visibleStart + i * 86_400_000));
-      }
       const xLabels = dayKeys.map((key) => key.slice(2));
       const displaySeries = selectedSeries.map((s) => displaySeriesName(s));
       const prefixMap = displayPrefixMapByFirstSegment(displaySeries);
