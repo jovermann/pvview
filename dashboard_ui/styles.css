@@ -523,6 +523,10 @@ select[id^="solarnoon-method-"] {
   width: min(980px, 96vw);
 }
 
+#chartSettingsDialog {
+  width: min(980px, 96vw);
+}
+
 #virtualSeriesDialog {
   width: min(842px, 77vw);
   margin: 56px auto auto auto;
