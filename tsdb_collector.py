@@ -241,9 +241,12 @@ def collect_to_tsdb(
             appenders[day].append_events(day_events)
         if appenders:
             newest_day = max(appenders.keys())
-            for day in list(appenders.keys()):
-                if day < newest_day:
-                    schedule_downsample(os.path.join(data_dir, _tsdb_filename_for_utc_day(day)))
+            for day in sorted(list(appenders.keys())):
+                if day >= newest_day:
+                    continue
+                schedule_downsample(os.path.join(data_dir, _tsdb_filename_for_utc_day(day)))
+                app = appenders.pop(day)
+                app.close()
         if verbose and batch:
             print(f"flushed {len(batch)} events")
 
@@ -261,9 +264,12 @@ def collect_to_tsdb(
             mqttlog_appenders[day].append_events(day_events)
         if mqttlog_appenders:
             newest_day = max(mqttlog_appenders.keys())
-            for day in list(mqttlog_appenders.keys()):
-                if day < newest_day:
-                    schedule_downsample(os.path.join(data_dir, _mqttlog_tsdb_filename_for_utc_day(day)))
+            for day in sorted(list(mqttlog_appenders.keys())):
+                if day >= newest_day:
+                    continue
+                schedule_downsample(os.path.join(data_dir, _mqttlog_tsdb_filename_for_utc_day(day)))
+                app = mqttlog_appenders.pop(day)
+                app.close()
         if verbose and mqttlog_batch:
             print(f"flushed {len(mqttlog_batch)} mqttlog events")
 
@@ -349,16 +355,6 @@ def collect_to_tsdb(
             pending_events.clear()
             pending_mqttlog_events.clear()
         flush_batch(batch, mqttlog_batch)
-        if appenders:
-            newest_day = max(appenders.keys())
-            for day in list(appenders.keys()):
-                if day < newest_day:
-                    schedule_downsample(os.path.join(data_dir, _tsdb_filename_for_utc_day(day)))
-        if mqttlog_appenders:
-            newest_day = max(mqttlog_appenders.keys())
-            for day in list(mqttlog_appenders.keys()):
-                if day < newest_day:
-                    schedule_downsample(os.path.join(data_dir, _mqttlog_tsdb_filename_for_utc_day(day)))
         downsample_queue.join()
         downsample_queue.put(None)
         downsample_queue.join()
