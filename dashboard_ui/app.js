@@ -1244,6 +1244,35 @@
     return commonSeriesPrefix(seriesNames);
   }
 
+  function firstPathSegment(seriesName) {
+    const s = String(seriesName || '');
+    const slash = s.indexOf('/');
+    if (slash < 0) return s;
+    return s.slice(0, slash);
+  }
+
+  function displayPrefixMapByFirstSegment(seriesNames) {
+    const map = new Map();
+    if (!Array.isArray(seriesNames) || seriesNames.length === 0) return map;
+    const buckets = new Map();
+    for (const name of seriesNames) {
+      const bucket = firstPathSegment(name);
+      const list = buckets.get(bucket) || [];
+      list.push(String(name));
+      buckets.set(bucket, list);
+    }
+    for (const [bucket, names] of buckets.entries()) {
+      map.set(bucket, displayPrefixForSeries(names));
+    }
+    return map;
+  }
+
+  function compactSeriesLabelByFirstSegment(name, prefixMap) {
+    const bucket = firstPathSegment(name);
+    const prefix = prefixMap instanceof Map ? (prefixMap.get(bucket) || '') : '';
+    return compactSeriesLabel(name, prefix);
+  }
+
   function breakLongGaps(points, gapMs) {
     if (!Array.isArray(points) || points.length <= 1) {
       return points;
@@ -2559,7 +2588,7 @@
       appendConsoleLine(`bar ${id} request done batch series=${cfg.series.length} returned=${eventItems.length} elapsed=${reqMs}ms`);
 
       const displaySeries = cfg.series.map((s) => displaySeriesName(s));
-      const prefix = displayPrefixForSeries(displaySeries);
+      const prefixMap = displayPrefixMapByFirstSegment(displaySeries);
       const xTimestamps = Array.from({ length: slotCount }, (_, i) => visibleStart + i * intervalMs);
       const seriesDefs = [];
       for (const seriesName of cfg.series) {
@@ -2702,7 +2731,7 @@
         }
         seriesDefs.push({
           rawName: seriesName,
-          displayName: compactSeriesLabel(displaySeriesName(seriesName), prefix),
+          displayName: compactSeriesLabelByFirstSegment(displaySeriesName(seriesName), prefixMap),
           values: barValues,
           displayRule: { ...displayRule, unit: barUnit },
         });
@@ -2911,7 +2940,7 @@
       }
       const xLabels = dayKeys.map((key) => key.slice(2));
       const displaySeries = selectedSeries.map((s) => displaySeriesName(s));
-      const prefix = displayPrefixForSeries(displaySeries);
+      const prefixMap = displayPrefixMapByFirstSegment(displaySeries);
       const seriesDefs = [];
       for (const seriesName of selectedSeries) {
         const data = eventsBySeries.get(seriesName) || { points: [] };
@@ -2921,7 +2950,7 @@
         const values = smoothSeriesValues(valuesPlain, smoothing);
         seriesDefs.push({
           rawName: seriesName,
-          displayName: compactSeriesLabel(displaySeriesName(seriesName), prefix),
+          displayName: compactSeriesLabelByFirstSegment(displaySeriesName(seriesName), prefixMap),
           values,
         });
       }
@@ -3078,7 +3107,7 @@
       const minPoints = chartMinPointsForPanel(id);
       const granularity = normalizeChartGranularity(globalGranularity);
       const displaySeries = cfg.series.map((s) => displaySeriesName(s));
-      const prefix = displayPrefixForSeries(displaySeries);
+      const prefixMap = displayPrefixMapByFirstSegment(displaySeries);
       const batchQ = new URLSearchParams({
         start: String(start),
         end: String(end),
@@ -3125,7 +3154,7 @@
         );
         return {
           name,
-          displayName: compactSeriesLabel(displaySeriesName(name), prefix),
+          displayName: compactSeriesLabelByFirstSegment(displaySeriesName(name), prefixMap),
           points,
           displayRule,
           axisKey: (displayRule && displayRule.axisKey) || axisGroupKeyForSuffix(String(name).split('/').pop() || String(name)),
@@ -3287,7 +3316,7 @@
     const minPoints = chartMinPointsForPanel(id);
     const granularity = normalizeChartGranularity(globalGranularity);
     const displaySeries = cfg.series.map((s) => displaySeriesName(s));
-    const prefix = displayPrefixForSeries(displaySeries);
+    const prefixMap = displayPrefixMapByFirstSegment(displaySeries);
     const batchQ = new URLSearchParams({
       start: String(start),
       end: String(end),
@@ -3345,7 +3374,7 @@
       );
       return {
         name,
-        displayName: compactSeriesLabel(displaySeriesName(name), prefix),
+        displayName: compactSeriesLabelByFirstSegment(displaySeriesName(name), prefixMap),
         points: breakLongGaps(points, 3960000),
         legendMax: legendMax !== undefined ? roundNumeric(legendMax) : undefined,
         displayRule,
