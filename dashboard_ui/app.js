@@ -1997,6 +1997,16 @@
             <option value="temp+hum">temp+hum</option>
             <option value="non-temp">non-temp</option>
           </select>
+          <select class="heatmap-series-select" id="mqtttable-msgday-${id}" data-action="mqtttable-msgday" data-id="${id}" title="Minimum msg/d">
+            <option value="0">all</option>
+            <option value="10">10</option>
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+          </select>
           <input type="search" class="mqtttable-filter" id="mqtttable-filter-${id}" data-action="mqtttable-filter" data-id="${id}" placeholder="Filter JSON..." />
           <button class="settings-gadget" data-action="mqtttable-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -3781,6 +3791,16 @@
     return 'all';
   }
 
+  const MQTT_OTHER_FIELDS_COL = '__other_fields__';
+
+  function normalizeMqttMsgDayMin(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    const v = Math.floor(n);
+    const allowed = new Set([0, 10, 20, 50, 100, 200, 500, 1000]);
+    return allowed.has(v) ? v : 0;
+  }
+
   function renderMqttExplorerTableFromCache(id) {
     const cfg = charts.get(id);
     if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
@@ -3789,12 +3809,18 @@
     const filterText = String(cfg.filter || '').trim().toLowerCase();
     const ageFilterMs = normalizeMqttAgeFilterMs(cfg.ageFilterMs);
     const sensorTypeFilter = normalizeMqttSensorTypeFilter(cfg.sensorTypeFilter);
+    const msgDayMin = normalizeMqttMsgDayMin(cfg.msgDayMin);
     const rows = allRowsRaw
       .filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText))
       .filter((row) => {
         if (ageFilterMs <= 0) return true;
         const ageMs = Number(row.ageMs);
         return Number.isFinite(ageMs) && ageMs <= ageFilterMs;
+      })
+      .filter((row) => {
+        if (msgDayMin <= 0) return true;
+        const v = Number(row && row.values ? row.values['msg/d'] : NaN);
+        return Number.isFinite(v) && v >= msgDayMin;
       })
       .filter((row) => {
         if (sensorTypeFilter === 'all') return true;
@@ -3806,13 +3832,18 @@
         return !hasTemp;
       });
     const detectedColumns = Array.isArray(cfg.detectedColumns) ? cfg.detectedColumns : [];
-    const defaultColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol'];
+    const defaultColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol', MQTT_OTHER_FIELDS_COL];
     const visibleColumns = Array.isArray(cfg.visibleColumns) && cfg.visibleColumns.length
       ? cfg.visibleColumns.filter((k) => detectedColumns.includes(k))
       : defaultColumns.filter((k) => detectedColumns.includes(k));
     const order = Array.isArray(cfg.columnOrder) ? cfg.columnOrder : detectedColumns;
     visibleColumns.sort((a, b) => order.indexOf(a) - order.indexOf(b));
     cfg.visibleColumns = visibleColumns;
+    const hiddenKeys = detectedColumns.filter((k) => !visibleColumns.includes(k) && k !== MQTT_OTHER_FIELDS_COL);
+    const otherText = (row) => hiddenKeys
+      .filter((k) => String((row.values && row.values[k]) || '').trim() !== '')
+      .map((k) => `${k}=${String((row.values && row.values[k]) || '')}`)
+      .join(', ');
     const key = String(cfg.sortKey || 'topic');
     const dir = (String(cfg.sortDir || 'asc') === 'desc') ? -1 : 1;
     rows.sort((a, b) => {
@@ -3826,8 +3857,12 @@
         if (!aok && bok) return 1;
         return 0;
       }
-      const av = key === 'topic' ? String(a.topic || '') : String((a.values && a.values[key]) || '');
-      const bv = key === 'topic' ? String(b.topic || '') : String((b.values && b.values[key]) || '');
+      const av = key === 'topic'
+        ? String(a.topic || '')
+        : (key === MQTT_OTHER_FIELDS_COL ? otherText(a) : String((a.values && a.values[key]) || ''));
+      const bv = key === 'topic'
+        ? String(b.topic || '')
+        : (key === MQTT_OTHER_FIELDS_COL ? otherText(b) : String((b.values && b.values[key]) || ''));
       const an = Number(av);
       const bn = Number(bv);
       const bothNumeric = Number.isFinite(an) && Number.isFinite(bn) && av.trim() !== '' && bv.trim() !== '';
@@ -3839,7 +3874,7 @@
     );
     const colDefs = [
       { key: 'topic', label: 'Topic', isTopic: true },
-      ...visibleColumns.map((k) => ({ key: k, label: k, isTopic: false })),
+      ...visibleColumns.map((k) => ({ key: k, label: k === MQTT_OTHER_FIELDS_COL ? 'Other Fields' : k, isTopic: false })),
     ];
     const head = `
       <thead>
@@ -3860,7 +3895,13 @@
           const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
           if (col.isTopic) classes.push('mqtttable-topic');
           if (col.key === 'age') classes.push('mqtttable-right');
-          const value = col.isTopic ? String(row.topic || '') : String((row.values && row.values[col.key]) || '');
+          const value = col.isTopic
+            ? String(row.topic || '')
+            : (
+              col.key === MQTT_OTHER_FIELDS_COL
+                ? otherText(row)
+                : String((row.values && row.values[col.key]) || '')
+            );
           return `<td class="${classes.join(' ')}">${htmlEscape(value)}</td>`;
         }).join('')}
       </tr>
@@ -3939,7 +3980,7 @@
       appendConsoleLine(`mqtttable ${id} request done series=${mqttSeries.length} rows=${eventRows.length} elapsed=${Math.round(performance.now() - reqT0)}ms`);
       const bySeries = new Map(eventRows.map((row) => [row.series, row]));
       const prefix = commonTopicPrefixForDisplay(mqttSeries);
-      const detected = new Set(['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol']);
+      const detected = new Set(['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol', MQTT_OTHER_FIELDS_COL]);
       cfg.rows = mqttSeries.map((seriesName) => {
         const row = bySeries.get(seriesName) || { payload: null, jsonText: '' };
         const topic = (seriesName.startsWith(prefix) && prefix.length < seriesName.length)
@@ -3980,7 +4021,7 @@
         cfg.columnOrder = [...existing, ...missing];
       }
       if (!Array.isArray(cfg.visibleColumns) || cfg.visibleColumns.length === 0) {
-        cfg.visibleColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol'].filter((k) => cfg.detectedColumns.includes(k));
+        cfg.visibleColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol', MQTT_OTHER_FIELDS_COL].filter((k) => cfg.detectedColumns.includes(k));
       } else {
         cfg.visibleColumns = cfg.visibleColumns.filter((k) => cfg.detectedColumns.includes(k));
       }
@@ -4178,8 +4219,10 @@
     const filterEl = document.getElementById(`mqtttable-filter-${id}`);
     const ageEl = document.getElementById(`mqtttable-age-${id}`);
     const sensorEl = document.getElementById(`mqtttable-sensor-${id}`);
+    const msgDayEl = document.getElementById(`mqtttable-msgday-${id}`);
     const ageFilterMs = normalizeMqttAgeFilterMs(options.ageFilterMs);
     const sensorTypeFilter = normalizeMqttSensorTypeFilter(options.sensorTypeFilter);
+    const msgDayMin = normalizeMqttMsgDayMin(options.msgDayMin);
     charts.set(id, {
       id,
       kind: 'mqtttable',
@@ -4188,9 +4231,11 @@
       filterEl,
       ageEl,
       sensorEl,
+      msgDayEl,
       filter: String(options.filter || ''),
       ageFilterMs,
       sensorTypeFilter,
+      msgDayMin,
       rows: [],
       totalTopics: 0,
       detectedColumns: [],
@@ -4210,6 +4255,9 @@
     }
     if (sensorEl instanceof HTMLSelectElement) {
       sensorEl.value = sensorTypeFilter;
+    }
+    if (msgDayEl instanceof HTMLSelectElement) {
+      msgDayEl.value = String(msgDayMin);
     }
     appendConsoleLine(`mqtttable ${id} created`);
     updateTitle(id);
@@ -4543,6 +4591,7 @@
           filter: String(c.filter || ''),
           ageFilterMs: normalizeMqttAgeFilterMs(c.ageFilterMs),
           sensorTypeFilter: normalizeMqttSensorTypeFilter(c.sensorTypeFilter),
+          msgDayMin: normalizeMqttMsgDayMin(c.msgDayMin),
           columnOrder: Array.isArray(c.columnOrder) ? [...c.columnOrder] : [],
           visibleColumns: Array.isArray(c.visibleColumns) ? [...c.visibleColumns] : [],
           sortKey: String(c.sortKey || 'topic'),
@@ -4700,6 +4749,7 @@
           filter: String(ch.filter || ''),
           ageFilterMs: normalizeMqttAgeFilterMs(ch.ageFilterMs),
           sensorTypeFilter: normalizeMqttSensorTypeFilter(ch.sensorTypeFilter),
+          msgDayMin: normalizeMqttMsgDayMin(ch.msgDayMin),
           columnOrder: Array.isArray(ch.columnOrder) ? ch.columnOrder.filter((k) => typeof k === 'string') : [],
           visibleColumns: Array.isArray(ch.visibleColumns) ? ch.visibleColumns.filter((k) => typeof k === 'string') : [],
           sortKey: String(ch.sortKey || 'topic'),
@@ -5632,6 +5682,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'mqtttable') return;
       panel.sensorTypeFilter = normalizeMqttSensorTypeFilter(target.value || 'all');
+      renderMqttExplorerTableFromCache(id);
+      return;
+    }
+    if (target.dataset.action === 'mqtttable-msgday') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'mqtttable') return;
+      panel.msgDayMin = normalizeMqttMsgDayMin(target.value || '0');
       renderMqttExplorerTableFromCache(id);
       return;
     }
