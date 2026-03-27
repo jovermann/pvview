@@ -332,7 +332,7 @@ def _numeric_json_field_value(value: Any, field: str) -> Optional[float]:
 def _prefixed_series_name_for_path(path: str, series_name: str) -> str:
     """Map in-file series name to API name based on file namespace."""
     base = os.path.basename(path)
-    if base.startswith("mqttlog_") or base == "mqttlog.tsdb":
+    if base.startswith("mqttlog_") or base.startswith("dsmq_") or base == "mqttlog.tsdb":
         return f"mqttlog/{series_name}"
     return series_name
 
@@ -371,6 +371,11 @@ def _find_catalog_files_for_prefix(data_dir: str, start_ms: int, end_ms: int, fi
             if ds_1h is not None:
                 files.append(ds_1h)
                 continue
+        if file_prefix == "mqttlog_":
+            ds_1h = _first_existing_path(data_dir, f"dsmq_{day.isoformat()}.1h.tsdb")
+            if ds_1h is not None:
+                files.append(ds_1h)
+                continue
         raw_day = _first_existing_path(data_dir, f"{file_prefix}{day.isoformat()}.tsdb")
         if raw_day is not None:
             files.append(raw_day)
@@ -387,6 +392,8 @@ def _find_catalog_files_for_prefix(data_dir: str, start_ms: int, end_ms: int, fi
             if not os.path.isfile(path):
                 continue
             if file_prefix == "data_" and name.startswith("dsda_") and name.endswith(".1h.tsdb"):
+                pref_candidates.append(path)
+            elif file_prefix == "mqttlog_" and name.startswith("dsmq_") and name.endswith(".1h.tsdb"):
                 pref_candidates.append(path)
             elif name == ("data.tsdb" if file_prefix == "data_" else "mqttlog.tsdb") or (name.startswith(file_prefix) and name.endswith(".tsdb")):
                 pref_candidates.append(path)
@@ -3581,9 +3588,10 @@ class TsdbRequestHandler(BaseHTTPRequestHandler):
 
         original_path = _first_existing_path(data_dir, f"{file_prefix}{day.isoformat()}.tsdb")
 
-        if granularity_ms > 0 and file_prefix == "data_":
+        if granularity_ms > 0 and (file_prefix == "data_" or file_prefix == "mqttlog_"):
             ds_label = next((name for ms, name, _elem_size in _ALL_DOWNSAMPLE_BUCKETS if ms == granularity_ms), None)
-            ds_path = _first_existing_path(data_dir, f"dsda_{day.isoformat()}.{ds_label}.tsdb") if ds_label else None
+            ds_prefix = "dsda" if file_prefix == "data_" else "dsmq"
+            ds_path = _first_existing_path(data_dir, f"{ds_prefix}_{day.isoformat()}.{ds_label}.tsdb") if ds_label else None
             if ds_path is not None and os.path.isfile(ds_path):
                 _downsampled, ds_points = _downsampled_points_from_ds_file(
                     ds_path,

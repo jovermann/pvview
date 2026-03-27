@@ -116,19 +116,19 @@ def collect_to_tsdb(
     appenders: dict[datetime.date, TimeSeriesDbAppender] = {}
     mqttlog_appenders: dict[datetime.date, TimeSeriesDbAppender] = {}
     os.makedirs(data_dir, exist_ok=True)
-    downsample_queue: "queue_mod.Queue[Optional[tuple[datetime.date, str]]]" = queue_mod.Queue()
-    downsample_pending: set[datetime.date] = set()
+    downsample_queue: "queue_mod.Queue[Optional[str]]" = queue_mod.Queue()
+    downsample_pending: set[str] = set()
     downsample_lock = threading.Lock()
 
-    def schedule_downsample(day: datetime.date) -> None:
-        path = os.path.join(data_dir, _tsdb_filename_for_utc_day(day))
+    def schedule_downsample(path: str) -> None:
         if not os.path.isfile(path):
             return
+        path = os.path.abspath(path)
         with downsample_lock:
-            if day in downsample_pending:
+            if path in downsample_pending:
                 return
-            downsample_pending.add(day)
-        downsample_queue.put((day, path))
+            downsample_pending.add(path)
+        downsample_queue.put(path)
 
     def downsample_worker() -> None:
         while True:
@@ -136,7 +136,7 @@ def collect_to_tsdb(
             try:
                 if job is None:
                     return
-                day, path = job
+                path = job
                 if verbose:
                     print(f"downsample worker start: {path}")
                 try:
@@ -147,7 +147,7 @@ def collect_to_tsdb(
                     print(f"downsample worker failed for {path!r}: {exc}")
                 finally:
                     with downsample_lock:
-                        downsample_pending.discard(day)
+                        downsample_pending.discard(path)
             finally:
                 downsample_queue.task_done()
 
@@ -243,7 +243,7 @@ def collect_to_tsdb(
             newest_day = max(appenders.keys())
             for day in list(appenders.keys()):
                 if day < newest_day:
-                    schedule_downsample(day)
+                    schedule_downsample(os.path.join(data_dir, _tsdb_filename_for_utc_day(day)))
         if verbose and batch:
             print(f"flushed {len(batch)} events")
 
@@ -259,6 +259,11 @@ def collect_to_tsdb(
                     print(f"{action} TSDB file: {path}")
                 mqttlog_appenders[day] = TimeSeriesDbAppender(path)
             mqttlog_appenders[day].append_events(day_events)
+        if mqttlog_appenders:
+            newest_day = max(mqttlog_appenders.keys())
+            for day in list(mqttlog_appenders.keys()):
+                if day < newest_day:
+                    schedule_downsample(os.path.join(data_dir, _mqttlog_tsdb_filename_for_utc_day(day)))
         if verbose and mqttlog_batch:
             print(f"flushed {len(mqttlog_batch)} mqttlog events")
 
@@ -348,7 +353,12 @@ def collect_to_tsdb(
             newest_day = max(appenders.keys())
             for day in list(appenders.keys()):
                 if day < newest_day:
-                    schedule_downsample(day)
+                    schedule_downsample(os.path.join(data_dir, _tsdb_filename_for_utc_day(day)))
+        if mqttlog_appenders:
+            newest_day = max(mqttlog_appenders.keys())
+            for day in list(mqttlog_appenders.keys()):
+                if day < newest_day:
+                    schedule_downsample(os.path.join(data_dir, _mqttlog_tsdb_filename_for_utc_day(day)))
         downsample_queue.join()
         downsample_queue.put(None)
         downsample_queue.join()
@@ -455,22 +465,31 @@ _DOWNSAMPLE_LEVELS: list[tuple[int, str, int]] = [
 ]
 
 
-def _parse_downsample_input_path(path: str) -> tuple[datetime.date, int]:
+def _parse_downsample_input_path(path: str) -> tuple[datetime.date, int, str]:
     base = os.path.basename(path)
     if base.startswith("data_") and base.endswith(".tsdb"):
-        return datetime.date.fromisoformat(base[5:15]), 0
+        return datetime.date.fromisoformat(base[5:15]), 0, "dsda"
+    if base.startswith("mqttlog_") and base.endswith(".tsdb"):
+        return datetime.date.fromisoformat(base[8:18]), 0, "dsmq"
     m = re.fullmatch(r"dsda_(\d{4}-\d{2}-\d{2})\.(1s|5s|15s|1m|5m|15m|1h)\.tsdb", base)
     if m:
         day = datetime.date.fromisoformat(m.group(1))
         label = m.group(2)
         for bucket_ms, bucket_label, _elem_size in _DOWNSAMPLE_LEVELS:
             if bucket_label == label:
-                return day, bucket_ms
+                return day, bucket_ms, "dsda"
+    m = re.fullmatch(r"dsmq_(\d{4}-\d{2}-\d{2})\.(1s|5s|15s|1m|5m|15m|1h)\.tsdb", base)
+    if m:
+        day = datetime.date.fromisoformat(m.group(1))
+        label = m.group(2)
+        for bucket_ms, bucket_label, _elem_size in _DOWNSAMPLE_LEVELS:
+            if bucket_label == label:
+                return day, bucket_ms, "dsmq"
     raise ValueError(f"Unsupported downsample input file name: {path!r}")
 
 
-def _downsample_output_path(input_path: str, day: datetime.date, label: str) -> str:
-    return os.path.join(os.path.dirname(input_path), f"dsda_{day.isoformat()}.{label}.tsdb")
+def _downsample_output_path(input_path: str, day: datetime.date, label: str, family: str) -> str:
+    return os.path.join(os.path.dirname(input_path), f"{family}_{day.isoformat()}.{label}.tsdb")
 
 
 def _numeric_series_points_from_db(db: Any) -> dict[str, list[tuple[int, Any]]]:
@@ -522,7 +541,7 @@ def _write_series_array_timeseries_db_atomic(
 
 def _downsample_file(path: str, force: bool = False, verbose: int = 0) -> None:
     source_path = os.path.abspath(path)
-    day, source_bucket_ms = _parse_downsample_input_path(source_path)
+    day, source_bucket_ms, family = _parse_downsample_input_path(source_path)
     db = read_timeseries_db(source_path)
     source_points_by_series = _numeric_series_points_from_db(db)
     string_values = _string_series_values_from_db(db)
@@ -538,7 +557,7 @@ def _downsample_file(path: str, force: bool = False, verbose: int = 0) -> None:
         return
     current_points_by_series = source_points_by_series
     for bucket_ms, label, elem_size in next_levels:
-        output_path = _downsample_output_path(source_path, day, label)
+        output_path = _downsample_output_path(source_path, day, label, family)
         if os.path.exists(output_path):
             if not force:
                 if verbose:
@@ -1816,7 +1835,7 @@ def main() -> int:
         "--downsample",
         metavar="DATA_FILE",
         nargs="+",
-        help="Read one or more data_* or dsda_* TSDB files and create all coarser dsda_* variants up to 1h",
+        help="Read one or more data_*/dsda_* or mqttlog_*/dsmq_* TSDB files and create all coarser dsda_*/dsmq_* variants up to 1h",
     )
     parser.add_argument("--force", action="store_true", help="Force overwrite existing output files for operations like --downsample")
     parser.add_argument("--generate-demo-db", type=int, metavar="DAYS", help="Generate demo TSDB files for DAYS days")

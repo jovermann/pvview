@@ -393,7 +393,7 @@ def _build_cache_from_scratch(path: str, st: os.stat_result) -> CachedTsdbFile:
 
 def _day_from_tsdb_path(path: str) -> datetime.date:
     base = os.path.basename(path)
-    for prefix in ("data_", "dsda_"):
+    for prefix in ("data_", "dsda_", "mqttlog_", "dsmq_"):
         if base.startswith(prefix):
             rest = base[len(prefix):]
             if len(rest) >= 10:
