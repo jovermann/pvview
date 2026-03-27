@@ -1991,6 +1991,12 @@
             <option value="${24 * 60 * 60 * 1000}">1d</option>
             <option value="${2 * 24 * 60 * 60 * 1000}">2d</option>
           </select>
+          <select class="heatmap-series-select" id="mqtttable-sensor-${id}" data-action="mqtttable-sensor" data-id="${id}" title="Sensor type filter">
+            <option value="all">all</option>
+            <option value="temperature">temperature</option>
+            <option value="temp+hum">temp+hum</option>
+            <option value="non-temp">non-temp</option>
+          </select>
           <input type="search" class="mqtttable-filter" id="mqtttable-filter-${id}" data-action="mqtttable-filter" data-id="${id}" placeholder="Filter JSON..." />
           <button class="settings-gadget" data-action="mqtttable-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
@@ -4171,7 +4177,9 @@
     const tableEl = document.getElementById(`mqtttable-${id}`);
     const filterEl = document.getElementById(`mqtttable-filter-${id}`);
     const ageEl = document.getElementById(`mqtttable-age-${id}`);
+    const sensorEl = document.getElementById(`mqtttable-sensor-${id}`);
     const ageFilterMs = normalizeMqttAgeFilterMs(options.ageFilterMs);
+    const sensorTypeFilter = normalizeMqttSensorTypeFilter(options.sensorTypeFilter);
     charts.set(id, {
       id,
       kind: 'mqtttable',
@@ -4179,8 +4187,10 @@
       tableEl,
       filterEl,
       ageEl,
+      sensorEl,
       filter: String(options.filter || ''),
       ageFilterMs,
+      sensorTypeFilter,
       rows: [],
       totalTopics: 0,
       detectedColumns: [],
@@ -4197,6 +4207,9 @@
     }
     if (ageEl instanceof HTMLSelectElement) {
       ageEl.value = String(ageFilterMs);
+    }
+    if (sensorEl instanceof HTMLSelectElement) {
+      sensorEl.value = sensorTypeFilter;
     }
     appendConsoleLine(`mqtttable ${id} created`);
     updateTitle(id);
@@ -4529,6 +4542,7 @@
           h: Number(nodeInfo.h || 4),
           filter: String(c.filter || ''),
           ageFilterMs: normalizeMqttAgeFilterMs(c.ageFilterMs),
+          sensorTypeFilter: normalizeMqttSensorTypeFilter(c.sensorTypeFilter),
           columnOrder: Array.isArray(c.columnOrder) ? [...c.columnOrder] : [],
           visibleColumns: Array.isArray(c.visibleColumns) ? [...c.visibleColumns] : [],
           sortKey: String(c.sortKey || 'topic'),
@@ -4685,6 +4699,7 @@
           h: Number(ch.h) || 4,
           filter: String(ch.filter || ''),
           ageFilterMs: normalizeMqttAgeFilterMs(ch.ageFilterMs),
+          sensorTypeFilter: normalizeMqttSensorTypeFilter(ch.sensorTypeFilter),
           columnOrder: Array.isArray(ch.columnOrder) ? ch.columnOrder.filter((k) => typeof k === 'string') : [],
           visibleColumns: Array.isArray(ch.visibleColumns) ? ch.visibleColumns.filter((k) => typeof k === 'string') : [],
           sortKey: String(ch.sortKey || 'topic'),
@@ -5608,6 +5623,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'mqtttable') return;
       panel.ageFilterMs = normalizeMqttAgeFilterMs(target.value || '0');
+      renderMqttExplorerTableFromCache(id);
+      return;
+    }
+    if (target.dataset.action === 'mqtttable-sensor') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'mqtttable') return;
+      panel.sensorTypeFilter = normalizeMqttSensorTypeFilter(target.value || 'all');
       renderMqttExplorerTableFromCache(id);
       return;
     }
