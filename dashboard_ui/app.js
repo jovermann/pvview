@@ -84,6 +84,9 @@
   const mqttSettingsDialog = document.getElementById('mqttSettingsDialog');
   const mqttSettingsName = document.getElementById('mqttSettingsName');
   const mqttSettingsColumnsList = document.getElementById('mqttSettingsColumnsList');
+  const mqttTransferDialog = document.getElementById('mqttTransferDialog');
+  const mqttTransferVariant = document.getElementById('mqttTransferVariant');
+  const mqttTransferTarget = document.getElementById('mqttTransferTarget');
   let activePreset = '2d';
   let autoRefreshTimer = null;
   let activeSeriesSelection = null;
@@ -104,6 +107,8 @@
   let mqttSettingsColumnsDraft = [];
   let mqttSettingsColumnsSelection = null;
   let mqttHeaderDrag = null;
+  let activeMqttTransferPanelId = null;
+  let mqttTransferChartEntries = [];
   let consolePanelId = null;
   let apiTraceEnabled = false;
   let lastConsoleLogMs = null;
@@ -2008,6 +2013,7 @@
             <option value="1000">1000</option>
           </select>
           <input type="search" class="mqtttable-filter" id="mqtttable-filter-${id}" data-action="mqtttable-filter" data-id="${id}" placeholder="Filter JSON..." />
+          <button class="icon-gadget" data-action="mqtttable-transfer" data-id="${id}" title="Add to chart">📈</button>
           <button class="settings-gadget" data-action="mqtttable-settings" data-id="${id}" title="Settings">⚙️</button>
         </div>
       </div>
@@ -3801,16 +3807,13 @@
     return allowed.has(v) ? v : 0;
   }
 
-  function renderMqttExplorerTableFromCache(id) {
-    const cfg = charts.get(id);
-    if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
-    const allRowsRaw = Array.isArray(cfg.rows) ? cfg.rows : [];
-    const totalTopics = Number.isFinite(cfg.totalTopics) ? Number(cfg.totalTopics) : allRowsRaw.length;
-    const filterText = String(cfg.filter || '').trim().toLowerCase();
-    const ageFilterMs = normalizeMqttAgeFilterMs(cfg.ageFilterMs);
-    const sensorTypeFilter = normalizeMqttSensorTypeFilter(cfg.sensorTypeFilter);
-    const msgDayMin = normalizeMqttMsgDayMin(cfg.msgDayMin);
-    const rows = allRowsRaw
+  function filteredMqttRows(cfg) {
+    const allRowsRaw = Array.isArray(cfg && cfg.rows) ? cfg.rows : [];
+    const filterText = String(cfg && cfg.filter ? cfg.filter : '').trim().toLowerCase();
+    const ageFilterMs = normalizeMqttAgeFilterMs(cfg && cfg.ageFilterMs);
+    const sensorTypeFilter = normalizeMqttSensorTypeFilter(cfg && cfg.sensorTypeFilter);
+    const msgDayMin = normalizeMqttMsgDayMin(cfg && cfg.msgDayMin);
+    return allRowsRaw
       .filter((row) => !filterText || String(row.jsonText || '').toLowerCase().includes(filterText))
       .filter((row) => {
         if (ageFilterMs <= 0) return true;
@@ -3831,6 +3834,14 @@
         if (sensorTypeFilter === 'temp+hum') return hasTemp && hasHum;
         return !hasTemp;
       });
+  }
+
+  function renderMqttExplorerTableFromCache(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'mqtttable' || !(cfg.tableEl instanceof HTMLElement)) return;
+    const allRowsRaw = Array.isArray(cfg.rows) ? cfg.rows : [];
+    const totalTopics = Number.isFinite(cfg.totalTopics) ? Number(cfg.totalTopics) : allRowsRaw.length;
+    const rows = filteredMqttRows(cfg);
     const detectedColumns = Array.isArray(cfg.detectedColumns) ? cfg.detectedColumns : [];
     const defaultColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol', MQTT_OTHER_FIELDS_COL];
     const visibleColumns = Array.isArray(cfg.visibleColumns) && cfg.visibleColumns.length
@@ -4005,6 +4016,7 @@
           }
         }
         return {
+          seriesName,
           topic,
           ageMs: Number.isFinite(lastTs) ? Math.max(0, end - lastTs) : NaN,
           values,
@@ -5300,6 +5312,145 @@
     mqttSettingsDialog.showModal();
   }
 
+  async function loadMqttTransferChartEntries() {
+    const entries = [];
+    if (String(currentDashboardName || '') && currentDashboardName !== 'Default') {
+      const localCharts = [];
+      for (const [panelId, cfg] of charts.entries()) {
+        if (!cfg || cfg.kind !== 'chart') continue;
+        localCharts.push({
+          panelId,
+          label: String(cfg.label || '').trim(),
+          seriesCount: Array.isArray(cfg.series) ? cfg.series.length : 0,
+        });
+      }
+      localCharts.sort((a, b) => a.label.localeCompare(b.label));
+      for (const ch of localCharts) {
+        entries.push({
+          dashboardName: String(currentDashboardName),
+          chartIndex: null,
+          panelId: ch.panelId,
+          chartLabel: ch.label,
+          seriesCount: ch.seriesCount,
+          local: true,
+        });
+      }
+    }
+    const dashResp = await apiJson('/dashboards');
+    const names = Array.isArray(dashResp && dashResp.dashboards) ? dashResp.dashboards : [];
+    for (const dashboardName of names) {
+      if (typeof dashboardName !== 'string' || !dashboardName || dashboardName === 'Default') continue;
+      if (String(currentDashboardName || '') && dashboardName === String(currentDashboardName)) continue;
+      const data = await apiJson(`/dashboards/${encodeURIComponent(dashboardName)}`);
+      const chartDefs = (data && data.dashboard && Array.isArray(data.dashboard.charts)) ? data.dashboard.charts : [];
+      chartDefs.forEach((ch, idx) => {
+        if (!ch || typeof ch !== 'object' || ch.type !== 'chart') return;
+        entries.push({
+          dashboardName,
+          chartIndex: idx,
+          panelId: null,
+          chartLabel: String(ch.label || '').trim(),
+          seriesCount: Array.isArray(ch.series) ? ch.series.length : 0,
+          local: false,
+        });
+      });
+    }
+    return entries;
+  }
+
+  async function openMqttTransferDialog(id) {
+    const cfg = charts.get(id);
+    if (!cfg || cfg.kind !== 'mqtttable') return;
+    const visibleRows = filteredMqttRows(cfg);
+    if (!visibleRows.length) {
+      alert('No visible MQTT topics to transfer.');
+      return;
+    }
+    const availableVariants = ['temperature_C', 'humidity', 'rssi'];
+    if (!(mqttTransferVariant instanceof HTMLSelectElement) || !(mqttTransferTarget instanceof HTMLSelectElement)) {
+      return;
+    }
+    mqttTransferVariant.innerHTML = availableVariants.map((v) => `<option value="${htmlEscape(v)}">${htmlEscape(v)}</option>`).join('');
+    mqttTransferVariant.value = availableVariants[0];
+
+    const entries = await loadMqttTransferChartEntries();
+    const named = entries
+      .filter((e) => String(e.chartLabel || '').trim() !== '')
+      .sort((a, b) => `${a.dashboardName} / ${a.chartLabel}`.localeCompare(`${b.dashboardName} / ${b.chartLabel}`));
+    const unnamed = entries
+      .filter((e) => String(e.chartLabel || '').trim() === '')
+      .sort((a, b) => a.dashboardName.localeCompare(b.dashboardName));
+    const merged = [...named, ...unnamed];
+    mqttTransferChartEntries = merged;
+    const optionHtml = merged.map((e, i) => {
+      const chartName = String(e.chartLabel || '').trim() || '(unnamed)';
+      return `<option value="${i}">${htmlEscape(`${e.dashboardName} / ${chartName} (${e.seriesCount})`)}</option>`;
+    });
+    if (named.length > 0 && unnamed.length > 0) {
+      optionHtml.splice(named.length, 0, '<option value="__sep" disabled>--------------------</option>');
+    }
+    mqttTransferTarget.innerHTML = optionHtml.join('');
+    const firstValid = merged.length ? '0' : '';
+    mqttTransferTarget.value = firstValid;
+    activeMqttTransferPanelId = id;
+    mqttTransferDialog.showModal();
+  }
+
+  async function applyMqttTransfer(mode) {
+    const cfg = charts.get(activeMqttTransferPanelId || '');
+    if (!cfg || cfg.kind !== 'mqtttable') return;
+    if (!(mqttTransferVariant instanceof HTMLSelectElement) || !(mqttTransferTarget instanceof HTMLSelectElement)) return;
+    const variant = String(mqttTransferVariant.value || '').trim();
+    const targetIdx = Number(mqttTransferTarget.value);
+    if (!Number.isInteger(targetIdx) || targetIdx < 0 || targetIdx >= mqttTransferChartEntries.length) {
+      alert('Please select a target chart.');
+      return;
+    }
+    const target = mqttTransferChartEntries[targetIdx];
+    const sourceRows = filteredMqttRows(cfg);
+    const baseSeries = sourceRows
+      .map((row) => String(row && row.seriesName ? row.seriesName : ''))
+      .filter((s) => s.length > 0);
+    const newSeries = Array.from(new Set(baseSeries.map((s) => `${s}/${variant}`)));
+    if (!newSeries.length) {
+      alert('No matching series to add.');
+      return;
+    }
+
+    if (target.local && target.panelId) {
+      const panel = charts.get(String(target.panelId));
+      if (!panel || panel.kind !== 'chart') {
+        alert('Selected chart is no longer available.');
+        return;
+      }
+      const existing = Array.isArray(panel.series) ? panel.series : [];
+      panel.series = mode === 'replace' ? newSeries : Array.from(new Set([...existing, ...newSeries]));
+      refreshChart(String(target.panelId)).catch((err) => console.error(err));
+      mqttTransferDialog.close();
+      return;
+    }
+
+    const data = await apiJson(`/dashboards/${encodeURIComponent(target.dashboardName)}`);
+    const dashboard = data && data.dashboard && typeof data.dashboard === 'object' ? data.dashboard : null;
+    if (!dashboard || !Array.isArray(dashboard.charts) || !Number.isInteger(target.chartIndex) || target.chartIndex < 0 || target.chartIndex >= dashboard.charts.length) {
+      alert('Selected target chart is invalid.');
+      return;
+    }
+    const ch = dashboard.charts[target.chartIndex];
+    if (!ch || typeof ch !== 'object' || ch.type !== 'chart') {
+      alert('Selected target is not a chart window.');
+      return;
+    }
+    const existing = Array.isArray(ch.series) ? ch.series.filter((s) => typeof s === 'string') : [];
+    ch.series = mode === 'replace' ? newSeries : Array.from(new Set([...existing, ...newSeries]));
+    await apiJson(`/dashboards/${encodeURIComponent(target.dashboardName)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dashboard }),
+    });
+    mqttTransferDialog.close();
+  }
+
   document.getElementById('seriesForm').addEventListener('submit', (e) => {
     e.preventDefault();
     if (!activeChartId) {
@@ -5420,6 +5571,11 @@
 
     if (target.dataset.action === 'mqtttable-settings') {
       openMqttSettingsDialog(String(target.dataset.id || ''));
+      return;
+    }
+
+    if (target.dataset.action === 'mqtttable-transfer') {
+      openMqttTransferDialog(String(target.dataset.id || '')).catch((err) => console.error(err));
       return;
     }
 
@@ -6145,6 +6301,25 @@
     activeSettingsMqttId = null;
     mqttSettingsColumnsDraft = [];
     mqttSettingsColumnsSelection = null;
+  });
+
+  document.getElementById('addMqttTransfer').addEventListener('click', () => {
+    applyMqttTransfer('add').catch((err) => console.error(err));
+  });
+
+  document.getElementById('replaceMqttTransfer').addEventListener('click', () => {
+    applyMqttTransfer('replace').catch((err) => console.error(err));
+  });
+
+  document.getElementById('cancelMqttTransfer').addEventListener('click', () => {
+    activeMqttTransferPanelId = null;
+    mqttTransferChartEntries = [];
+    mqttTransferDialog.close();
+  });
+
+  mqttTransferDialog.addEventListener('close', () => {
+    activeMqttTransferPanelId = null;
+    mqttTransferChartEntries = [];
   });
 
   attachRowReorderDnD(chartSettingsSeriesList, (fromIndex, toIndex) => {

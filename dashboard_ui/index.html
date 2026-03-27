@@ -280,6 +280,27 @@
     </form>
   </dialog>
 
+  <dialog id="mqttTransferDialog" class="modal">
+    <form method="dialog" class="modal-content" id="mqttTransferForm">
+      <h2>Add MQTT Series To Chart</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Variant</div>
+        <div>
+          <select id="mqttTransferVariant"></select>
+        </div>
+        <div class="settings-label">Target Chart</div>
+        <div>
+          <select id="mqttTransferTarget"></select>
+        </div>
+      </div>
+      <menu>
+        <button id="cancelMqttTransfer" type="button" class="btn">Cancel</button>
+        <button id="addMqttTransfer" type="button" class="btn">Add series to chart</button>
+        <button id="replaceMqttTransfer" type="button" class="btn accent">Replace series in chart</button>
+      </menu>
+    </form>
+  </dialog>
+
   <dialog id="saveDashboardDialog" class="modal">
     <form method="dialog" class="modal-content" id="saveDashboardForm">
       <h2>Save New Dashboard</h2>
