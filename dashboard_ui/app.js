@@ -3766,7 +3766,13 @@
     const value = obj[key];
     if (value === null || value === undefined) return '';
     if (typeof value === 'string') return value;
-    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      if (key === 'temperature_C' && typeof value === 'number' && Number.isFinite(value)) {
+        const rounded = Math.round(value * 10) / 10;
+        return rounded.toFixed(1);
+      }
+      return String(value);
+    }
     try {
       return JSON.stringify(value);
     } catch (_err) {
@@ -3837,6 +3843,12 @@
     return allowed.has(v) ? v : 0;
   }
 
+  function isNumericCellText(text) {
+    const s = String(text || '').trim();
+    if (!s) return false;
+    return Number.isFinite(Number(s));
+  }
+
   function filteredMqttRows(cfg) {
     const allRowsRaw = Array.isArray(cfg && cfg.rows) ? cfg.rows : [];
     const filterText = String(cfg && cfg.filter ? cfg.filter : '').trim().toLowerCase();
@@ -3885,6 +3897,22 @@
       .filter((k) => String((row.values && row.values[k]) || '').trim() !== '')
       .map((k) => `${k}=${String((row.values && row.values[k]) || '')}`)
       .join(', ');
+    const numericKeys = new Set(['age']);
+    for (const colKey of visibleColumns) {
+      if (colKey === MQTT_OTHER_FIELDS_COL) continue;
+      let sawValue = false;
+      let allNumeric = true;
+      for (const row of rows) {
+        const value = String((row.values && row.values[colKey]) || '').trim();
+        if (!value) continue;
+        sawValue = true;
+        if (!isNumericCellText(value)) {
+          allNumeric = false;
+          break;
+        }
+      }
+      if (sawValue && allNumeric) numericKeys.add(colKey);
+    }
     const key = String(cfg.sortKey || 'topic');
     const dir = (String(cfg.sortDir || 'asc') === 'desc') ? -1 : 1;
     rows.sort((a, b) => {
@@ -3923,7 +3951,7 @@
           ${colDefs.map((col, idx) => {
             const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
             if (col.isTopic) classes.push('mqtttable-topic');
-            if (col.key === 'age') classes.push('mqtttable-right');
+            if (numericKeys.has(col.key)) classes.push('mqtttable-right');
             const draggable = col.isTopic ? '' : 'draggable="true"';
             return `<th class="${classes.join(' ')}" data-action="mqtttable-sort" data-id="${id}" data-key="${htmlEscape(col.key)}" ${draggable}>${htmlEscape(col.label)}${sortMarker(col.key)}</th>`;
           }).join('')}
@@ -3935,7 +3963,7 @@
         ${colDefs.map((col, idx) => {
           const classes = [idx === (colDefs.length - 1) ? 'mqtttable-grow' : 'mqtttable-compact'];
           if (col.isTopic) classes.push('mqtttable-topic');
-          if (col.key === 'age') classes.push('mqtttable-right');
+          if (numericKeys.has(col.key)) classes.push('mqtttable-right');
           const value = col.isTopic
             ? String(row.topic || '')
             : (
