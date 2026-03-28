@@ -279,6 +279,7 @@
   }
 
   const chartGranularityOptions = ['auto', 'raw', '1s', '5s', '15s', '1m', '5m', '15m', '1h'];
+  const solarNoonGranularityOptions = ['raw', '1s', '5s', '15s', '1m', '5m', '15m', '1h'];
   const barIntervalOptions = ['hour', 'day', 'week', 'month'];
   const virtualLeftScalingOptions = [
     '*1',
@@ -299,6 +300,23 @@
   function normalizeChartGranularity(value) {
     const text = String(value || '').trim().toLowerCase();
     return chartGranularityOptions.includes(text) ? text : 'auto';
+  }
+
+  function normalizeSolarNoonGranularity(value) {
+    const text = String(value || '').trim().toLowerCase();
+    return solarNoonGranularityOptions.includes(text) ? text : '1h';
+  }
+
+  function granularityMsFromMode(mode) {
+    const m = String(mode || '').trim().toLowerCase();
+    if (m === '1s') return 1000;
+    if (m === '5s') return 5000;
+    if (m === '15s') return 15000;
+    if (m === '1m') return 60000;
+    if (m === '5m') return 300000;
+    if (m === '15m') return 900000;
+    if (m === '1h') return 3600000;
+    return 0;
   }
 
   function normalizeBarInterval(value) {
@@ -354,6 +372,8 @@
     if (
       mode === 'ma3' || mode === 'ma7' || mode === 'ma14' || mode === 'ma28' || mode === 'ma60' || mode === 'ma90'
       || mode === 'ma120' || mode === 'ma150' || mode === 'ma180'
+      || mode === 'mma3' || mode === 'mma7' || mode === 'mma14' || mode === 'mma28' || mode === 'mma60' || mode === 'mma90'
+      || mode === 'mma120' || mode === 'mma150' || mode === 'mma180'
       || mode === 'ema3' || mode === 'ema7' || mode === 'ema14' || mode === 'ema28' || mode === 'ema60' || mode === 'ema90'
       || mode === 'ema120' || mode === 'ema150' || mode === 'ema180'
     ) return mode;
@@ -580,26 +600,44 @@
       return out;
     }
     const halfWindow = (
-      smoothing === 'ma180' ? 90
+      smoothing.endsWith('180') ? 90
         : (
-          smoothing === 'ma150' ? 75
+          smoothing.endsWith('150') ? 75
             : (
-              smoothing === 'ma120' ? 60
-                : (smoothing === 'ma90' ? 45 : (smoothing === 'ma60' ? 30 : (smoothing === 'ma28' ? 14 : (smoothing === 'ma14' ? 7 : (smoothing === 'ma7' ? 3 : 1)))))
+              smoothing.endsWith('120') ? 60
+                : (smoothing.endsWith('90') ? 45 : (smoothing.endsWith('60') ? 30 : (smoothing.endsWith('28') ? 14 : (smoothing.endsWith('14') ? 7 : (smoothing.endsWith('7') ? 3 : 1)))))
             )
         )
     );
+    const useMedian = smoothing.startsWith('mma');
+    const median = (arr) => {
+      if (!arr.length) return null;
+      const sorted = [...arr].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      if (sorted.length % 2 === 1) return sorted[mid];
+      return (sorted[mid - 1] + sorted[mid]) / 2;
+    };
     for (let i = 0; i < values.length; i += 1) {
       let sum = 0;
       let count = 0;
+      const win = useMedian ? [] : null;
       for (let j = i - halfWindow; j <= i + halfWindow; j += 1) {
         if (j < 0 || j >= values.length) continue;
         const v = values[j];
         if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-        sum += v;
-        count += 1;
+        if (useMedian) {
+          win.push(v);
+        } else {
+          sum += v;
+          count += 1;
+        }
       }
-      out[i] = count > 0 ? roundNumeric(sum / count) : null;
+      if (useMedian) {
+        const m = median(win);
+        out[i] = (typeof m === 'number' && Number.isFinite(m)) ? roundNumeric(m) : null;
+      } else {
+        out[i] = count > 0 ? roundNumeric(sum / count) : null;
+      }
     }
     return out;
   }
@@ -2102,6 +2140,15 @@
             <option value="ma120">Moving Avg (120d)</option>
             <option value="ma150">Moving Avg (150d)</option>
             <option value="ma180">Moving Avg (180d)</option>
+            <option value="mma3">Median Moving Average (3d)</option>
+            <option value="mma7">Median Moving Average (7d)</option>
+            <option value="mma14">Median Moving Average (14d)</option>
+            <option value="mma28">Median Moving Average (28d)</option>
+            <option value="mma60">Median Moving Average (60d)</option>
+            <option value="mma90">Median Moving Average (90d)</option>
+            <option value="mma120">Median Moving Average (120d)</option>
+            <option value="mma150">Median Moving Average (150d)</option>
+            <option value="mma180">Median Moving Average (180d)</option>
             <option value="ema3">EMA (3d)</option>
             <option value="ema7">EMA (7d)</option>
             <option value="ema14">EMA (14d)</option>
@@ -2119,6 +2166,16 @@
             <option value="4">4y</option>
             <option value="5">5y</option>
             <option value="10">10y</option>
+          </select>
+          <select class="heatmap-series-select" id="solarnoon-granularity-${id}" data-action="solarnoon-granularity" data-id="${id}" title="Granularity">
+            <option value="raw">raw</option>
+            <option value="1s">1s</option>
+            <option value="5s">5s</option>
+            <option value="15s">15s</option>
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="1h" selected>1h</option>
           </select>
           <button class="icon-btn" data-action="series" data-id="${id}">Series</button>
           <button class="settings-gadget" data-action="settings" data-id="${id}" title="Settings">⚙️</button>
@@ -2929,6 +2986,8 @@
       const method = normalizeSolarNoonMethod(cfg.noonMethod);
       const smoothing = normalizeSolarNoonSmoothing(cfg.noonSmoothing);
       const years = normalizeSolarNoonYears(cfg.noonYears);
+      const granularity = normalizeSolarNoonGranularity(cfg.noonGranularity || '1h');
+      const bucketMs = Math.max(1000, granularityMsFromMode(granularity) || 1000);
       const { end } = getRange();
       let visibleStart;
       let visibleEnd;
@@ -2949,11 +3008,11 @@
         start: String(visibleStart),
         end: String(visibleEnd),
         minPoints: '1',
-        granularity: '5m',
+        granularity,
       });
       for (const name of selectedSeries) q.append('series', name);
       const reqT0 = performance.now();
-      appendConsoleLine(`solarnoon ${id} request start batch series=${selectedSeries.length} years=${years} method=${method} smoothing=${smoothing}`);
+      appendConsoleLine(`solarnoon ${id} request start batch series=${selectedSeries.length} years=${years} method=${method} smoothing=${smoothing} granularity=${granularity}`);
       const batchResp = await apiJson(`/events?${q}`);
       const reqMs = Math.round(performance.now() - reqT0);
       const eventItems = Array.isArray(batchResp && batchResp.events)
@@ -2971,7 +3030,7 @@
       for (const seriesName of selectedSeries) {
         const data = eventsBySeries.get(seriesName) || { points: [] };
         const points = Array.isArray(data.points) ? data.points : [];
-        const shiftByDay = computeSolarNoonShiftByDay(points, method, 300000);
+        const shiftByDay = computeSolarNoonShiftByDay(points, method, bucketMs);
         const valuesPlain = dayKeys.map((k) => (shiftByDay.has(k) ? shiftByDay.get(k) : null));
         const values = smoothSeriesValues(valuesPlain, smoothing);
         seriesDefs.push({
@@ -4526,6 +4585,7 @@
     const noonMethod = normalizeSolarNoonMethod(options.noonMethod || 'weighted');
     const noonSmoothing = normalizeSolarNoonSmoothing(options.noonSmoothing || 'ma7');
     const noonYears = normalizeSolarNoonYears(options.noonYears || 1);
+    const noonGranularity = normalizeSolarNoonGranularity(options.noonGranularity || '1h');
     charts.set(id, {
       id,
       kind: 'solarnoon',
@@ -4536,6 +4596,7 @@
       noonMethod,
       noonSmoothing,
       noonYears,
+      noonGranularity,
       noonCache: null,
       legendEnabledBySeries: options.legendEnabledBySeries ? { ...options.legendEnabledBySeries } : {},
       displayNameToSeries: new Map(),
@@ -4565,7 +4626,9 @@
     if (smoothingSelect instanceof HTMLSelectElement) smoothingSelect.value = noonSmoothing;
     const yearsSelect = document.getElementById(`solarnoon-years-${id}`);
     if (yearsSelect instanceof HTMLSelectElement) yearsSelect.value = String(noonYears);
-    appendConsoleLine(`solarnoon ${id} created series=${initialSeries.length} method=${noonMethod} smoothing=${noonSmoothing} years=${noonYears}`);
+    const granularitySelect = document.getElementById(`solarnoon-granularity-${id}`);
+    if (granularitySelect instanceof HTMLSelectElement) granularitySelect.value = noonGranularity;
+    appendConsoleLine(`solarnoon ${id} created series=${initialSeries.length} method=${noonMethod} smoothing=${noonSmoothing} years=${noonYears} granularity=${noonGranularity}`);
     updateTitle(id);
     if (!options.deferRefresh) {
       refreshSolarNoon(id).catch((err) => console.error(err));
@@ -4751,6 +4814,7 @@
           noonMethod: normalizeSolarNoonMethod(c.noonMethod || 'weighted'),
           noonSmoothing: normalizeSolarNoonSmoothing(c.noonSmoothing || 'ma7'),
           noonYears: normalizeSolarNoonYears(c.noonYears || 1),
+          noonGranularity: normalizeSolarNoonGranularity(c.noonGranularity || '1h'),
           legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
           label: c.label || null,
         });
@@ -4911,6 +4975,7 @@
           noonMethod: normalizeSolarNoonMethod(ch.noonMethod || 'weighted'),
           noonSmoothing: normalizeSolarNoonSmoothing(ch.noonSmoothing || 'ma7'),
           noonYears: normalizeSolarNoonYears(ch.noonYears || 1),
+          noonGranularity: normalizeSolarNoonGranularity(ch.noonGranularity || '1h'),
           legendEnabledBySeries: (ch.legendEnabledBySeries && typeof ch.legendEnabledBySeries === 'object')
             ? { ...ch.legendEnabledBySeries }
             : {},
@@ -5957,6 +6022,15 @@
       const panel = charts.get(id);
       if (!panel || panel.kind !== 'solarnoon') return;
       panel.noonSmoothing = normalizeSolarNoonSmoothing(target.value || 'plain');
+      refreshSolarNoon(id).catch((err) => console.error(err));
+      return;
+    }
+    if (target.dataset.action === 'solarnoon-granularity') {
+      if (!(target instanceof HTMLSelectElement)) return;
+      const id = String(target.dataset.id || '');
+      const panel = charts.get(id);
+      if (!panel || panel.kind !== 'solarnoon') return;
+      panel.noonGranularity = normalizeSolarNoonGranularity(target.value || '1h');
       refreshSolarNoon(id).catch((err) => console.error(err));
       return;
     }
