@@ -5547,14 +5547,8 @@
   async function applyMqttTransfer(mode) {
     const cfg = charts.get(activeMqttTransferPanelId || '');
     if (!cfg || cfg.kind !== 'mqtttable') return;
-    if (!(mqttTransferVariant instanceof HTMLSelectElement) || !(mqttTransferTarget instanceof HTMLSelectElement)) return;
+    if (!(mqttTransferVariant instanceof HTMLSelectElement)) return;
     const variant = String(mqttTransferVariant.value || '').trim();
-    const targetIdx = Number(mqttTransferTarget.value);
-    if (!Number.isInteger(targetIdx) || targetIdx < 0 || targetIdx >= mqttTransferChartEntries.length) {
-      alert('Please select a target chart.');
-      return;
-    }
-    const target = mqttTransferChartEntries[targetIdx];
     const sourceRows = filteredMqttRows(cfg);
     const baseSeries = sourceRows
       .map((row) => String(row && row.seriesName ? row.seriesName : ''))
@@ -5564,6 +5558,20 @@
       alert('No matching series to add.');
       return;
     }
+
+    if (mode === 'new') {
+      addChart(newSeries);
+      mqttTransferDialog.close();
+      return;
+    }
+
+    if (!(mqttTransferTarget instanceof HTMLSelectElement)) return;
+    const targetIdx = Number(mqttTransferTarget.value);
+    if (!Number.isInteger(targetIdx) || targetIdx < 0 || targetIdx >= mqttTransferChartEntries.length) {
+      alert('Please select a target chart.');
+      return;
+    }
+    const target = mqttTransferChartEntries[targetIdx];
 
     if (target.local && target.panelId) {
       const panel = charts.get(String(target.panelId));
@@ -6462,6 +6470,10 @@
 
   document.getElementById('addMqttTransfer').addEventListener('click', () => {
     applyMqttTransfer('add').catch((err) => console.error(err));
+  });
+
+  document.getElementById('newMqttTransfer').addEventListener('click', () => {
+    applyMqttTransfer('new').catch((err) => console.error(err));
   });
 
   document.getElementById('replaceMqttTransfer').addEventListener('click', () => {
