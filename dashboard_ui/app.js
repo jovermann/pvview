@@ -84,6 +84,11 @@
   const mqttSettingsDialog = document.getElementById('mqttSettingsDialog');
   const mqttSettingsName = document.getElementById('mqttSettingsName');
   const mqttSettingsColumnsList = document.getElementById('mqttSettingsColumnsList');
+  const consoleSettingsDialog = document.getElementById('consoleSettingsDialog');
+  const consoleSettingsName = document.getElementById('consoleSettingsName');
+  const consoleSettingsApi = document.getElementById('consoleSettingsApi');
+  const moveWindowDialog = document.getElementById('moveWindowDialog');
+  const moveWindowTarget = document.getElementById('moveWindowTarget');
   const mqttTransferDialog = document.getElementById('mqttTransferDialog');
   const mqttTransferVariant = document.getElementById('mqttTransferVariant');
   const mqttTransferTarget = document.getElementById('mqttTransferTarget');
@@ -104,6 +109,8 @@
   let activeSettingsBarId = null;
   let activeColumnsStatId = null;
   let activeSettingsMqttId = null;
+  let activeSettingsConsoleId = null;
+  let activeMoveWindowId = null;
   let mqttSettingsColumnsDraft = [];
   let mqttSettingsColumnsSelection = null;
   let mqttHeaderDrag = null;
@@ -1901,9 +1908,13 @@
     });
     const wrapper = document.createElement('div');
     wrapper.className = 'panel';
+    const label = typeof options.label === 'string' ? options.label : '';
     wrapper.innerHTML = `
       <div class="panel-header">
-        <div class="panel-title">Console</div>
+        <div class="panel-title-wrap">
+          <div class="panel-title" id="title-${id}">${htmlEscape(label || 'Console')}</div>
+          <div class="panel-title-meta" id="titlemeta-${id}"></div>
+        </div>
         <div class="panel-actions">
           <label class="panel-check" title="Log all API requests">
             <input type="checkbox" data-action="api-trace" data-id="${id}" ${initialApiTrace ? 'checked' : ''} />
@@ -1911,6 +1922,7 @@
           </label>
           <button class="icon-btn" data-action="console-clear" data-id="${id}">Clear</button>
           <button class="icon-btn" data-action="console-bar" data-id="${id}">Bar</button>
+          <button class="settings-gadget" data-action="console-settings" data-id="${id}" title="Settings">⚙️</button>
           <button class="icon-btn danger" data-action="remove-console" data-id="${id}">Remove</button>
         </div>
       </div>
@@ -1924,6 +1936,8 @@
       node,
       logEl,
       apiTrace: initialApiTrace,
+      label: label || null,
+      titleMeta: '',
     });
     consolePanelId = id;
     if (logEl) {
@@ -2191,6 +2205,11 @@
     const titleEl = document.getElementById(`title-${id}`);
     const metaEl = document.getElementById(`titlemeta-${id}`);
     if (!titleEl || !c) return;
+    if (c.kind === 'console') {
+      titleEl.textContent = c.label || 'Console';
+      if (metaEl) metaEl.textContent = c.titleMeta || '';
+      return;
+    }
     if (c.kind === 'stat') {
       titleEl.textContent = c.label || `Stat ${id}`;
       if (metaEl) metaEl.textContent = c.titleMeta || '';
@@ -4722,6 +4741,7 @@
           w: Number(nodeInfo.w || 12),
           h: Number(nodeInfo.h || 2),
           apiTrace: !!c.apiTrace,
+          label: c.label || null,
         });
         continue;
       }
@@ -4881,6 +4901,7 @@
           w: Number(ch.w) || 12,
           h: Number(ch.h) || 2,
           apiTrace: !!ch.apiTrace,
+          label: typeof ch.label === 'string' ? ch.label : null,
         });
         continue;
       }
@@ -5460,6 +5481,216 @@
     mqttSettingsDialog.showModal();
   }
 
+  function openConsoleSettingsDialog(id) {
+    const c = charts.get(id);
+    if (!c || c.kind !== 'console') return;
+    activeSettingsConsoleId = id;
+    if (consoleSettingsName instanceof HTMLInputElement) {
+      consoleSettingsName.value = c.label || '';
+    }
+    if (consoleSettingsApi instanceof HTMLInputElement) {
+      consoleSettingsApi.checked = !!c.apiTrace;
+    }
+    consoleSettingsDialog.showModal();
+  }
+
+  function serializePanelForDashboard(c) {
+    if (!c || typeof c !== 'object') return null;
+    const nodeInfo = c.node && c.node.gridstackNode ? c.node.gridstackNode : {};
+    if (c.kind === 'console') {
+      return {
+        type: 'console',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 12),
+        h: Number(nodeInfo.h || 2),
+        apiTrace: !!c.apiTrace,
+        label: c.label || null,
+      };
+    }
+    if (c.kind === 'stat') {
+      return {
+        type: 'stat',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 6),
+        h: Number(nodeInfo.h || 3),
+        series: Array.isArray(c.series) ? [...c.series] : [],
+        columns: Array.isArray(c.columns) ? [...c.columns] : [],
+        bigFontPx: normalizeStatBigFontPx(c.bigFontPx),
+        label: c.label || null,
+      };
+    }
+    if (c.kind === 'mqtttable') {
+      return {
+        type: 'mqtttable',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 8),
+        h: Number(nodeInfo.h || 4),
+        filter: String(c.filter || ''),
+        ageFilterMs: normalizeMqttAgeFilterMs(c.ageFilterMs),
+        sensorTypeFilter: normalizeMqttSensorTypeFilter(c.sensorTypeFilter),
+        msgDayMin: normalizeMqttMsgDayMin(c.msgDayMin),
+        columnOrder: Array.isArray(c.columnOrder) ? [...c.columnOrder] : [],
+        visibleColumns: Array.isArray(c.visibleColumns) ? [...c.visibleColumns] : [],
+        sortKey: String(c.sortKey || 'topic'),
+        sortDir: String(c.sortDir || 'asc') === 'desc' ? 'desc' : 'asc',
+        label: c.label || null,
+      };
+    }
+    if (c.kind === 'heatmap') {
+      return {
+        type: 'heatmap',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 6),
+        h: Number(nodeInfo.h || 4),
+        series: Array.isArray(c.series) ? [...c.series] : [],
+        activeSeries: typeof c.activeSeries === 'string' ? c.activeSeries : '',
+        heatmapPalette: normalizeHeatmapPalette(c.heatmapPalette || 'plasma'),
+        heatmapScale: normalizeHeatmapScale(c.heatmapScale || (c.logScale ? 'log' : 'normal')),
+        heatmapClamp: normalizeHeatmapClamp(c.heatmapClamp),
+        cellsPerDay: normalizeHeatmapCells(c.cellsPerDay),
+        xRangeMode: normalizeHeatmapXRange(c.xRangeMode),
+        useDst: c.useDst !== false,
+        maskGaps: c.maskGaps === true,
+        cellGap: (() => {
+          const raw = Number(c.cellGap);
+          if (!Number.isFinite(raw)) return 1;
+          return Math.max(0, Math.min(12, Math.floor(raw)));
+        })(),
+        label: c.label || null,
+      };
+    }
+    if (c.kind === 'bar') {
+      return {
+        type: 'bar',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 6),
+        h: Number(nodeInfo.h || 3),
+        series: Array.isArray(c.series) ? [...c.series] : [],
+        barInterval: normalizeBarInterval(c.barInterval || 'day'),
+        barWidthPx: normalizeBarWidthPx(c.barWidthPx),
+        barGapPx: normalizeBarGapPx(c.barGapPx),
+        barGroupGapPx: normalizeBarGroupGapPx(c.barGroupGapPx),
+        legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
+        seriesColorByName: (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+          ? { ...c.seriesColorByName }
+          : {},
+        label: c.label || null,
+      };
+    }
+    if (c.kind === 'solarnoon') {
+      return {
+        type: 'solarnoon',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 6),
+        h: Number(nodeInfo.h || 3),
+        series: Array.isArray(c.series) ? [...c.series] : [],
+        noonMethod: normalizeSolarNoonMethod(c.noonMethod || 'weighted'),
+        noonSmoothing: normalizeSolarNoonSmoothing(c.noonSmoothing || 'ma7'),
+        noonYears: normalizeSolarNoonYears(c.noonYears || 1),
+        noonGranularity: normalizeSolarNoonGranularity(c.noonGranularity || '1h'),
+        legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
+        label: c.label || null,
+      };
+    }
+    if (c.kind === 'duration') {
+      return {
+        type: 'duration',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 6),
+        h: Number(nodeInfo.h || 3),
+        series: Array.isArray(c.series) ? [...c.series] : [],
+        dotStyle: normalizeDotStyle(c.dotStyle),
+        areaOpacity: normalizeAreaOpacity(c.areaOpacity),
+        yMin: Number.isFinite(c.yMin) ? c.yMin : null,
+        yMax: Number.isFinite(c.yMax) ? c.yMax : null,
+        seriesColorByName: (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+          ? { ...c.seriesColorByName }
+          : {},
+        legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
+        label: c.label || null,
+      };
+    }
+    if (c.kind === 'chart') {
+      return {
+        type: 'chart',
+        x: Number(nodeInfo.x || 0),
+        y: Number(nodeInfo.y || 0),
+        w: Number(nodeInfo.w || 6),
+        h: Number(nodeInfo.h || 3),
+        series: Array.isArray(c.series) ? [...c.series] : [],
+        dotStyle: normalizeDotStyle(c.dotStyle),
+        areaOpacity: normalizeAreaOpacity(c.areaOpacity),
+        yMin: Number.isFinite(c.yMin) ? c.yMin : null,
+        yMax: Number.isFinite(c.yMax) ? c.yMax : null,
+        seriesColorByName: (c.seriesColorByName && typeof c.seriesColorByName === 'object')
+          ? { ...c.seriesColorByName }
+          : {},
+        legendEnabledBySeries: c.legendEnabledBySeries ? { ...c.legendEnabledBySeries } : {},
+        label: c.label || null,
+      };
+    }
+    return null;
+  }
+
+  function openMoveWindowDialog(windowId) {
+    const id = String(windowId || '').trim();
+    if (!id || !charts.has(id)) return;
+    if (!(moveWindowTarget instanceof HTMLSelectElement)) return;
+    const current = String(currentDashboardName || '').trim();
+    const options = Array.from(savedDashboardNames)
+      .filter((name) => typeof name === 'string' && name && name !== 'Default')
+      .sort((a, b) => a.localeCompare(b));
+    const otherTargets = options.filter((name) => name !== current);
+    if (!otherTargets.length) {
+      alert('No saved target dashboards available.');
+      return;
+    }
+    moveWindowTarget.innerHTML = options.map((name) => {
+      const label = name === current ? `${name} (current)` : name;
+      return `<option value="${htmlEscape(name)}">${htmlEscape(label)}</option>`;
+    }).join('');
+    moveWindowTarget.value = otherTargets[0];
+    activeMoveWindowId = id;
+    moveWindowDialog.showModal();
+  }
+
+  async function moveWindowToDashboard(windowId, targetDashboardName) {
+    const id = String(windowId || '').trim();
+    const target = String(targetDashboardName || '').trim();
+    if (!id || !target) return;
+    const panel = charts.get(id);
+    if (!panel) return;
+    if (target === String(currentDashboardName || '').trim()) {
+      alert('Window is already in the current dashboard.');
+      return;
+    }
+    const chartDef = serializePanelForDashboard(panel);
+    if (!chartDef) {
+      alert('Unsupported window type.');
+      return;
+    }
+    const data = await apiJson(`/dashboards/${encodeURIComponent(target)}`);
+    const dashboard = data && data.dashboard && typeof data.dashboard === 'object'
+      ? data.dashboard
+      : { version: 1, charts: [] };
+    if (!Array.isArray(dashboard.charts)) dashboard.charts = [];
+    dashboard.charts.push(chartDef);
+    await apiJson(`/dashboards/${encodeURIComponent(target)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dashboard }),
+    });
+    removePanel(id);
+    appendConsoleLine(`window ${id} moved to dashboard "${target}"`);
+  }
+
   async function loadMqttTransferChartEntries() {
     const entries = [];
     if (String(currentDashboardName || '') && currentDashboardName !== 'Default') {
@@ -5839,6 +6070,11 @@
 
     if (target.dataset.action === 'bar-settings') {
       openBarSettingsDialog(target.dataset.id);
+      return;
+    }
+
+    if (target.dataset.action === 'console-settings') {
+      openConsoleSettingsDialog(target.dataset.id);
       return;
     }
 
@@ -6224,6 +6460,19 @@
     removeChart(removeId);
   });
 
+  document.getElementById('moveChartSettings').addEventListener('click', () => {
+    if (!activeSettingsChartId) {
+      chartSettingsDialog.close();
+      return;
+    }
+    const moveId = activeSettingsChartId;
+    activeSettingsChartId = null;
+    chartSettingsSeriesDraft = [];
+    chartSettingsSeriesColorDraft = {};
+    chartSettingsDialog.close();
+    setTimeout(() => openMoveWindowDialog(moveId), 0);
+  });
+
   chartSettingsDialog.addEventListener('close', () => {
     activeSettingsChartId = null;
     chartSettingsSeriesDraft = [];
@@ -6268,6 +6517,18 @@
     statSettingsSeriesDraft = [];
     statSettingsDialog.close();
     removePanel(removeId);
+  });
+
+  document.getElementById('moveStatSettings').addEventListener('click', () => {
+    if (!activeSettingsStatId) {
+      statSettingsDialog.close();
+      return;
+    }
+    const moveId = activeSettingsStatId;
+    activeSettingsStatId = null;
+    statSettingsSeriesDraft = [];
+    statSettingsDialog.close();
+    setTimeout(() => openMoveWindowDialog(moveId), 0);
   });
 
   statSettingsDialog.addEventListener('close', () => {
@@ -6317,6 +6578,18 @@
     heatmapSettingsSeriesDraft = [];
     heatmapSettingsDialog.close();
     removePanel(removeId);
+  });
+
+  document.getElementById('moveHeatmapSettings').addEventListener('click', () => {
+    if (!activeSettingsHeatmapId) {
+      heatmapSettingsDialog.close();
+      return;
+    }
+    const moveId = activeSettingsHeatmapId;
+    activeSettingsHeatmapId = null;
+    heatmapSettingsSeriesDraft = [];
+    heatmapSettingsDialog.close();
+    setTimeout(() => openMoveWindowDialog(moveId), 0);
   });
 
   heatmapSettingsDialog.addEventListener('close', () => {
@@ -6371,6 +6644,19 @@
     barSettingsSeriesColorDraft = {};
     barSettingsDialog.close();
     removePanel(removeId);
+  });
+
+  document.getElementById('moveBarSettings').addEventListener('click', () => {
+    if (!activeSettingsBarId) {
+      barSettingsDialog.close();
+      return;
+    }
+    const moveId = activeSettingsBarId;
+    activeSettingsBarId = null;
+    barSettingsSeriesDraft = [];
+    barSettingsSeriesColorDraft = {};
+    barSettingsDialog.close();
+    setTimeout(() => openMoveWindowDialog(moveId), 0);
   });
 
   barSettingsDialog.addEventListener('close', () => {
@@ -6462,10 +6748,106 @@
     removePanel(removeId);
   });
 
+  document.getElementById('moveMqttSettings').addEventListener('click', () => {
+    if (!activeSettingsMqttId) {
+      mqttSettingsDialog.close();
+      return;
+    }
+    const moveId = activeSettingsMqttId;
+    activeSettingsMqttId = null;
+    mqttSettingsColumnsDraft = [];
+    mqttSettingsColumnsSelection = null;
+    mqttSettingsDialog.close();
+    setTimeout(() => openMoveWindowDialog(moveId), 0);
+  });
+
   mqttSettingsDialog.addEventListener('close', () => {
     activeSettingsMqttId = null;
     mqttSettingsColumnsDraft = [];
     mqttSettingsColumnsSelection = null;
+  });
+
+  document.getElementById('consoleSettingsForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeSettingsConsoleId) {
+      consoleSettingsDialog.close();
+      return;
+    }
+    const c = charts.get(activeSettingsConsoleId);
+    if (!c || c.kind !== 'console') {
+      consoleSettingsDialog.close();
+      return;
+    }
+    c.label = (consoleSettingsName instanceof HTMLInputElement)
+      ? (String(consoleSettingsName.value || '').trim() || null)
+      : c.label;
+    const nextApiTrace = !!(consoleSettingsApi instanceof HTMLInputElement && consoleSettingsApi.checked);
+    c.apiTrace = nextApiTrace;
+    apiTraceEnabled = nextApiTrace;
+    const apiCheckbox = document.querySelector(`input[data-action="api-trace"][data-id="${activeSettingsConsoleId}"]`);
+    if (apiCheckbox instanceof HTMLInputElement) apiCheckbox.checked = nextApiTrace;
+    updateTitle(activeSettingsConsoleId);
+    activeSettingsConsoleId = null;
+    consoleSettingsDialog.close();
+  });
+
+  document.getElementById('cancelConsoleSettings').addEventListener('click', () => {
+    activeSettingsConsoleId = null;
+    consoleSettingsDialog.close();
+  });
+
+  document.getElementById('removeConsoleSettings').addEventListener('click', () => {
+    if (!activeSettingsConsoleId) {
+      consoleSettingsDialog.close();
+      return;
+    }
+    const removeId = activeSettingsConsoleId;
+    activeSettingsConsoleId = null;
+    consoleSettingsDialog.close();
+    removePanel(removeId);
+  });
+
+  document.getElementById('moveConsoleSettings').addEventListener('click', () => {
+    if (!activeSettingsConsoleId) {
+      consoleSettingsDialog.close();
+      return;
+    }
+    const moveId = activeSettingsConsoleId;
+    activeSettingsConsoleId = null;
+    consoleSettingsDialog.close();
+    setTimeout(() => openMoveWindowDialog(moveId), 0);
+  });
+
+  consoleSettingsDialog.addEventListener('close', () => {
+    activeSettingsConsoleId = null;
+  });
+
+  document.getElementById('moveWindowForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!activeMoveWindowId || !(moveWindowTarget instanceof HTMLSelectElement)) {
+      moveWindowDialog.close();
+      return;
+    }
+    const moveId = activeMoveWindowId;
+    const targetName = String(moveWindowTarget.value || '').trim();
+    moveWindowToDashboard(moveId, targetName)
+      .catch((err) => {
+        console.error(err);
+        alert(`Failed to move window: ${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => {
+        activeMoveWindowId = null;
+        moveWindowDialog.close();
+      });
+  });
+
+  document.getElementById('cancelMoveWindow').addEventListener('click', () => {
+    activeMoveWindowId = null;
+    moveWindowDialog.close();
+  });
+
+  moveWindowDialog.addEventListener('close', () => {
+    activeMoveWindowId = null;
   });
 
   document.getElementById('addMqttTransfer').addEventListener('click', () => {

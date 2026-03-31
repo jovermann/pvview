@@ -179,6 +179,7 @@
       <div id="chartSettingsSeriesList" class="series-list"></div>
       <menu>
         <button id="removeChartSettings" type="button" class="btn danger menu-left">Remove Chart</button>
+        <button id="moveChartSettings" type="button" class="btn">Move Window</button>
         <button id="cancelChartSettings" type="button" class="btn">Cancel</button>
         <button id="saveChartSettings" value="default" class="btn accent">Save</button>
       </menu>
@@ -199,6 +200,7 @@
       <div id="statSettingsSeriesList" class="series-list"></div>
       <menu>
         <button id="removeStatSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="moveStatSettings" type="button" class="btn">Move Window</button>
         <button id="cancelStatSettings" type="button" class="btn">Cancel</button>
         <button id="saveStatSettings" value="default" class="btn accent">Save</button>
       </menu>
@@ -219,6 +221,7 @@
       <div id="heatmapSettingsSeriesList" class="series-list"></div>
       <menu>
         <button id="removeHeatmapSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="moveHeatmapSettings" type="button" class="btn">Move Window</button>
         <button id="cancelHeatmapSettings" type="button" class="btn">Cancel</button>
         <button id="saveHeatmapSettings" value="default" class="btn accent">Save</button>
       </menu>
@@ -245,6 +248,7 @@
       <div id="barSettingsSeriesList" class="series-list"></div>
       <menu>
         <button id="removeBarSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="moveBarSettings" type="button" class="btn">Move Window</button>
         <button id="cancelBarSettings" type="button" class="btn">Cancel</button>
         <button id="saveBarSettings" value="default" class="btn accent">Save</button>
       </menu>
@@ -274,8 +278,46 @@
       <div id="mqttSettingsColumnsList" class="series-list"></div>
       <menu>
         <button id="removeMqttSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="moveMqttSettings" type="button" class="btn">Move Window</button>
         <button id="cancelMqttSettings" type="button" class="btn">Cancel</button>
         <button id="saveMqttSettings" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="consoleSettingsDialog" class="modal">
+    <form method="dialog" class="modal-content" id="consoleSettingsForm">
+      <h2>Console Settings</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Name</div>
+        <div><input id="consoleSettingsName" type="text" placeholder="Window name" /></div>
+        <div class="settings-label">API Logging</div>
+        <div>
+          <label class="panel-check settings-check">
+            <input id="consoleSettingsApi" type="checkbox" />
+            <span>Enable API logging</span>
+          </label>
+        </div>
+      </div>
+      <menu>
+        <button id="removeConsoleSettings" type="button" class="btn danger menu-left">Remove Window</button>
+        <button id="moveConsoleSettings" type="button" class="btn">Move Window</button>
+        <button id="cancelConsoleSettings" type="button" class="btn">Cancel</button>
+        <button id="saveConsoleSettings" value="default" class="btn accent">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="moveWindowDialog" class="modal">
+    <form method="dialog" class="modal-content" id="moveWindowForm">
+      <h2>Move Window</h2>
+      <div class="settings-grid">
+        <div class="settings-label">Target Dashboard</div>
+        <div><select id="moveWindowTarget"></select></div>
+      </div>
+      <menu>
+        <button id="cancelMoveWindow" type="button" class="btn">Cancel</button>
+        <button id="confirmMoveWindow" value="default" class="btn accent">Move</button>
       </menu>
     </form>
   </dialog>
