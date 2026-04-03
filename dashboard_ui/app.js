@@ -83,6 +83,7 @@
   const columnsSearch = document.getElementById('columnsSearch');
   const mqttSettingsDialog = document.getElementById('mqttSettingsDialog');
   const mqttSettingsName = document.getElementById('mqttSettingsName');
+  const mqttSettingsColumnsSearch = document.getElementById('mqttSettingsColumnsSearch');
   const mqttSettingsColumnsList = document.getElementById('mqttSettingsColumnsList');
   const consoleSettingsDialog = document.getElementById('consoleSettingsDialog');
   const consoleSettingsName = document.getElementById('consoleSettingsName');
@@ -113,6 +114,7 @@
   let activeMoveWindowId = null;
   let mqttSettingsColumnsDraft = [];
   let mqttSettingsColumnsSelection = null;
+  let mqttSettingsColumnsFilter = '';
   let mqttHeaderDrag = null;
   let activeMqttTransferPanelId = null;
   let mqttTransferChartEntries = [];
@@ -2105,6 +2107,10 @@
           </select>
           <select class="heatmap-series-select" id="mqtttable-msgday-${id}" data-action="mqtttable-msgday" data-id="${id}" title="Minimum msg/d">
             <option value="0">all</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
             <option value="5">5</option>
             <option value="10">10</option>
             <option value="20">20</option>
@@ -3937,12 +3943,20 @@
   }
 
   const MQTT_OTHER_FIELDS_COL = '__other_fields__';
+  const MQTT_AUTOMATIC_COLUMNS = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol', MQTT_OTHER_FIELDS_COL];
+
+  function isValidMqttJsonColumnName(name) {
+    const s = String(name || '');
+    if (!s) return false;
+    if (s.includes(',') || s.includes(' ')) return false;
+    return true;
+  }
 
   function normalizeMqttMsgDayMin(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return 0;
     const v = Math.floor(n);
-    const allowed = new Set([0, 5, 10, 20, 50, 100, 200, 500, 1000]);
+    const allowed = new Set([0, 1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 500, 1000]);
     return allowed.has(v) ? v : 0;
   }
 
@@ -4152,7 +4166,7 @@
       appendConsoleLine(`mqtttable ${id} request done series=${mqttSeries.length} rows=${eventRows.length} elapsed=${Math.round(performance.now() - reqT0)}ms`);
       const bySeries = new Map(eventRows.map((row) => [row.series, row]));
       const prefix = commonTopicPrefixForDisplay(mqttSeries);
-      const detected = new Set(['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol', MQTT_OTHER_FIELDS_COL]);
+      const detected = new Set(MQTT_AUTOMATIC_COLUMNS);
       cfg.rows = mqttSeries.map((seriesName) => {
         const row = bySeries.get(seriesName) || { payload: null, jsonText: '' };
         const topic = (seriesName.startsWith(prefix) && prefix.length < seriesName.length)
@@ -4172,8 +4186,10 @@
         values['msg/d'] = String(msgDay);
         if (row.payload && typeof row.payload === 'object') {
           for (const [k, v] of Object.entries(row.payload)) {
-            detected.add(String(k));
-            values[String(k)] = mqttValueText({ [k]: v }, k);
+            const key = String(k);
+            if (!isValidMqttJsonColumnName(key)) continue;
+            detected.add(key);
+            values[key] = mqttValueText({ [key]: v }, key);
           }
         }
         return {
@@ -4185,7 +4201,9 @@
         };
       });
       cfg.totalTopics = mqttSeries.length;
-      cfg.detectedColumns = Array.from(detected).sort((a, b) => a.localeCompare(b));
+      cfg.detectedColumns = Array.from(detected)
+        .filter((k) => MQTT_AUTOMATIC_COLUMNS.includes(k) || isValidMqttJsonColumnName(k))
+        .sort((a, b) => a.localeCompare(b));
       if (!Array.isArray(cfg.columnOrder) || cfg.columnOrder.length === 0) {
         cfg.columnOrder = [...cfg.detectedColumns];
       } else {
@@ -4194,7 +4212,7 @@
         cfg.columnOrder = [...existing, ...missing];
       }
       if (!Array.isArray(cfg.visibleColumns) || cfg.visibleColumns.length === 0) {
-        cfg.visibleColumns = ['age', 'msg/h', 'msg/d', 'temperature_C', 'rssi', 'duration', 'protocol', MQTT_OTHER_FIELDS_COL].filter((k) => cfg.detectedColumns.includes(k));
+        cfg.visibleColumns = MQTT_AUTOMATIC_COLUMNS.filter((k) => cfg.detectedColumns.includes(k));
       } else {
         cfg.visibleColumns = cfg.visibleColumns.filter((k) => cfg.detectedColumns.includes(k));
       }
@@ -5453,13 +5471,37 @@
       mqttSettingsColumnsList.innerHTML = '<div class="series-item"><span>No columns detected yet. Refresh this panel first.</span></div>';
       return;
     }
-    mqttSettingsColumnsList.innerHTML = mqttSettingsColumnsDraft.map((key, idx) => `
+    const filterText = String(mqttSettingsColumnsFilter || '').trim().toLowerCase();
+    const ordered = mqttSettingsColumnsDraft.map((key, idx) => ({ key, idx }));
+    const autoSet = new Set(MQTT_AUTOMATIC_COLUMNS);
+    const autoCols = ordered.filter((it) => autoSet.has(it.key));
+    const jsonCols = ordered.filter((it) => !autoSet.has(it.key));
+    const applyFilter = (arr) => (
+      filterText
+        ? arr.filter((it) => String(it.key || '').toLowerCase().includes(filterText))
+        : arr
+    );
+    const autoVisible = applyFilter(autoCols);
+    const jsonVisible = applyFilter(jsonCols);
+    const rows = [];
+    rows.push(...autoVisible.map(({ key, idx }) => `
       <div class="series-item" data-reorder-index="${idx}" draggable="true">
         <span style="width:2ch;text-align:right;color:#90a0b3">${idx + 1}</span>
         <input type="checkbox" value="${htmlEscape(key)}" ${mqttSettingsColumnsSelection && mqttSettingsColumnsSelection.has(key) ? 'checked' : ''} />
         <span>${htmlEscape(key)}</span>
       </div>
-    `).join('');
+    `));
+    if (autoVisible.length > 0 && jsonVisible.length > 0) {
+      rows.push('<div class="series-item settings-separator"><span>--------------------</span></div>');
+    }
+    rows.push(...jsonVisible.map(({ key, idx }) => `
+      <div class="series-item" data-reorder-index="${idx}" draggable="true">
+        <span style="width:2ch;text-align:right;color:#90a0b3">${idx + 1}</span>
+        <input type="checkbox" value="${htmlEscape(key)}" ${mqttSettingsColumnsSelection && mqttSettingsColumnsSelection.has(key) ? 'checked' : ''} />
+        <span>${htmlEscape(key)}</span>
+      </div>
+    `));
+    mqttSettingsColumnsList.innerHTML = rows.join('');
   }
 
   function openMqttSettingsDialog(id) {
@@ -5469,7 +5511,9 @@
     if (mqttSettingsName instanceof HTMLInputElement) {
       mqttSettingsName.value = c.label || '';
     }
-    const cols = Array.isArray(c.detectedColumns) ? c.detectedColumns : [];
+    const cols = Array.isArray(c.detectedColumns)
+      ? c.detectedColumns.filter((k) => MQTT_AUTOMATIC_COLUMNS.includes(k) || isValidMqttJsonColumnName(k))
+      : [];
     const visible = Array.isArray(c.visibleColumns) ? c.visibleColumns : [];
     const order = Array.isArray(c.columnOrder) && c.columnOrder.length
       ? c.columnOrder.filter((k) => cols.includes(k))
@@ -5477,6 +5521,8 @@
     const missing = cols.filter((k) => !order.includes(k));
     mqttSettingsColumnsDraft = [...order, ...missing];
     mqttSettingsColumnsSelection = new Set(visible.filter((k) => cols.includes(k)));
+    mqttSettingsColumnsFilter = '';
+    if (mqttSettingsColumnsSearch instanceof HTMLInputElement) mqttSettingsColumnsSearch.value = '';
     renderMqttSettingsColumnsList();
     mqttSettingsDialog.showModal();
   }
@@ -6765,7 +6811,16 @@
     activeSettingsMqttId = null;
     mqttSettingsColumnsDraft = [];
     mqttSettingsColumnsSelection = null;
+    mqttSettingsColumnsFilter = '';
+    if (mqttSettingsColumnsSearch instanceof HTMLInputElement) mqttSettingsColumnsSearch.value = '';
   });
+
+  if (mqttSettingsColumnsSearch instanceof HTMLInputElement) {
+    mqttSettingsColumnsSearch.addEventListener('input', () => {
+      mqttSettingsColumnsFilter = String(mqttSettingsColumnsSearch.value || '');
+      renderMqttSettingsColumnsList();
+    });
+  }
 
   document.getElementById('consoleSettingsForm').addEventListener('submit', (e) => {
     e.preventDefault();
