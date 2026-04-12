@@ -245,8 +245,7 @@ def collect_to_tsdb(
                 if day >= newest_day:
                     continue
                 schedule_downsample(os.path.join(data_dir, _tsdb_filename_for_utc_day(day)))
-                app = appenders.pop(day)
-                app.close()
+                appenders.pop(day)
         if verbose and batch:
             print(f"flushed {len(batch)} events")
 
@@ -268,8 +267,7 @@ def collect_to_tsdb(
                 if day >= newest_day:
                     continue
                 schedule_downsample(os.path.join(data_dir, _mqttlog_tsdb_filename_for_utc_day(day)))
-                app = mqttlog_appenders.pop(day)
-                app.close()
+                mqttlog_appenders.pop(day)
         if verbose and mqttlog_batch:
             print(f"flushed {len(mqttlog_batch)} mqttlog events")
 

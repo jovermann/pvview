@@ -513,7 +513,6 @@ def test_tsdb_appender_appends_multiple_batches(tmp_path):
     assert db.get_series_values("a") == [(1000, 1.5), (1010, 2.5)]
     assert db.get_series_values("b") == [(1000, "x"), (1020, "y")]
 
-
 def test_cached_incremental_parse_handles_tail_truncation(tmp_path):
     path = tmp_path / "append_cached.tsdb"
     appender = TimeSeriesDbAppender(str(path))
